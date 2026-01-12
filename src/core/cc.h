@@ -71,6 +71,22 @@ typedef struct __Ctype {
     int offset;
 } Ctype;
 
+typedef struct __CtypeAttr {
+    int ctype_const         : 1;
+    int ctype_volatile      : 1;
+    int ctype_restrict      : 1;
+    int ctype_static        : 1;
+    int ctype_extern        : 1;
+    int ctype_unsigned      : 1;
+    int ctype_register      : 1; 
+    int ctype_sfr           : 1; /* NOTE: c51中使用这个关键词申明sfr, sfr16, sbit */ 
+    int ctype_typedef       : 1;
+
+    /* 函数限定 */
+    int ctype_inline        : 1;
+    int ctype_noreturn      : 1;
+} CtypeAttr;
+
 typedef struct __Ast {
     int type;
     Ctype *ctype;

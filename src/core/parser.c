@@ -996,15 +996,16 @@ static Ast *read_compound_stmt(void)
     localenv = make_dict(localenv);
     List *list = make_list();
     while (1) {
+        Token tok = read_token();
+        if (is_punct(tok, '}'))
+            break;
+        unget_token(tok);
+
         Ast *stmt = read_decl_or_stmt();
         if (stmt)
             list_push(list, stmt);
         if (!stmt)
             break;
-        Token tok = read_token();
-        if (is_punct(tok, '}'))
-            break;
-        unget_token(tok);
     }
     localenv = dict_parent(localenv);
     return ast_compound_stmt(list);
@@ -1019,13 +1020,19 @@ static List *read_params(void)
     unget_token(tok);
     while (1) {
         Ctype *ctype = read_decl_spec();
-        Token pname = read_token();
-        if (get_ttype(pname) != TTYPE_IDENT)
-            error("Identifier expected, but got %s", token_to_string(pname));
+        tok = read_token();
+        if (get_ttype(tok) != TTYPE_IDENT) {
+            if(ctype->type == CTYPE_VOID && is_punct(tok, ')') && params->len == 0) {
+                return params;
+            } else  {
+                error("Identifier expected, but got %s", token_to_string(tok));
+            }
+        }
+            
         ctype = read_array_dimensions(ctype);
         if (ctype->type == CTYPE_ARRAY)
             ctype = make_ptr_type(ctype->ptr);
-        list_push(params, ast_lvar(ctype, get_ident(pname)));
+        list_push(params, ast_lvar(ctype, get_ident(tok)));
         Token tok = read_token();
         if (is_punct(tok, ')'))
             return params;
