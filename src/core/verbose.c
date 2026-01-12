@@ -29,9 +29,13 @@ char *ctype_to_string(Ctype *ctype)
     }
     case CTYPE_STRUCT: {
         String s = make_string();
-        string_appendf(&s, "(struct");
-        for (Iter i = list_iter(dict_values(ctype->fields)); !iter_end(i);)
-            string_appendf(&s, " (%s)", ctype_to_string(iter_next(&i)));
+        string_appendf(&s, ctype->is_union ? "(union" : "(struct");
+        for (Iter it = list_iter(ctype->fields->list); !iter_end(it);) {
+            DictEntry *e = iter_next(&it);
+            char *field_name = e->key;
+            void *field_type = e->val;
+            string_appendf(&s, " (%s %s)", ctype_to_string(field_type), field_name);
+        }
         string_appendf(&s, ")");
         return get_cstring(s);
     }
@@ -77,7 +81,7 @@ static void ast_to_string_int(String *buf, Ast *ast)
             break;
         case CTYPE_FLOAT:
         case CTYPE_DOUBLE:
-            string_appendf(buf, "%infile", ast->fval);
+            string_appendf(buf, "%f", ast->fval);
             break;
         default:
             error("internal error");
@@ -163,6 +167,9 @@ static void ast_to_string_int(String *buf, Ast *ast)
         ast_to_string_int(buf, ast->struc);
         string_appendf(buf, ".");
         string_appendf(buf, ast->field);
+        break;
+    case AST_STRUCT_DEF:
+        string_appendf(buf, "(def %s)", ctype_to_string(ast->ctype));
         break;
     case AST_ADDR:
         uop_to_string(buf, "addr", ast);

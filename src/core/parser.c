@@ -230,6 +230,13 @@ static Ast *ast_struct_ref(Ctype *ctype, Ast *struc, char *name)
     return r;
 }
 
+static Ast *ast_struct_def(Ctype *ctype) {
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_STRUCT_DEF;
+    r->ctype = ctype;
+    return r;
+};
+
 static Ctype *make_ptr_type(Ctype *ctype)
 {
     Ctype *r = malloc(sizeof(Ctype));
@@ -260,12 +267,13 @@ static Ctype *make_struct_field_type(Ctype *ctype, int offset)
     return r;
 }
 
-static Ctype *make_struct_type(Dict *fields, int size)
+static Ctype *make_struct_type(Dict *fields, int size, int is_union)
 {
     Ctype *r = malloc(sizeof(Ctype));
     r->type = CTYPE_STRUCT;
     r->fields = fields;
     r->size = size;
+    r->is_union = is_union;
     list_push(ctypes, r);
     return r;
 }
@@ -689,6 +697,7 @@ static Ast *read_expr_int(int prec)
 
 static Ast *read_expr(void)
 {
+    // FIXME: 这里不一定是int, 仅用于学习用
     return read_expr_int(MAX_OP_PRIO);
 }
 
@@ -778,7 +787,7 @@ static Ctype *read_union_def(void)
         Ctype *fieldtype = iter_next(&i);
         maxsize = (maxsize < fieldtype->size) ? fieldtype->size : maxsize;
     }
-    Ctype *r = make_struct_type(fields, maxsize);
+    Ctype *r = make_struct_type(fields, maxsize, 1);
     if (tag)
         dict_put(union_defs, tag, r);
     return r;
@@ -800,7 +809,7 @@ static Ctype *read_struct_def(void)
         fieldtype->offset = offset;
         offset += fieldtype->size;
     }
-    Ctype *r = make_struct_type(fields, offset);
+    Ctype *r = make_struct_type(fields, offset, 0);
     if (tag)
         dict_put(struct_defs, tag, r);
     return r;
@@ -843,6 +852,7 @@ static Ast *read_decl_init_val(Ast *var)
     }
     Ast *init = read_expr();
     expect(';');
+    // FIXME: 这里应该跟decl的ctype一一对应, 这里直接都使用int类型
     if (var->type == AST_GVAR)
         init = ast_inttype(ctype_int, eval_intexpr(init));
 
@@ -1063,16 +1073,20 @@ static Ast *read_decl_or_func_def(void)
     if (get_ttype(tok) == TTYPE_NULL)
         return NULL;
     Ctype *ctype = read_decl_spec();
-    Token name = read_token();
+    Token tok1 = read_token();
     char *ident;
-    if (get_ttype(name) != TTYPE_IDENT)
-        error("Identifier expected, but got %s", token_to_string(name));
-    ident = get_ident(name);
+    if (get_ttype(tok1) != TTYPE_IDENT) {
+        if(is_punct(tok1, ';') && ctype->type == CTYPE_STRUCT) {
+            return ast_struct_def(ctype);
+        }
+        error("Identifier expected, but got %s", token_to_string(tok1));
+    }
+    ident = get_ident(tok1);
     tok = peek_token();
     if (is_punct(tok, '('))
         return read_func_def(ctype, ident);
     if (ctype == ctype_void)
-        error("Storage size of '%s' is not known", token_to_string(name));
+        error("Storage size of '%s' is not known", token_to_string(tok1));
     ctype = read_array_dimensions(ctype);
     if (is_punct(tok, '=') || ctype->type == CTYPE_ARRAY) {
         Ast *var = ast_gvar(ctype, ident, false);

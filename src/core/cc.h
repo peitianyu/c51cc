@@ -39,6 +39,8 @@ enum {
     AST_RETURN,
     AST_COMPOUND_STMT,
     AST_STRUCT_REF,
+    AST_STRUCT_DEF,
+    AST_TYPE_DEF, 
     PUNCT_EQ,
     PUNCT_INC,
     PUNCT_DEC,
@@ -69,6 +71,7 @@ typedef struct __Ctype {
     /* struct */
     Dict *fields;
     int offset;
+    int is_union;
 } Ctype;
 
 typedef struct __CtypeAttr {
