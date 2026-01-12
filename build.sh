@@ -1,0 +1,1 @@
+gcc ./src/*.c ./src/core/*.c -o a.out -g

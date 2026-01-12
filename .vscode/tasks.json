@@ -1,0 +1,16 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build",          // 必须和 launch.json 里 preLaunchTask 的值一致
+            "type": "shell",
+            "command": "${workspaceFolder}/build.sh",        // 如果你的 Makefile 叫别的名字，可写 make -f xxx
+            "args": [],               // 需要传参数就加，比如 ["-j8"]
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}
