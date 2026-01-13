@@ -353,6 +353,29 @@ static int eval_intexpr(Ast *ast)
     }
 }
 
+static float eval_floatexpr(Ast *ast) 
+{
+    switch (ast->type) {
+    case AST_LITERAL:
+        if (is_flotype(ast->ctype))
+            return ast->fval;
+        else if (is_inttype(ast->ctype))
+            return ast->ival;
+        error("Float expression expected, but got %s", ast_to_string(ast));
+    case '+':
+        return eval_floatexpr(ast->left) + eval_floatexpr(ast->right);
+    case '-':
+        return eval_floatexpr(ast->left) - eval_floatexpr(ast->right);
+    case '*':
+        return eval_floatexpr(ast->left) * eval_floatexpr(ast->right);
+    case '/':
+        return eval_floatexpr(ast->left) / eval_floatexpr(ast->right);
+    default:
+        error("Float expression expected, but got %s", ast_to_string(ast));
+        return 0; /* non-reachable */
+    }
+}
+
 static int priority(const Token tok)
 {
     switch (get_punct(tok)) {
@@ -502,67 +525,60 @@ static Ast *read_prim(void)
         a = tmp;           \
     }
 
-static Ctype *result_type_int(jmp_buf *jmpbuf, char op, Ctype *a, Ctype *b)
+
+static Ctype *arith_bin_type[CTYPE_DOUBLE+1][CTYPE_DOUBLE+1];
+static void init_arith_table(void)
 {
-    if (a->type > b->type)
-        swap(a, b);
-    if (b->type == CTYPE_PTR) {
-        if (op == '=')
-            return a;
-        if (op != '+' && op != '-')
-            goto err;
-        if (!is_inttype(a))
-            goto err;
-        return b;
+    #define T(a,b,res) arith_bin_type[a][b] = arith_bin_type[b][a] = (res)
+    T(CTYPE_CHAR,   CTYPE_CHAR,   ctype_char);
+    T(CTYPE_CHAR,   CTYPE_INT,    ctype_int);
+    T(CTYPE_CHAR,   CTYPE_LONG,   ctype_long);
+    T(CTYPE_CHAR,   CTYPE_FLOAT,  ctype_float);
+    T(CTYPE_CHAR,   CTYPE_DOUBLE, ctype_double);
+
+    T(CTYPE_INT,    CTYPE_INT,    ctype_int);
+    T(CTYPE_INT,    CTYPE_LONG,   ctype_long);
+    T(CTYPE_INT,    CTYPE_FLOAT,  ctype_float);
+    T(CTYPE_INT,    CTYPE_DOUBLE, ctype_double);
+
+    T(CTYPE_LONG,   CTYPE_LONG,   ctype_long);
+    T(CTYPE_LONG,   CTYPE_FLOAT,  ctype_float);
+    T(CTYPE_LONG,   CTYPE_DOUBLE, ctype_double);
+
+    T(CTYPE_FLOAT,  CTYPE_FLOAT,  ctype_float);
+    T(CTYPE_FLOAT,  CTYPE_DOUBLE, ctype_double);
+
+    T(CTYPE_DOUBLE, CTYPE_DOUBLE, ctype_double);
+    #undef T
+}
+
+static Ctype *result_type_int(jmp_buf *jmp, char op, Ctype *a, Ctype *b)
+{
+    static int arith_table_inited = 0;
+    if (!arith_table_inited) {
+        init_arith_table();
+        arith_table_inited = 1;
     }
-    switch (a->type) {
-    case CTYPE_VOID:
-        goto err;
-    case CTYPE_CHAR:
-    case CTYPE_INT:
-        switch (b->type) {
-        case CTYPE_CHAR:
-        case CTYPE_INT:
-            return ctype_int;
-        case CTYPE_LONG:
-            return ctype_long;
-        case CTYPE_FLOAT:
-        case CTYPE_DOUBLE:
-            return ctype_double;
-        case CTYPE_ARRAY:
-        case CTYPE_PTR:
-            return b;
-        }
-        error("internal error");
-    case CTYPE_LONG:
-        switch (b->type) {
-        case CTYPE_LONG:
-            return ctype_long;
-        case CTYPE_FLOAT:
-        case CTYPE_DOUBLE:
-            return ctype_double;
-        case CTYPE_ARRAY:
-        case CTYPE_PTR:
-            return b;
-        }
-        error("internal error");
-    case CTYPE_FLOAT:
-        if (b->type == CTYPE_FLOAT || b->type == CTYPE_DOUBLE)
-            return ctype_double;
-        goto err;
-    case CTYPE_DOUBLE:
-        if (b->type == CTYPE_DOUBLE)
-            return ctype_double;
-        goto err;
-    case CTYPE_ARRAY:
-        if (b->type != CTYPE_ARRAY)
-            goto err;
-        return result_type_int(jmpbuf, op, a->ptr, b->ptr);
-    default:
-        error("internal error: %s %s", ctype_to_string(a), ctype_to_string(b));
+
+    /* 1. 指针/数组运算 ---------------------------------------------------- */
+    if (a->type == CTYPE_PTR || b->type == CTYPE_PTR) {
+        if (op == '=') return a->type == CTYPE_PTR ? a : b;          // 赋值取左值指针
+        if (op != '+' && op != '-') goto err;
+        return a->type == CTYPE_PTR ? a : b;                         // +/- 结果取指针侧
     }
+    if (a->type == CTYPE_ARRAY || b->type == CTYPE_ARRAY) goto err;
+
+    /* 2. 纯算术转换 ------------------------------------------------------- */
+    int ai = a->type, bi = b->type;
+    if ((unsigned)ai >= CTYPE_DOUBLE+1 || (unsigned)bi >= CTYPE_DOUBLE+1) goto err;
+
+    Ctype *t = arith_bin_type[ai][bi];
+
+    if (!t) goto err;
+    return t;
+
 err:
-    longjmp(*jmpbuf, 1);
+    longjmp(*jmp, 1);
     return ctype_void;
 }
 
@@ -702,9 +718,13 @@ static Ast *read_expr_int(int prec)
     }
 }
 
-static Ast *read_expr(void)
+static Ast *read_expr_float(int prec)
 {
-    // FIXME: 这里不一定是int, 仅用于学习用
+    return NULL;
+} 
+
+static Ast *read_expr()
+{
     return read_expr_int(MAX_OP_PRIO);
 }
 
@@ -739,8 +759,7 @@ static Ast *read_decl_array_init_int(Ctype *ctype)
     if (ctype->ptr->type == CTYPE_CHAR && get_ttype(tok) == TTYPE_STRING)
         return ast_string(get_strtok(tok));
     if (!is_punct(tok, '{'))
-        error("Expected an initializer list for %s, but got %s",
-              ctype_to_string(ctype), token_to_string(tok));
+        error("Expected an initializer list for %s, but got %s", ctype_to_string(ctype), token_to_string(tok));
     List *initlist = make_list();
     while (1) {
         Token tok = read_token();
@@ -941,7 +960,6 @@ static Ast *read_decl_init_val(Ast *var)
         expect(';');
         return ast_decl(var, init);
     } else if(var->ctype->type == CTYPE_STRUCT) {
-        // TODO: 完成顺序初始化与指定初始化器初始化
         Ast *init = read_decl_struct_init(var->ctype);
         expect(';');
         return ast_decl(var, init);
@@ -949,12 +967,14 @@ static Ast *read_decl_init_val(Ast *var)
 
     Ast *init = read_expr();
     expect(';');
-    // FIXME: 这里应该跟decl的ctype一一对应, 直接都使用int类型并不合适
+    // NOTE: 基础的常量折叠
     if (var->type == AST_GVAR)
-        init = ast_inttype(ctype_int, eval_intexpr(init));
+        init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) 
+                                          : ast_double(eval_floatexpr(init));
 
-    if (init->type == AST_LITERAL && is_inttype(init->ctype) && is_inttype(var->ctype)) 
-        init->ctype = var->ctype;
+    // // FIXME: 这部分是否存在问题, 这里应该是跟随输出var的类型而不是计算类型
+    // if (init->type == AST_LITERAL && is_inttype(init->ctype) && is_inttype(var->ctype)) 
+    //     init->ctype = var->ctype;
 
     return ast_decl(var, init);
 }
