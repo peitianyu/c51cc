@@ -29,7 +29,7 @@ char *ctype_to_string(Ctype *ctype)
     }
     case CTYPE_STRUCT: {
         String s = make_string();
-        string_appendf(&s, ctype->is_union ? "(union" : "(struct");
+        string_appendf(&s, (ctype->offset == ctype->size) ? "(union" : "(struct");
         for (Iter it = list_iter(ctype->fields->list); !iter_end(it);) {
             DictEntry *e = iter_next(&it);
             char *field_name = e->key;
@@ -126,6 +126,15 @@ static void ast_to_string_int(String *buf, Ast *ast)
             string_appendf(buf, ")");
         break;
     case AST_ARRAY_INIT:
+        string_appendf(buf, "{");
+        for (Iter i = list_iter(ast->arrayinit); !iter_end(i);) {
+            ast_to_string_int(buf, iter_next(&i));
+            if (!iter_end(i))
+                string_appendf(buf, ",");
+        }
+        string_appendf(buf, "}");
+        break;
+    case AST_STRUCT_INIT:
         string_appendf(buf, "{");
         for (Iter i = list_iter(ast->arrayinit); !iter_end(i);) {
             ast_to_string_int(buf, iter_next(&i));

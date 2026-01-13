@@ -1,1 +1,1 @@
-gcc ./src/*.c ./src/core/*.c -o a.out -g
+gcc ./src/*.c ./src/core/*.c -DMINITEST_IMPLEMENTATION -o a.out -g 

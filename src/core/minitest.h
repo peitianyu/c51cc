@@ -6,12 +6,11 @@
 
 #ifdef MINITEST_IMPLEMENTATION
 
+#ifdef __TINYC__
 __asm__(".global __start_testsec\n"
         "__start_testsec = .\n"
         ".global __stop_testsec\n"
         "__stop_testsec = .\n");
-
-#ifdef __TINYC__
 #undef __attribute__
 #endif
 

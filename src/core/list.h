@@ -65,6 +65,30 @@ static inline void *list_pop(List *list)
     return r;
 }
 
+static inline void list_set(List *list, int idx, void *elem)
+{
+    if (idx < 0 || idx >= list->len)
+        abort();          /* 或者你自己想用的错误处理 */
+
+    ListNode *n = list->head;
+    for (int i = 0; i < idx; ++i)
+        n = n->next;
+
+    n->elem = elem;
+}
+
+static inline void *list_get(List *list, int idx)
+{
+    if (idx < 0 || idx >= list->len)
+        return NULL;
+
+    ListNode *n = list->head;
+    for (int i = 0; i < idx; ++i)
+        n = n->next;
+
+    return n->elem;
+}
+
 static void list_unshift(List *list, void *elem)
 {
     ListNode *node = make_node(elem);

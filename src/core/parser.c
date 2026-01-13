@@ -20,12 +20,12 @@ static Dict *struct_defs = &EMPTY_DICT;
 static Dict *union_defs = &EMPTY_DICT;
 static List *localvars = NULL;
 
-static Ctype *ctype_void = &(Ctype){CTYPE_VOID, 0, NULL};
-static Ctype *ctype_int = &(Ctype){CTYPE_INT, 2, NULL};
-static Ctype *ctype_long = &(Ctype){CTYPE_LONG, 4, NULL};
-static Ctype *ctype_char = &(Ctype){CTYPE_CHAR, 1, NULL};
-static Ctype *ctype_float = &(Ctype){CTYPE_FLOAT, 4, NULL};
-static Ctype *ctype_double = &(Ctype){CTYPE_DOUBLE, 8, NULL};
+static Ctype *ctype_void = &(Ctype){0, CTYPE_VOID, 0, NULL};
+static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
+static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
+static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
+static Ctype *ctype_float = &(Ctype){0, CTYPE_FLOAT, 4, NULL};
+static Ctype *ctype_double = &(Ctype){0, CTYPE_DOUBLE, 8, NULL};
 
 static int labelseq = 0;
 
@@ -168,6 +168,14 @@ static Ast *ast_array_init(List *arrayinit)
     return r;
 }
 
+static Ast *ast_struct_init(Ctype *ctype, List *structinit) {
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_STRUCT_INIT;
+    r->ctype = ctype;
+    r->structinit = structinit;
+    return r;
+}
+
 static Ast *ast_if(Ast *cond, Ast *then, Ast *els)
 {
     Ast *r = malloc(sizeof(Ast));
@@ -242,7 +250,7 @@ static Ctype *make_ptr_type(Ctype *ctype)
     Ctype *r = malloc(sizeof(Ctype));
     r->type = CTYPE_PTR;
     r->ptr = ctype;
-    r->size = 2; // c51中指针可以覆盖
+    r->size = 2; 
     list_push(ctypes, r);
     return r;
 }
@@ -267,13 +275,12 @@ static Ctype *make_struct_field_type(Ctype *ctype, int offset)
     return r;
 }
 
-static Ctype *make_struct_type(Dict *fields, int size, int is_union)
+static Ctype *make_struct_type(Dict *fields, int size)
 {
     Ctype *r = malloc(sizeof(Ctype));
     r->type = CTYPE_STRUCT;
     r->fields = fields;
     r->size = size;
-    r->is_union = is_union;
     list_push(ctypes, r);
     return r;
 }
@@ -675,7 +682,7 @@ static Ast *read_expr_int(int prec)
             ast = read_subscript_expr(ast);
             continue;
         }
-        // this is BUG!! ++ should be in read_unary_expr() , I think.
+        // FIXME: this is BUG!! ++ should be in read_unary_expr() , I think.
         if (is_punct(tok, PUNCT_INC) || is_punct(tok, PUNCT_DEC)) {
             ensure_lvalue(ast);
             ast = ast_uop(get_punct(tok), ast->ctype, ast);
@@ -750,6 +757,90 @@ static Ast *read_decl_array_init_int(Ctype *ctype)
     return ast_array_init(initlist);
 }
 
+static List *init_empty_struct_init(Ctype *ctype) {
+    List *initlist = make_list();
+    for (Iter it = list_iter(ctype->fields->list); !iter_end(it);) {
+        DictEntry *e = iter_next(&it);
+        Ctype *type = dict_get(ctype->fields, e->key);
+        switch(type->type) {
+            case CTYPE_CHAR ... CTYPE_LONG:
+                list_push(initlist, ast_inttype(type, 0));
+                break;
+            case CTYPE_FLOAT ... CTYPE_DOUBLE:
+                list_push(initlist, ast_double(0.0));
+                break;
+            case CTYPE_ARRAY:
+                list_push(initlist, ast_array_init(make_list()));
+                break;
+            case CTYPE_PTR:
+                list_push(initlist, make_ptr_type(type));
+                break;
+            case CTYPE_STRUCT:
+                list_push(initlist, ast_struct_init(ctype, make_list()));
+                break;
+            default:
+                error("internal error: unknown field type %d", type->type);
+        };
+    }
+    return initlist;
+}
+
+static int struct_field_index(Ctype *ctype, const char *name)
+{
+    int idx = 0;
+    for (Iter it = list_iter(ctype->fields->list); !iter_end(it); idx++) {
+        DictEntry *e = iter_next(&it);
+        if (!strcmp(e->key, name))
+            return idx;
+    }
+    return -1;
+}
+
+static Ast *read_decl_struct_init(Ctype *ctype) 
+{
+    Token tok = read_token();
+    if (!is_punct(tok, '{'))
+        error("Expected an initializer struct for %s, but got %s",
+              ctype_to_string(ctype), token_to_string(tok));
+
+    List *initlist = init_empty_struct_init(ctype);
+    Iter it = list_iter(initlist);
+    while (1) {
+        Token tok = read_token();
+        if (is_punct(tok, '}')) break;
+        unget_token(tok);
+
+        if(get_ttype(tok) == TTYPE_IDENT || (get_ttype(tok) == TTYPE_PUNCT && !is_punct(tok, '.'))) 
+            error("Expected value for struct: %s, but got: %s", 
+                ctype_to_string(ctype), token_to_string(tok)); 
+
+        tok = read_token();
+        if(is_punct(tok, '.')) {
+            tok = read_token();
+            if(get_ttype(tok) != TTYPE_IDENT) 
+                error("Expected inentifier for struct: %s, but got: %s", ctype_to_string(ctype), token_to_string(tok)); 
+            int idx = struct_field_index(ctype, get_ident(tok));
+            expect('=');
+            Ast *var = read_expr();
+            list_set(initlist, idx, var);
+            tok = read_token();
+        } else {
+            unget_token(tok);
+            // FIXME: 这部分应该判断与ctype是否匹配, 并更新为ctype类型
+            // TODO: 应该添加更多检查
+            Ast *v = iter_next(&it);
+            v = read_expr();
+            tok = read_token();
+            if(iter_end(it)) 
+                error("Expected value for struct: %s, out range", ctype_to_string(ctype)); 
+        }
+
+        if (!is_punct(tok, ',')) unget_token(tok);
+    }
+
+    return ast_struct_init(ctype, initlist);
+}
+
 static char *read_struct_union_tag(void)
 {
     Token tok = read_token();
@@ -787,7 +878,7 @@ static Ctype *read_union_def(void)
         Ctype *fieldtype = iter_next(&i);
         maxsize = (maxsize < fieldtype->size) ? fieldtype->size : maxsize;
     }
-    Ctype *r = make_struct_type(fields, maxsize, 1);
+    Ctype *r = make_struct_type(fields, maxsize);
     if (tag)
         dict_put(union_defs, tag, r);
     return r;
@@ -809,7 +900,7 @@ static Ctype *read_struct_def(void)
         fieldtype->offset = offset;
         offset += fieldtype->size;
     }
-    Ctype *r = make_struct_type(fields, offset, 0);
+    Ctype *r = make_struct_type(fields, offset);
     if (tag)
         dict_put(struct_defs, tag, r);
     return r;
@@ -849,10 +940,16 @@ static Ast *read_decl_init_val(Ast *var)
         }
         expect(';');
         return ast_decl(var, init);
+    } else if(var->ctype->type == CTYPE_STRUCT) {
+        // TODO: 完成顺序初始化与指定初始化器初始化
+        Ast *init = read_decl_struct_init(var->ctype);
+        expect(';');
+        return ast_decl(var, init);
     }
+
     Ast *init = read_expr();
     expect(';');
-    // FIXME: 这里应该跟decl的ctype一一对应, 这里直接都使用int类型
+    // FIXME: 这里应该跟decl的ctype一一对应, 直接都使用int类型并不合适
     if (var->type == AST_GVAR)
         init = ast_inttype(ctype_int, eval_intexpr(init));
 

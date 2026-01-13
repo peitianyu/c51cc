@@ -40,6 +40,7 @@ enum {
     AST_COMPOUND_STMT,
     AST_STRUCT_REF,
     AST_STRUCT_DEF,
+    AST_STRUCT_INIT,
     AST_TYPE_DEF, 
     PUNCT_EQ,
     PUNCT_INC,
@@ -63,16 +64,6 @@ enum {
     CTYPE_STRUCT,
 };
 
-typedef struct __Ctype {
-    int type;
-    int size;
-    struct __Ctype *ptr; /* pointer or array */
-    int len;             /* array length */
-    /* struct */
-    Dict *fields;
-    int offset;
-    int is_union;
-} Ctype;
 
 typedef struct __CtypeAttr {
     int ctype_const         : 1;
@@ -81,14 +72,29 @@ typedef struct __CtypeAttr {
     int ctype_static        : 1;
     int ctype_extern        : 1;
     int ctype_unsigned      : 1;
-    int ctype_register      : 1; 
-    int ctype_sfr           : 1; /* NOTE: c51中使用这个关键词申明sfr, sfr16, sbit */ 
-    int ctype_typedef       : 1;
+    int ctype_register      : 1; /* NOTE: c51中使用这个关键词申明sfr, sfr16, sbit */ 
+    int ctype_date          : 1;
+    int ctype_bdate         : 1;
+    int ctype_idate         : 1;
+    int ctype_pdate         : 1;
+    int ctype_xdate         : 1;
+    int ctype_typedef       : 1; 
 
     /* 函数限定 */
     int ctype_inline        : 1;
     int ctype_noreturn      : 1;
 } CtypeAttr;
+
+typedef struct __Ctype {
+    int attr;
+    int type;
+    int size;
+    struct __Ctype *ptr; /* pointer or array */
+    int len;             /* array length */
+    /* struct */
+    Dict *fields;
+    int offset;
+} Ctype;
 
 typedef struct __Ast {
     int type;
@@ -153,6 +159,9 @@ typedef struct __Ast {
 
         /* Array initializer */
         List *arrayinit;
+
+        /* Struct initializer */
+        List *structinit; 
 
         /* if statement or ternary operator */
         struct {
