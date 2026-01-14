@@ -71,18 +71,45 @@ static int getc_nonspace(void)
     return EOF;
 }
 
-static Token read_number(char c)
+
+static Token read_number(char first)
 {
     String s = make_string();
-    string_append(&s, c);
-    while (1) {
-        int c = getc_with_pos();
-        if (!isdigit(c) && !isalpha(c) && c != '.') {
-            ungetc_with_pos(c);
-            return make_number(get_cstring(s));
-        }
-        string_append(&s, c);
+    long ival = 0, fval = 0;
+    int  base = 10, dot = 0, fscale = 0;
+
+    /* 0x... / 0b... 前缀 */
+    if (first == '0') {
+        int x = getc_with_pos();
+        if (x == 'x' || x == 'X')        base = 16;
+        else if (x == 'b' || x == 'B')   base = 2;
+        else ungetc_with_pos(x);
     }
+
+    /* 主循环：读整数/小数/十六进制位 */
+    for (int c = first;; c = getc_with_pos()) {
+        if (base == 16 && isxdigit(c))
+            ival = ival * 16 + (isdigit(c) ? c - '0' : (c & 0xDF) - 'A' + 10);
+        else if ((base == 2 && (c == '0' || c == '1')) ||
+                 (base == 10 && isdigit(c))) {
+            if (!dot) ival = ival * base + (c - '0');
+            else      fval = fval * 10 + (c - '0'), ++fscale;
+        }
+        else if (base == 10 && c == '.' && !dot) { dot = 1; }
+        else { ungetc_with_pos(c); break; }
+    }
+
+    /* 后缀 f/F/l/L 仅影响输出格式 */
+    int suf = getc_with_pos();
+    if (suf != 'f' && suf != 'F' && suf != 'l' && suf != 'L')
+        ungetc_with_pos(suf);
+
+    if (dot || suf == 'f' || suf == 'F')
+        string_appendf(&s, "%ld.%0*ld", ival, fscale, fval);
+    else
+        string_appendf(&s, "%ld", ival);
+
+    return make_number(get_cstring(s));
 }
 
 static Token read_char(void)
