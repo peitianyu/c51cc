@@ -22,6 +22,11 @@ typedef struct {
     uintptr_t priv;
 } Token;
 
+typedef struct {
+    const char *file;
+    int line, col, len;
+} TokenInfo;
+
 enum {
     AST_LITERAL = 256,
     AST_STRING,
@@ -198,6 +203,8 @@ extern bool is_punct(const Token tok, int c);
 extern void unget_token(const Token tok);
 extern Token peek_token(void);
 extern Token read_token(void);
+extern TokenInfo get_current_token_info(void);
+extern void set_current_filename(const char *filename);
 
 #define get_priv(tok, type)                                       \
     ({                                                            \

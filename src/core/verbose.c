@@ -286,6 +286,7 @@ TEST(test, verbose) {
     printf("file path: ");
     if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
+    set_current_filename(infile);
         
     List *toplevels = read_toplevels();
     for (Iter i = list_iter(toplevels); !iter_end(i);) {

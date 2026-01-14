@@ -69,7 +69,12 @@ static inline void string_appendf(String *s, char *fmt, ...)
 
 static inline void errorf(char *file, int line, char *fmt, ...)
 {
+    #if C51CC_DEBUG
     fprintf(stderr, "%s:%d: ", file, line);
+    #else 
+    TokenInfo info = get_current_token_info();
+    fprintf(stderr, "%s:%d: ", info.file, info.line);
+    #endif 
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);

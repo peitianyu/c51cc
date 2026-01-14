@@ -1,6 +1,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "cc.h"
 
 #define make_null(x) make_token(TTYPE_NULL, (uintptr_t) 0)
@@ -13,6 +14,16 @@
 static bool ungotten = false;
 static Token ungotten_buf = {0};
 
+// 位置跟踪变量
+static int curr_line = 1;
+static int curr_col = 1;
+static const char *curr_filename = "<stdin>";
+static TokenInfo curr_token_info = {0};
+
+// 用于跟踪上一行的长度，以便正确回退
+static int last_line_length = 0;
+static int prev_col = 1;
+
 static Token make_token(enum TokenType type, uintptr_t data)
 {
     return (Token){
@@ -21,11 +32,39 @@ static Token make_token(enum TokenType type, uintptr_t data)
     };
 }
 
+static void update_pos(int c) {
+    if (c == '\n') {
+        curr_line++;
+        last_line_length = curr_col;
+        curr_col = 1;
+    } else {
+        curr_col++;
+    }
+}
+
+static int getc_with_pos(void) {
+    int c = getc(stdin);
+    if (c != EOF) {
+        update_pos(c);
+    }
+    return c;
+}
+
+static int ungetc_with_pos(int c) {
+    if (c == '\n') {
+        curr_line--;
+        curr_col = last_line_length;
+    } else if (c != EOF) {
+        curr_col--;
+    }
+    return ungetc(c, stdin);
+}
+
 static int getc_nonspace(void)
 {
     int c;
-    while ((c = getc(stdin)) != EOF) {
-        if (isspace(c) || c == '\n' || c == '\r')
+    while ((c = getc_with_pos()) != EOF) {
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t')
             continue;
         return c;
     }
@@ -37,9 +76,9 @@ static Token read_number(char c)
     String s = make_string();
     string_append(&s, c);
     while (1) {
-        int c = getc(stdin);
+        int c = getc_with_pos();
         if (!isdigit(c) && !isalpha(c) && c != '.') {
-            ungetc(c, stdin);
+            ungetc_with_pos(c);
             return make_number(get_cstring(s));
         }
         string_append(&s, c);
@@ -48,15 +87,15 @@ static Token read_number(char c)
 
 static Token read_char(void)
 {
-    char c = getc(stdin);
+    char c = getc_with_pos();
     if (c == EOF)
         goto err;
     if (c == '\\') {
-        c = getc(stdin);
+        c = getc_with_pos();
         if (c == EOF)
             goto err;
     }
-    char c2 = getc(stdin);
+    char c2 = getc_with_pos();
     if (c2 == EOF)
         goto err;
     if (c2 != '\'')
@@ -71,13 +110,13 @@ static Token read_string(void)
 {
     String s = make_string();
     while (1) {
-        int c = getc(stdin);
+        int c = getc_with_pos();
         if (c == EOF)
             error("Unterminated string");
         if (c == '"')
             break;
         if (c == '\\') {
-            c = getc(stdin);
+            c = getc_with_pos();
             switch (c) {
             case EOF:
                 error("Unterminated \\");
@@ -100,11 +139,11 @@ static Token read_ident(char c)
     String s = make_string();
     string_append(&s, c);
     while (1) {
-        int c2 = getc(stdin);
+        int c2 = getc_with_pos();
         if (isalnum(c2) || c2 == '_') {
             string_append(&s, c2);
         } else {
-            ungetc(c2, stdin);
+            ungetc_with_pos(c2);
             return make_ident(s);
         }
     }
@@ -113,7 +152,7 @@ static Token read_ident(char c)
 static void skip_line_comment(void)
 {
     while (1) {
-        int c = getc(stdin);
+        int c = getc_with_pos();
         if (c == '\n' || c == EOF)
             return;
     }
@@ -123,37 +162,72 @@ static void skip_block_comment(void)
 {
     enum { in_comment, asterisk_read } state = in_comment;
     while (1) {
-        int c = getc(stdin);
+        int c = getc_with_pos();
+        if (c == EOF) {
+            error("Unterminated block comment");
+            return;
+        }
+        
         if (state == in_comment) {
             if (c == '*')
                 state = asterisk_read;
-        } else if (c == '/') {
-            return;
+        } else if (state == asterisk_read) {
+            if (c == '/') {
+                return;
+            } else if (c == '*') {
+                continue;
+            } else {
+                state = in_comment;
+            }
         }
     }
 }
 
 static Token read_rep(int expect, int t1, int t2)
 {
-    int c = getc(stdin);
+    int c = getc_with_pos();
     if (c == expect)
         return make_punct(t2);
-    ungetc(c, stdin);
+    ungetc_with_pos(c);
     return make_punct(t1);
+}
+
+static void update_token_info(int start_line, int start_col, Token *tok) {
+    int token_len = curr_col - start_col;
+    if (token_len < 0) {
+        token_len = 1;
+    } else if (token_len == 0) {
+        token_len = 1;
+    }
+    
+    curr_token_info = (TokenInfo){
+        .file = curr_filename,
+        .line = start_line,
+        .col = start_col,
+        .len = token_len
+    };
 }
 
 static Token read_token_int(void)
 {
     int c = getc_nonspace();
+    int start_line = curr_line;
+    int start_col = curr_col-1;
+
+    Token tok;
     switch (c) {
     case '0' ... '9':
-        return read_number(c);
+        tok = read_number(c);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case 'a' ... 'z':
     case 'A' ... 'Z':
     case '_':
-        return read_ident(c);
+        tok = read_ident(c);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '/': {
-        c = getc(stdin);
+        c = getc_with_pos();
         if (c == '/') {
             skip_line_comment();
             return read_token_int();
@@ -162,8 +236,10 @@ static Token read_token_int(void)
             skip_block_comment();
             return read_token_int();
         }
-        ungetc(c, stdin);
-        return make_punct('/');
+        ungetc_with_pos(c);
+        tok = make_punct('/');
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     }
     case '*':
     case '(':
@@ -179,36 +255,66 @@ static Token read_token_int(void)
     case '?':
     case ':':
     case '%':
-        return make_punct(c);
+        tok = make_punct(c);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '-':
-        c = getc(stdin);
-        if (c == '-')
-            return make_punct(PUNCT_DEC);
-        if (c == '>')
-            return make_punct(PUNCT_ARROW);
-        ungetc(c, stdin);
-        return make_punct('-');
+        c = getc_with_pos();
+        if (c == '-') {
+            tok = make_punct(PUNCT_DEC);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        if (c == '>') {
+            tok = make_punct(PUNCT_ARROW);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        ungetc_with_pos(c);
+        tok = make_punct('-');
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '=':
-        return read_rep('=', '=', PUNCT_EQ);
+        tok = read_rep('=', '=', PUNCT_EQ);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '+':
-        return read_rep('+', '+', PUNCT_INC);
+        tok = read_rep('+', '+', PUNCT_INC);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '&':
-        return read_rep('&', '&', PUNCT_LOGAND);
+        tok = read_rep('&', '&', PUNCT_LOGAND);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '|':
-        return read_rep('|', '|', PUNCT_LOGOR);
+        tok = read_rep('|', '|', PUNCT_LOGOR);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '<':
-        return read_rep('<', '<', PUNCT_LSHIFT);
+        tok = read_rep('<', '<', PUNCT_LSHIFT);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '>':
-        return read_rep('>', '>', PUNCT_RSHIFT);
+        tok = read_rep('>', '>', PUNCT_RSHIFT);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '"':
-        return read_string();
+        tok = read_string();
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '\'':
-        return read_char();
+        tok = read_char();
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case EOF:
-        return make_null();
+        tok = make_null();
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     default:
         error("Unexpected character: '%c'", c);
-        return make_null(); /* non-reachable */
+        tok = make_null(); /* non-reachable */
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     }
 }
 
@@ -243,6 +349,17 @@ Token read_token(void)
     return read_token_int();
 }
 
+TokenInfo get_current_token_info(void) {
+    return curr_token_info;
+}
+
+void set_current_filename(const char *filename) {
+    curr_filename = filename;
+    curr_line = 1;
+    curr_col = 1;
+    last_line_length = 0;
+}
+
 #ifdef MINITEST_IMPLEMENTATION
 
 #include "minitest.h"
@@ -253,8 +370,13 @@ TEST(test, lexer) {
     if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
     
+    set_current_filename(infile);
+    
     while(true) {
         Token tok = read_token();
+        TokenInfo info = get_current_token_info();
+        printf("[%s:%d:%d:%d] ", info.file, info.line, info.col, info.len);
+        
         switch(tok.type) {
             case TTYPE_NULL:                                                    return;
             case TTYPE_IDENT:   printf("TTYPE_IDENT: %s\n", get_ident(tok));    break;
