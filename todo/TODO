@@ -1,0 +1,55 @@
+✔ 完成语法功能整理工作 [](./支持语法功能.md) @done(26-01-12 17:14)
+☐ 拆解出51单片机需要切实添加的语法
+    ☐ 完善struct, union接口
+        ✔ 添加struct union定义ast, 并展示 @done(26-01-12 21:54)
+        ✔ struct顺序初始化, {0};初始化 @done(26-01-13 17:50)
+        ✔ struct指定初始化器初始化 @done(26-01-13 17:50)
+        ☐ 位域的支持
+    ☐ 补全变量初始化
+        ✔ char int 初始化 @done(26-01-13 22:49)
+        ✔ float double初始化 @done(26-01-13 22:49)
+        ☐ arr初始化
+            ☐ 多维数组序列初始化
+        ✔ ptr初始化 @done(26-01-13 22:49)
+    ✔ 二元运算左右符号推导输出符号 @done(26-01-13 22:51)
+    ☐ 增加更加清晰的调试打印
+    ✔ 添加类型修饰 const volatile restrict unsigned register static extern typedef修饰符支持 @done(26-01-14 17:47)
+    ✔ 添加函数限定 inline noreturn @done(26-01-14 17:51)
+    ☐ 添加常量类型支持 (16进制, 2进制)
+    ☐ 添加变量重复定义, 未定义检测
+    ☐ 添加函数重复定义与未声明检测
+    ✘ 添加sfr sfr16 sbit bit data xdata idata bdata code reentrant interrupt using等修饰符支持 @cancelled(26-01-14 17:52)
+    ☐ 添加控制语句 while do-while switch/case/default break continue goto else if
+    ☐ 添加表达式 sizeof (type)cast typeof ~ ^ . -> <<= >>= &= |= ^= >= <= != += -= *= /= %= <<= >>= 
+    ✔ 添加对于void foo(void){}语句支持 @done(26-01-12 21:00)
+    ☐ 添加对可变参数支持
+    ☐ 添加对于预编译等编译单元支持
+    ☐ 添加常用库支持
+    ☐ 添加编译器拓展
+        ---------------- 最常用 ----------------
+        asm          // gcc/clang 内联汇编入口(也可写成 asm)
+        volatile     // 与 volatile 同义，但带双下划线可在任何头文件里安全使用
+        inline       // 早期 GNU 兼容拼写，等同 inline
+        attribute    // 所有 GNU 扩展属性入口(packed/aligned/weak…)
+        __builtin_expect // likely/unlikely 分支预测
+        __builtin_offsetof // 实现 stddef.h 的 offsetof
+        __builtin_va_list  // 实现 stdarg.h 的 va_list
+        func         // C99 预置当前函数名字符串
+        FILE LINE DATE TIME STDC STDC_VERSION  // 标准预定义宏
+        ---------------- 次常用 ----------------
+        restrict        // 可在 C++ 里安全使用 restrict 语义
+        __thread         // GNU C 线程局部存储(C11 用 _Thread_local)
+        __asm            // MSVC 拼写(gcc 也认)
+        __declspec       // MSVC 属性入口(dllexport/naked…)
+        __cdecl/__stdcall/__fastcall  // MSVC 调用约定
+        packed       // ARM-CC 与 IAR 的结构紧缩拼写
+        weak         // GNU 属性拼写，声明弱符号
+        noreturn     // GNU 拼写，同 _Noreturn
+        ---------------- 冷门但会撞到 ----------------
+        __int64/__int128        // MSVC/GNU 扩展整型
+        __builtin_types_compatible_p // GNU 编译期类型判断
+        __builtin_constant_p    // 判断编译期常量
+        __builtin_clz/__builtin_popcount // 内置位运算
+        __memory/__asm_volatile_memory // Linux 内核屏障宏底层
+        section/alias/aligned // 常用 attribute 子项
+        ---------------- 小结 ----------------

@@ -731,21 +731,15 @@ static Ast *read_expr()
 
 static Ctype *get_ctype(const Token tok)
 {
-    if (get_ttype(tok) != TTYPE_IDENT)
-        return NULL;
+    if (get_ttype(tok) != TTYPE_IDENT) return NULL;
+
     char *ident = get_ident(tok);
-    if (!strcmp(ident, "void"))
-        return ctype_void;
-    if (!strcmp(ident, "int"))
-        return ctype_int;
-    if (!strcmp(ident, "long"))
-        return ctype_long;
-    if (!strcmp(ident, "char"))
-        return ctype_char;
-    if (!strcmp(ident, "float"))
-        return ctype_float;
-    if (!strcmp(ident, "double"))
-        return ctype_double;
+    if (!strcmp(ident, "void"))     return ctype_void;
+    if (!strcmp(ident, "int"))      return ctype_int;
+    if (!strcmp(ident, "long"))     return ctype_long;
+    if (!strcmp(ident, "char"))     return ctype_char;
+    if (!strcmp(ident, "float"))    return ctype_float;
+    if (!strcmp(ident, "double"))   return ctype_double;
     return NULL;
 }
 
