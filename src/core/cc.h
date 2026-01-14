@@ -73,11 +73,7 @@ typedef struct __CtypeAttr {
     int ctype_extern        : 1;
     int ctype_unsigned      : 1;
     int ctype_register      : 1; /* NOTE: c51中使用这个关键词申明sfr, sfr16, sbit */ 
-    int ctype_date          : 1;
-    int ctype_bdate         : 1;
-    int ctype_idate         : 1;
-    int ctype_pdate         : 1;
-    int ctype_xdate         : 1;
+    int ctype_data          : 3; /* NONE, DATA, IDATA, PDATA, XDATA, EDATA, CODE */
     int ctype_typedef       : 1; 
 
     /* 函数限定 */

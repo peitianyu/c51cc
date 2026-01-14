@@ -1,48 +1,68 @@
 #include "cc.h"
 
-char *ctype_to_string(Ctype *ctype)
+/* 把 Ctype::attr 转成 "const volatile static …" 这种字符串 */
+static const char *ctype_attr_string(int attr)
 {
-    if (!ctype)
-        return "(nil)";
+    /* 64 字节足够放下所有关键字 + 空格 + '\0' */
+    static char buf[64];
+    char *p = buf;
+    *p = '\0';
+
+    /* 注意顺序：一般按 C 语法习惯把 "const/volatile" 放最前 */
+    if (attr & (1 << 0)) { strcpy(p, "const ");     p += 6; }
+    if (attr & (1 << 1)) { strcpy(p, "volatile "); p += 9; }
+    if (attr & (1 << 2)) { strcpy(p, "restrict "); p += 9; }
+    if (attr & (1 << 3)) { strcpy(p, "static ");    p += 7; }
+    if (attr & (1 << 4)) { strcpy(p, "extern ");    p += 7; }
+    if (attr & (1 << 5)) { strcpy(p, "unsigned "); p += 9; }
+    if (attr & (1 << 6)) { strcpy(p, "register "); p += 9; }
+    /* 函数限定符 */
+    if (attr & (1 << 8)) { strcpy(p, "inline ");    p += 7; }
+    if (attr & (1 << 9)) { strcpy(p, "noreturn "); p += 10; }
+
+    /* 51 地址空间关键字 */
+    int data = (attr >> 7) & 7;          /* 提取 3-bit data 字段 */
+    switch (data) {
+    case 1:  strcpy(p, "data ");    p += 5; break;
+    case 2:  strcpy(p, "idata ");   p += 6; break;
+    case 3:  strcpy(p, "pdata ");   p += 6; break;
+    case 4:  strcpy(p, "xdata ");   p += 6; break;
+    case 5:  strcpy(p, "edata ");   p += 6; break;
+    case 6:  strcpy(p, "code ");    p += 5; break;
+    default: break;
+    }
+    
+    /* 末尾如果是空格，退一格覆盖掉 */
+    if (p > buf && *(p-1) == ' ') *(p-1) = '\0';
+    return buf;
+}
+
+char *ctype_to_string(Ctype *ctype) {
+    if (!ctype) return "(nil)";
+    String s = make_string();
+    const char *a = ctype_attr_string(ctype->attr);
+    if (*a) string_appendf(&s, "%s ", a);
+
     switch (ctype->type) {
-    case CTYPE_VOID:
-        return "void";
-    case CTYPE_INT:
-        return "int";
-    case CTYPE_LONG:
-        return "long";
-    case CTYPE_CHAR:
-        return "char";
-    case CTYPE_FLOAT:
-        return "float";
-    case CTYPE_DOUBLE:
-        return "double";
-    case CTYPE_PTR: {
-        String s = make_string();
-        string_appendf(&s, "*%s", ctype_to_string(ctype->ptr));
-        return get_cstring(s);
-    }
-    case CTYPE_ARRAY: {
-        String s = make_string();
-        string_appendf(&s, "[%d]%s", ctype->len, ctype_to_string(ctype->ptr));
-        return get_cstring(s);
-    }
-    case CTYPE_STRUCT: {
-        String s = make_string();
-        string_appendf(&s, (ctype->offset == ctype->size) ? "(union" : "(struct");
-        for (Iter it = list_iter(ctype->fields->list); !iter_end(it);) {
-            DictEntry *e = iter_next(&it);
-            char *field_name = e->key;
-            void *field_type = e->val;
-            string_appendf(&s, " (%s %s)", ctype_to_string(field_type), field_name);
+    case CTYPE_VOID:  string_appendf(&s, "void"); break;
+    case CTYPE_INT:   string_appendf(&s, "int"); break;
+    case CTYPE_LONG:  string_appendf(&s, "long"); break;
+    case CTYPE_CHAR:  string_appendf(&s, "char"); break;
+    case CTYPE_FLOAT: string_appendf(&s, "float"); break;
+    case CTYPE_DOUBLE:string_appendf(&s, "double"); break;
+    case CTYPE_PTR:   string_appendf(&s, "*%s", ctype_to_string(ctype->ptr)); return get_cstring(s);
+    case CTYPE_ARRAY: string_appendf(&s, "[%d]%s", ctype->len, ctype_to_string(ctype->ptr)); return get_cstring(s);
+    case CTYPE_STRUCT:
+        string_appendf(&s, ctype->offset==ctype->size?"(union":"(struct");
+        for (Iter i=list_iter(ctype->fields->list); !iter_end(i);) {
+            DictEntry *e=iter_next(&i);
+            string_appendf(&s, " (%s %s)", ctype_to_string(e->val), e->key);
         }
         string_appendf(&s, ")");
         return get_cstring(s);
+    default: error("Unknown ctype: %d", ctype);
     }
-    default:
-        error("Unknown ctype: %d", ctype);
-        return NULL; /* non-reachable */
-    }
+    return get_cstring(s);
 }
 
 static void uop_to_string(String *buf, char *op, Ast *ast)

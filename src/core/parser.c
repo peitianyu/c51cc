@@ -38,6 +38,7 @@ static Ctype *result_type(char op, Ctype *a, Ctype *b);
 static Ctype *convert_array(Ctype *ctype);
 static Ast *read_stmt(void);
 static Ctype *read_decl_int(Token *name);
+static int read_decl_ctype_attr(Token tok, int *attr_out);
 
 static Ast *ast_uop(int type, Ctype *ctype, Ast *operand)
 {
@@ -750,7 +751,13 @@ static Ctype *get_ctype(const Token tok)
 
 static bool is_type_keyword(const Token tok)
 {
-    return get_ctype(tok) || is_ident(tok, "struct") || is_ident(tok, "union");
+    return get_ctype(tok) || is_ident(tok, "struct") || is_ident(tok, "union") || 
+    is_ident(tok, "const") || is_ident(tok, "volatile") || is_ident(tok, "restrict") ||
+    is_ident(tok, "static") || is_ident(tok, "extern") || is_ident(tok, "unsigned")|| 
+    is_ident(tok, "register") || is_ident(tok, "typedef") || is_ident(tok, "inline") || 
+    is_ident(tok, "noreturn") || is_ident(tok, "data") || is_ident(tok, "idata") || 
+    is_ident(tok, "pdata") || is_ident(tok, "xdata") || is_ident(tok, "edata") || 
+    is_ident(tok, "code");
 }
 
 static Ast *read_decl_array_init_int(Ctype *ctype)
@@ -925,19 +932,52 @@ static Ctype *read_struct_def(void)
     return r;
 }
 
+static int read_decl_ctype_attr(Token tok, int *attr_out) {
+    if(get_ttype(tok) != TTYPE_IDENT) return 0;
+
+    union { CtypeAttr c_attr; int i_attr; }attr = {0};
+    
+    if(is_ident(tok, "const"))          { attr.c_attr.ctype_const = 1; }
+    else if(is_ident(tok, "volatile"))  { attr.c_attr.ctype_volatile = 1; }
+    else if (is_ident(tok, "restrict")) { attr.c_attr.ctype_restrict = 1; }
+    else if (is_ident(tok, "static"))   { attr.c_attr.ctype_static = 1; }
+    else if (is_ident(tok, "extern"))   { attr.c_attr.ctype_extern = 1; }
+    else if (is_ident(tok, "unsigned")) { attr.c_attr.ctype_unsigned = 1; }
+    else if (is_ident(tok, "register")) { attr.c_attr.ctype_register = 1; }
+    else if (is_ident(tok, "typedef"))  { attr.c_attr.ctype_typedef = 1; }
+    else if (is_ident(tok, "inline"))   { attr.c_attr.ctype_inline = 1; }
+    else if (is_ident(tok, "noreturn")) { attr.c_attr.ctype_noreturn = 1; }
+
+    /* mcs51单片机专用 */
+    else if (is_ident(tok, "data"))     { attr.c_attr.ctype_data = 1; }
+    else if (is_ident(tok, "idata"))    { attr.c_attr.ctype_data = 2; }
+    else if (is_ident(tok, "pdata"))    { attr.c_attr.ctype_data = 3; }
+    else if (is_ident(tok, "xdata"))    { attr.c_attr.ctype_data = 4; }
+    else if (is_ident(tok, "edata"))    { attr.c_attr.ctype_data = 5; }
+    else if (is_ident(tok, "code"))     { attr.c_attr.ctype_data = 6; }
+    *attr_out |= attr.i_attr;
+    return attr.i_attr;
+}
+
 static Ctype *read_decl_spec(void)
 {
     Token tok = read_token();
+    int attr = 0;
+    while(read_decl_ctype_attr(tok, &attr)) tok = read_token();
+       
     Ctype *ctype =
         is_ident(tok, "struct")
             ? read_struct_def()
             : is_ident(tok, "union") ? read_union_def() : get_ctype(tok);
-    if (!ctype)
+    if (!ctype) 
         error("Type expected, but got %s", token_to_string(tok));
+        
     while (1) {
         tok = read_token();
         if (!is_punct(tok, '*')) {
+            while(read_decl_ctype_attr(tok, &attr)) tok = read_token();
             unget_token(tok);
+            ctype->attr = attr;
             return ctype;
         }
         ctype = make_ptr_type(ctype);
@@ -968,14 +1008,7 @@ static Ast *read_decl_init_val(Ast *var)
     Ast *init = read_expr();
     expect(';');
     // NOTE: 基础的常量折叠
-    if (var->type == AST_GVAR)
-        init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) 
-                                          : ast_double(eval_floatexpr(init));
-
-    // // FIXME: 这部分是否存在问题, 这里应该是跟随输出var的类型而不是计算类型
-    // if (init->type == AST_LITERAL && is_inttype(init->ctype) && is_inttype(var->ctype)) 
-    //     init->ctype = var->ctype;
-
+    init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) : ast_double(eval_floatexpr(init));
     return ast_decl(var, init);
 }
 
