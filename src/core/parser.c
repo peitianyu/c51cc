@@ -284,10 +284,15 @@ static Ast *ast_goto(char* label)
 
 static Ast *ast_label(char* label)
 {
+    for (Iter i = list_iter(labels); !iter_end(i);) {
+        char* v = iter_next(&i);
+        if(!strcmp(v, label)) error("duplicate label: %s", label);
+    }
+
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_LABEL;
-    r->label = label;
-    list_push(labels, label);
+    r->label = strdup(label);
+    list_push(labels, r->label);
     return r;
 }
 
@@ -573,6 +578,7 @@ static Ast *read_ident_or_func(char *name)
             
     unget_token(tok);
     Ast *v = dict_get(localenv, name);
+    
     if (!v)
         error("Undefined varaible: %s", name);
     return v;
@@ -1388,18 +1394,10 @@ static Ast *read_goto_stmt(void)
     Token tok = read_token();
     if(get_ttype(tok) != TTYPE_IDENT)
         error("Goto need a identify, but got %s", token_to_string(tok));
-    
-    char* name = get_ident(tok);
-    Iter i = list_iter(labels);
-    for (; !iter_end(i);) {
-        char* label = iter_next(&i);
-        if(!strcmp(name, label)) break;
-    }
-    if(iter_end(i))
-        error("Cant find label(%s) in curr stmt", name);
-
-    expect(':'); 
-    return ast_goto(name);
+        
+    // FIXME: 应该需要检查一下是否存在标签
+    expect(';'); 
+    return ast_goto(get_ident(tok));
 }
 
 static Ast *read_break_stmt(void)
@@ -1436,13 +1434,20 @@ static Ast *read_stmt(void)
     if (is_ident(tok, "while"))  { read_token(); return read_while_stmt(); }
     if (is_ident(tok, "do"))     { read_token(); return read_dowhile_stmt(); }
     if (is_ident(tok, "return")) { read_token(); return read_return_stmt(); }
+    if (is_ident(tok, "goto"))   { read_token(); return read_goto_stmt(); }
     if (is_punct(tok, '{'))      { read_token(); return read_compound_stmt(); }
 
-    // Token tok2 = peek2_token();    
-    // if (is_punct(tok2, ':')) {
-    //     read_token(); read_token();
-    //     return ast_label(get_ident(tok));
-    // }
+    if(get_ttype(tok) == TTYPE_IDENT) {
+        char* name = get_ident(tok);
+        Ast *v = dict_get(localenv, name);
+        if(!v) {
+            read_token();  
+            tok = read_token(); 
+            
+            if(!is_punct(tok, ':')) error("Undefined varaible: %s", name);
+            else                    return ast_label(name);
+        }
+    }
     
     Ast *r = read_expr();
     expect(';');
@@ -1522,10 +1527,9 @@ static Ast *read_func_def(Ctype *rettype, char *fname)
     is_first = true;
     localenv = make_dict(localenv);
     localvars = make_list();
-    labels = make_list;
+    labels = make_list();
     Ast *body = read_compound_stmt();
     Ast *r = ast_func(rettype, fname, params, body, localvars, labels);
-    localenv = dict_parent(localenv);
     localenv = dict_parent(localenv);
     localvars = NULL;
     labels = NULL;

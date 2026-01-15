@@ -209,6 +209,9 @@ static void ast_to_string_int(String *buf, Ast *ast)
     case AST_BREAK:
         string_appendf(buf, "(break)");
         break;
+    case AST_LABEL:
+        string_appendf(buf, "(label %s)", ast->label);
+        break;
     case AST_RETURN:
         string_appendf(buf, "(return %s)", ast_to_string(ast->retval));
         break;
