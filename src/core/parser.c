@@ -39,6 +39,7 @@ static Ctype *convert_array(Ctype *ctype);
 static Ast *read_stmt(void);
 static Ctype *read_decl_int(Token *name);
 static int read_decl_ctype_attr(Token tok, int *attr_out);
+static bool have_redefine_var(char* var_name);
 
 static Ast *ast_uop(int type, Ctype *ctype, Ast *operand)
 {
@@ -105,6 +106,9 @@ static Ast *ast_lvar(Ctype *ctype, char *name)
 
 static Ast *ast_gvar(Ctype *ctype, char *name, bool filelocal)
 {
+    // FIXME: 应该考虑多文件的, 暂时不考虑
+    if(have_redefine_var(name))
+        error("Redefine global var: %s", name);
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_GVAR;
     r->ctype = ctype;
@@ -152,6 +156,9 @@ static Ast *ast_func(Ctype *rettype,
 
 static bool valid_init_var(Ast *var, Ast *init)
 {
+    // NOTE: 未初始化, 则不判断
+    if(!init) return true;
+
     switch(var->ctype->type) {
         case CTYPE_CHAR ... CTYPE_DOUBLE:
             return (init->ctype->type <= CTYPE_DOUBLE);
@@ -436,6 +443,12 @@ static int priority(const Token tok)
     default:
         return -1;
     }
+}
+
+static bool have_redefine_var(char* var_name) {
+    if(dict_get(globalenv, var_name)) return true;
+    if(dict_get(localenv, var_name)) return true;
+    return false;
 }
 
 static Ast *read_func_args(char *fname)
@@ -1085,6 +1098,8 @@ static Ast *read_decl(void)
     Ctype *ctype = read_decl_int(&varname);
     if (ctype == ctype_void)
         error("Storage size of '%s' is not known", token_to_string(varname));
+    if (have_redefine_var(get_ident(varname)))
+        error("Fuction redefine local val: %s", token_to_string(varname));
     Ast *var = ast_lvar(ctype, get_ident(varname));
     return read_decl_init(var);
 }
@@ -1210,6 +1225,8 @@ static List *read_params(void)
         ctype = read_array_dimensions(ctype);
         if (ctype->type == CTYPE_ARRAY)
             ctype = make_ptr_type(ctype->ptr);
+        if(have_redefine_var(get_ident(tok)))
+            error("Function have redefined param: %s", token_to_string(tok));
         list_push(params, ast_lvar(ctype, get_ident(tok)));
         Token tok = read_token();
         if (is_punct(tok, ')'))

@@ -6,7 +6,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/a.out",
-            "args": ["${workspaceFolder}/base/sample/test.c", "--dump-ast"],
+            "args": [],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "preLaunchTask": "build",
