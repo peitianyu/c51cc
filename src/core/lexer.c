@@ -171,7 +171,10 @@ static Token read_ident(char c)
             string_append(&s, c2);
         } else {
             ungetc_with_pos(c2);
-            return make_ident(s);
+
+            if(!strcmp(get_cstring(s), "true"))         return make_number("1\0");
+            else if(!strcmp(get_cstring(s), "false"))   return make_number("0\0");
+            else                                        return make_ident(s);
         }
     }
 }

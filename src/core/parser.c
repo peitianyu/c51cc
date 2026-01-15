@@ -18,6 +18,7 @@ static Dict *globalenv = &EMPTY_DICT;
 static Dict *localenv = NULL;
 static Dict *struct_defs = &EMPTY_DICT;
 static Dict *union_defs = &EMPTY_DICT;
+static Dict *functionenv = &EMPTY_DICT;
 static List *localvars = NULL;
 
 static Ctype *ctype_void = &(Ctype){0, CTYPE_VOID, 0, NULL};
@@ -445,10 +446,16 @@ static int priority(const Token tok)
     }
 }
 
-static bool have_redefine_var(char* var_name) {
+static bool have_redefine_var(char* var_name) 
+{
     if(dict_get(globalenv, var_name)) return true;
     if(dict_get(localenv, var_name)) return true;
     return false;
+}
+
+static bool have_redefine_func(char* func_name) 
+{
+    return dict_get(functionenv, func_name);
 }
 
 static Ast *read_func_args(char *fname)
@@ -468,7 +475,11 @@ static Ast *read_func_args(char *fname)
     }
     if (MAX_ARGS < list_len(args))
         error("Too many arguments: %s", fname);
-    return ast_funcall(ctype_int, fname, args);
+
+    Ast *func = dict_get(functionenv, fname);
+    if(!func) error("Undecl function: %s", fname);
+    
+    return ast_funcall(func->ctype, fname, args);
 }
 
 static Ast *read_ident_or_func(char *name)
@@ -1032,7 +1043,10 @@ static Ast *read_decl_init_val(Ast *var)
     } else if(var->ctype->type == CTYPE_PTR) {
         Ast *init = read_expr();
         expect(';');
-        ast_inttype(ctype_int, init); // !!!: 注意这里直接填地址有危险, 不建议这么做, 可能会飞, 后期将这部分限制住????
+        if(init->type == AST_ADDR) return ast_decl(var, init);
+
+        // FIXME: 注意这里直接填地址有危险, 不建议这么做, 程序可能会飞, 后期将这部分限制住????
+        ast_inttype(ctype_int, eval_intexpr(init)); 
         return ast_decl(var, init);
     }
 
@@ -1238,6 +1252,9 @@ static List *read_params(void)
 
 static Ast *read_func_def(Ctype *rettype, char *fname)
 {
+    if(have_redefine_func(fname))   
+        error("Redecl function: %s", fname);
+    
     expect('(');
     localenv = make_dict(globalenv);
     List *params = read_params();
@@ -1249,6 +1266,8 @@ static Ast *read_func_def(Ctype *rettype, char *fname)
     localenv = dict_parent(localenv);
     localenv = dict_parent(localenv);
     localvars = NULL;
+
+    dict_put(functionenv, fname, r);
     return r;
 }
 
