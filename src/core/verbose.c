@@ -61,6 +61,14 @@ char *ctype_to_string(Ctype *ctype) {
         }
         string_appendf(&s, ")");
         return get_cstring(s);
+    case CTYPE_ENUM:
+        string_appendf(&s, "(enum");
+        for (Iter i=list_iter(ctype->fields->list); !iter_end(i);) {
+            DictEntry *e=iter_next(&i);
+            string_appendf(&s, " (%d %s)", *(int *)(e->val), e->key);
+        }
+        string_appendf(&s, ")");
+        return get_cstring(s);
     default: error("Unknown ctype: %d", ctype);
     }
     return get_cstring(s);
@@ -105,6 +113,9 @@ static void ast_to_string_int(String *buf, Ast *ast)
         case CTYPE_FLOAT:
         case CTYPE_DOUBLE:
             string_appendf(buf, "%f", ast->fval);
+            break;
+        case CTYPE_ENUM:
+            string_appendf(buf, "%d", ast->ival);
             break;
         default:
             error("internal error");
@@ -201,6 +212,9 @@ static void ast_to_string_int(String *buf, Ast *ast)
         string_appendf(buf, ast->field);
         break;
     case AST_STRUCT_DEF:
+        string_appendf(buf, "(def %s)", ctype_to_string(ast->ctype));
+        break;
+    case AST_ENUM_DEF:
         string_appendf(buf, "(def %s)", ctype_to_string(ast->ctype));
         break;
     case AST_ADDR:

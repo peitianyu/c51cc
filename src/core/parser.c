@@ -18,6 +18,7 @@ static Dict *globalenv = &EMPTY_DICT;
 static Dict *localenv = NULL;
 static Dict *struct_defs = &EMPTY_DICT;
 static Dict *union_defs = &EMPTY_DICT;
+static Dict *enum_defs = &EMPTY_DICT;
 static Dict *functionenv = &EMPTY_DICT;
 static List *localvars = NULL;
 
@@ -42,6 +43,7 @@ static Ast *read_stmt(void);
 static Ctype *read_decl_int(Token *name);
 static int read_decl_ctype_attr(Token tok, int *attr_out);
 static bool have_redefine_var(char* var_name);
+static bool get_enum_val(char* key, int* val);
 
 static Ast *ast_uop(int type, Ctype *ctype, Ast *operand)
 {
@@ -171,6 +173,8 @@ static bool valid_init_var(Ast *var, Ast *init)
                     init->ctype->type == CTYPE_INT || init->type == AST_ADDR);
         case CTYPE_STRUCT:
             return (init->ctype->type == CTYPE_STRUCT);
+        case CTYPE_ENUM:
+              return (init->ctype->type == CTYPE_ENUM || init->ctype->type == CTYPE_INT);  
         default: return false;
     }
 }
@@ -274,6 +278,13 @@ static Ast *ast_struct_def(Ctype *ctype) {
     return r;
 };
 
+static Ast *ast_enum_def(Ctype *ctype) {
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_ENUM_DEF;
+    r->ctype = ctype;
+    return r;
+};
+
 static Ctype *make_ptr_type(Ctype *ctype)
 {
     Ctype *r = malloc(sizeof(Ctype));
@@ -314,10 +325,19 @@ static Ctype *make_struct_type(Dict *fields, int size)
     return r;
 }
 
+static Ctype *make_enum_type(Dict *fields)
+{
+    Ctype *r = malloc(sizeof(Ctype));
+    r->type = CTYPE_ENUM;
+    r->fields = fields;
+    list_push(ctypes, r);
+    return r;
+}
+
 bool is_inttype(Ctype *ctype)
 {
     return ctype->type == CTYPE_BOOL || ctype->type == CTYPE_CHAR || ctype->type == CTYPE_INT ||
-           ctype->type == CTYPE_LONG;
+           ctype->type == CTYPE_LONG || ctype->type == CTYPE_ENUM;
 }
 
 bool is_flotype(Ctype *ctype)
@@ -531,8 +551,11 @@ static Ast *read_prim(void)
     switch (get_ttype(tok)) {
     case TTYPE_NULL:
         return NULL;
-    case TTYPE_IDENT:
-        return read_ident_or_func(get_ident(tok));
+    case TTYPE_IDENT: {
+        int enum_val = 0;
+        if(get_enum_val(get_ident(tok), &enum_val)) return ast_inttype(ctype_int, enum_val);
+        else                                        return read_ident_or_func(get_ident(tok));
+    }
     case TTYPE_NUMBER: {
         char *number = get_number(tok);
         if (is_long_token(number))
@@ -612,7 +635,6 @@ static Ctype *result_type_int(jmp_buf *jmp, char op, Ctype *a, Ctype *b)
         arith_table_inited = 1;
     }
 
-    /* 1. 指针/数组运算 ---------------------------------------------------- */
     if (a->type == CTYPE_PTR || b->type == CTYPE_PTR) {
         if (op == '=') return a->type == CTYPE_PTR ? a : b;          // 赋值取左值指针
         if (op != '+' && op != '-') goto err;
@@ -620,8 +642,8 @@ static Ctype *result_type_int(jmp_buf *jmp, char op, Ctype *a, Ctype *b)
     }
     if (a->type == CTYPE_ARRAY || b->type == CTYPE_ARRAY) goto err;
 
-    /* 2. 纯算术转换 ------------------------------------------------------- */
-    int ai = a->type, bi = b->type;
+    int ai = (a->type==CTYPE_ENUM) ? CTYPE_INT : a->type;
+    int bi = (b->type==CTYPE_ENUM) ? CTYPE_INT : b->type;
     if ((unsigned)ai >= CTYPE_DOUBLE+1 || (unsigned)bi >= CTYPE_DOUBLE+1) goto err;
 
     Ctype *t = arith_bin_type[ai][bi];
@@ -797,7 +819,7 @@ static Ctype *get_ctype(const Token tok)
 
 static bool is_type_keyword(const Token tok)
 {
-    return get_ctype(tok) || is_ident(tok, "struct") || is_ident(tok, "union") || 
+    return get_ctype(tok) || is_ident(tok, "struct") || is_ident(tok, "union") || is_ident(tok, "enum") || 
     is_ident(tok, "const") || is_ident(tok, "volatile") || is_ident(tok, "restrict") ||
     is_ident(tok, "static") || is_ident(tok, "extern") || is_ident(tok, "unsigned")|| 
     is_ident(tok, "register") || is_ident(tok, "typedef") || is_ident(tok, "inline") || 
@@ -913,7 +935,7 @@ static Ast *read_decl_struct_init(Ctype *ctype)
     return ast_struct_init(ctype, initlist);
 }
 
-static char *read_struct_union_tag(void)
+static char *read_struct_union_enum_tag(void)
 {
     Token tok = read_token();
     if (get_ttype(tok) == TTYPE_IDENT)
@@ -940,7 +962,7 @@ static Dict *read_struct_union_fields(void)
 
 static Ctype *read_union_def(void)
 {
-    char *tag = read_struct_union_tag();
+    char *tag = read_struct_union_enum_tag();
     Ctype *ctype = dict_get(union_defs, tag);
     if (ctype)
         return ctype;
@@ -958,7 +980,7 @@ static Ctype *read_union_def(void)
 
 static Ctype *read_struct_def(void)
 {
-    char *tag = read_struct_union_tag();
+    char *tag = read_struct_union_enum_tag();
     Ctype *ctype = dict_get(struct_defs, tag);
     if (ctype)
         return ctype;
@@ -975,6 +997,72 @@ static Ctype *read_struct_def(void)
     Ctype *r = make_struct_type(fields, offset);
     if (tag)
         dict_put(struct_defs, tag, r);
+    return r;
+}
+
+static bool get_enum_val(char* key, int* val) {
+    for (Iter i = list_iter(enum_defs->list); !iter_end(i);) {
+        DictEntry *e = iter_next(&i);
+        Ctype *type = e->val;
+        int *v = dict_get(type->fields, key);
+        if (v) {
+            *val = *v;  
+            return true;
+        }
+    }
+    return false;
+}
+
+static Dict *read_enum_fields(void) 
+{
+    Dict *r = make_dict(NULL);
+    expect('{');
+    int cnt = 0;
+    while (1) {
+        Token name = read_token();
+        if(is_punct(name, '}')) {
+            unget_token(name);
+            break;
+        }
+
+        if(get_ttype(name) != TTYPE_IDENT) 
+            error("Enum need identify, but got %s", token_to_string(name));
+        
+        Token tok = read_token(); 
+        if(is_punct(tok, '=')) {
+            tok = read_token();
+            char *number = get_number(tok);
+            if (is_int_token(number))   cnt = atoi(number);
+            else                        error("Enum need int type: %s", token_to_string(tok));
+        }else {
+            unget_token(tok);
+        }
+
+        int *enum_val = malloc(sizeof(int));
+        *enum_val = cnt;
+        dict_put(r, get_ident(name), enum_val);
+        
+        cnt++;
+        tok = peek_token(); 
+        if(is_punct(tok, '}')) break;
+
+        expect(',');
+    }
+    expect('}');
+    return r;
+}
+
+static Ctype *read_enum_def(void)
+{
+    char *tag = read_struct_union_enum_tag();
+    Ctype *ctype = dict_get(enum_defs, tag);
+    if (ctype) 
+        return ctype;
+
+    Dict *fields = read_enum_fields();
+    Ctype *r = make_enum_type(fields);
+    if (tag)
+        dict_put(enum_defs, tag, r);
     return r;
 }
 
@@ -1012,9 +1100,9 @@ static Ctype *read_decl_spec(void)
     while(read_decl_ctype_attr(tok, &attr)) tok = read_token();
        
     Ctype *ctype =
-        is_ident(tok, "struct")
-            ? read_struct_def()
-            : is_ident(tok, "union") ? read_union_def() : get_ctype(tok);
+        is_ident(tok, "struct") ? read_struct_def() : 
+        is_ident(tok, "union") ? read_union_def() : 
+        is_ident(tok, "enum") ? read_enum_def() : get_ctype(tok);
     if (!ctype) 
         error("Type expected, but got %s", token_to_string(tok));
         
@@ -1061,7 +1149,7 @@ static Ast *read_decl_init_val(Ast *var)
 
     Ast *init = read_expr();
     expect(';');
-    
+
     if (var->type == AST_GVAR) {
         init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) 
                                         : ast_double(eval_floatexpr(init));
@@ -1296,8 +1384,9 @@ static Ast *read_decl_or_func_def(void)
     Token tok1 = read_token();
     char *ident;
     if (get_ttype(tok1) != TTYPE_IDENT) {
-        if(is_punct(tok1, ';') && ctype->type == CTYPE_STRUCT) {
-            return ast_struct_def(ctype);
+        if(is_punct(tok1, ';')) {
+            if(ctype->type == CTYPE_STRUCT) return ast_struct_def(ctype);
+            else if(ctype->type == CTYPE_ENUM) return ast_enum_def(ctype);
         }
         error("Identifier expected, but got %s", token_to_string(tok1));
     }

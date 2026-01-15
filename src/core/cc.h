@@ -45,6 +45,7 @@ enum {
     AST_COMPOUND_STMT,
     AST_STRUCT_REF,
     AST_STRUCT_DEF,
+    AST_ENUM_DEF,
     AST_STRUCT_INIT,
     AST_TYPE_DEF, 
     PUNCT_EQ,
@@ -68,6 +69,7 @@ enum {
     CTYPE_ARRAY,
     CTYPE_PTR,
     CTYPE_STRUCT,
+    CTYPE_ENUM
 };
 
 
