@@ -20,6 +20,7 @@ static Dict *struct_defs = &EMPTY_DICT;
 static Dict *union_defs = &EMPTY_DICT;
 static Dict *enum_defs = &EMPTY_DICT;
 static Dict *functionenv = &EMPTY_DICT;
+static Dict *typedefenv = &EMPTY_DICT;
 static List *localvars = NULL;
 
 static Ctype *ctype_void = &(Ctype){0, CTYPE_VOID, 0, NULL};
@@ -139,6 +140,15 @@ static Ast *ast_funcall(Ctype *ctype, char *fname, List *args)
     r->ctype = ctype;
     r->fname = fname;
     r->args = args;
+    return r;
+}
+
+static Ast *ast_typedef(Ctype *ctype, char *typename) 
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_TYPE_DEF;
+    r->ctype = ctype;
+    r->typename = typename;
     return r;
 }
 
@@ -819,13 +829,21 @@ static Ctype *get_ctype(const Token tok)
 
 static bool is_type_keyword(const Token tok)
 {
-    return get_ctype(tok) || is_ident(tok, "struct") || is_ident(tok, "union") || is_ident(tok, "enum") || 
-    is_ident(tok, "const") || is_ident(tok, "volatile") || is_ident(tok, "restrict") ||
-    is_ident(tok, "static") || is_ident(tok, "extern") || is_ident(tok, "unsigned")|| 
-    is_ident(tok, "register") || is_ident(tok, "typedef") || is_ident(tok, "inline") || 
-    is_ident(tok, "noreturn") || is_ident(tok, "data") || is_ident(tok, "idata") || 
-    is_ident(tok, "pdata") || is_ident(tok, "xdata") || is_ident(tok, "edata") || 
-    is_ident(tok, "code");
+    bool is_keyword = get_ctype(tok) || is_ident(tok, "struct") || is_ident(tok, "union") || is_ident(tok, "enum") || 
+        is_ident(tok, "const") || is_ident(tok, "volatile") || is_ident(tok, "restrict") ||
+        is_ident(tok, "static") || is_ident(tok, "extern") || is_ident(tok, "unsigned")|| 
+        is_ident(tok, "register") || is_ident(tok, "typedef") || is_ident(tok, "inline") || 
+        is_ident(tok, "noreturn") || is_ident(tok, "data") || is_ident(tok, "idata") || 
+        is_ident(tok, "pdata") || is_ident(tok, "xdata") || is_ident(tok, "edata") || 
+        is_ident(tok, "code");   
+
+    if(is_keyword) 
+        return true;            
+    
+    if(get_ttype(tok) != TTYPE_IDENT) 
+        return false;
+    
+    return dict_get(typedefenv, get_ident(tok));
 }
 
 static Ast *read_decl_array_init_int(Ctype *ctype)
@@ -1066,6 +1084,13 @@ static Ctype *read_enum_def(void)
     return r;
 }
 
+static CtypeAttr get_attr(int in_attr) 
+{
+    union { CtypeAttr c_attr; int i_attr; }attr = {0};
+    attr.i_attr = in_attr;
+    return attr.c_attr;
+}
+
 static int read_decl_ctype_attr(Token tok, int *attr_out) {
     if(get_ttype(tok) != TTYPE_IDENT) return 0;
 
@@ -1103,6 +1128,10 @@ static Ctype *read_decl_spec(void)
         is_ident(tok, "struct") ? read_struct_def() : 
         is_ident(tok, "union") ? read_union_def() : 
         is_ident(tok, "enum") ? read_enum_def() : get_ctype(tok);
+
+    if (!ctype && get_ttype(tok) == TTYPE_IDENT && !get_attr(attr).ctype_typedef) 
+        ctype = dict_get(typedefenv, get_ident(tok));
+
     if (!ctype) 
         error("Type expected, but got %s", token_to_string(tok));
         
@@ -1402,6 +1431,12 @@ static Ast *read_decl_or_func_def(void)
         return read_decl_init(var);
     }
     if (is_punct(tok, ';')) {
+        if(get_attr(ctype->attr).ctype_typedef) {
+            dict_put(typedefenv, ident, ctype);
+            read_token();
+            return ast_typedef(ctype, ident);
+        }
+
         read_token();
         Ast *var = ast_gvar(ctype, ident, false);
         return ast_decl(var, NULL);

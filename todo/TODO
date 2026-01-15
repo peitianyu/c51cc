@@ -11,18 +11,18 @@
     ☐ arr初始化
         ☐ 多维数组序列初始化
     ✔ ptr初始化 @done(26-01-13 22:49)
-☐ 添加对于bool的支持 (这部分在c51中表示为bit)
-☐ 添加enum类型支持
+✔ 添加对于bool的支持 (这部分在c51中表示为bit) @done(26-01-15 13:20)
+✔ 添加enum类型支持 @done(26-01-15 18:03)
 ✔ 二元运算左右符号推导输出符号 @done(26-01-13 22:51)
 ✔ 增加更加清晰的调试打印 @done(26-01-14 21:21)
 ✔ 添加类型修饰 const volatile restrict unsigned register static extern typedef修饰符支持 @done(26-01-14 17:47)
 ✔ 添加函数限定 inline noreturn @done(26-01-14 17:51)
-☐ 添加typedef类型检测
+✔ 添加typedef类型检测 @done(26-01-15 18:46)
 ☐ 添加`,`运算符支持
 ✔ 添加var与init的检查 @done(26-01-15 11:39)
 ✔ 添加常量类型支持 (16进制, 2进制) @done(26-01-14 21:52)
 ✔ 添加变量重复定义, 未定义检测 @done(26-01-15 12:34)
-☐ 添加函数重复定义与未声明检测
+✔ 添加函数重复定义与未声明检测 @done(26-01-15 12:51)
 ✘ 添加sfr sfr16 sbit bit data xdata idata bdata code reentrant interrupt using等修饰符支持 @cancelled(26-01-14 17:52)
 ☐ 添加控制语句 while do-while switch/case/default break continue goto else if
 ☐ 添加表达式 sizeof (type)cast typeof ~ ^ . -> <<= >>= &= |= ^= >= <= != += -= *= /= %= <<= >>= 

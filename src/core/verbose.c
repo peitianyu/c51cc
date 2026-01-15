@@ -217,6 +217,9 @@ static void ast_to_string_int(String *buf, Ast *ast)
     case AST_ENUM_DEF:
         string_appendf(buf, "(def %s)", ctype_to_string(ast->ctype));
         break;
+    case AST_TYPE_DEF:
+        string_appendf(buf, "(typedef %s %s)", ctype_to_string(ast->ctype), ast->typename);
+        break;
     case AST_ADDR:
         uop_to_string(buf, "addr", ast);
         break;
@@ -299,10 +302,15 @@ char *token_to_string(const Token tok)
 #include "minitest.h"
 
 TEST(test, verbose) {
-    char infile[256];
-    printf("file path: ");
-    if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
+    // char infile[256];
+    // printf("file path: ");
+    // if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
+    //     puts("open fail"), exit(1);
+
+    char infile[256] = "/mnt/d/ws/test/MazuCC/test/test.c";
+    if (!freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
+    
     set_current_filename(infile);
         
     List *toplevels = read_toplevels();
@@ -312,6 +320,8 @@ TEST(test, verbose) {
     }
     list_free(cstrings);
     list_free(ctypes);
+
+    printf("\n");
 }
 
 #endif /* MINITEST_IMPLEMENTATION */

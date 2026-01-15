@@ -45,8 +45,8 @@ enum {
     AST_COMPOUND_STMT,
     AST_STRUCT_REF,
     AST_STRUCT_DEF,
-    AST_ENUM_DEF,
     AST_STRUCT_INIT,
+    AST_ENUM_DEF,
     AST_TYPE_DEF, 
     PUNCT_EQ,
     PUNCT_INC,
@@ -166,6 +166,9 @@ typedef struct __Ast {
 
         /* Struct initializer */
         List *structinit; 
+
+        /* Typedef name */
+        char* typename;
 
         /* if statement or ternary operator */
         struct {
