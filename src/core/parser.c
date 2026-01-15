@@ -22,6 +22,7 @@ static Dict *enum_defs = &EMPTY_DICT;
 static Dict *functionenv = &EMPTY_DICT;
 static Dict *typedefenv = &EMPTY_DICT;
 static List *localvars = NULL;
+static List *labels = NULL;
 
 static Ctype *ctype_void = &(Ctype){0, CTYPE_VOID, 0, NULL};
 static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
@@ -156,7 +157,8 @@ static Ast *ast_func(Ctype *rettype,
                      char *fname,
                      List *params,
                      Ast *body,
-                     List *localvars)
+                     List *localvars, 
+                     List *labels)
 {
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_FUNC;
@@ -164,6 +166,7 @@ static Ast *ast_func(Ctype *rettype,
     r->fname = fname;
     r->params = params;
     r->localvars = localvars;
+    r->labels = labels;
     r->body = body;
     return r;
 }
@@ -250,6 +253,55 @@ static Ast *ast_for(Ast *init, Ast *cond, Ast *step, Ast *body)
     r->forcond = cond;
     r->forstep = step;
     r->forbody = body;
+    return r;
+}
+
+static Ast *ast_while(Ast *cond, Ast *body)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_WHILE;
+    r->while_cond = cond;
+    r->while_body = body;
+    return r;
+}
+
+static Ast *ast_dowhile(Ast *cond, Ast *body)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_DO_WHILE;
+    r->while_cond = cond;
+    r->while_body = body;
+    return r;
+}
+
+static Ast *ast_goto(char* label)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_GOTO;
+    r->label = label;
+    return r;
+}
+
+static Ast *ast_label(char* label)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_LABEL;
+    r->label = label;
+    list_push(labels, label);
+    return r;
+}
+
+Ast *ast_break(void)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_BREAK;
+    return r;
+}
+
+Ast *ast_continue(void)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_CONTINUE;
     return r;
 }
 
@@ -518,6 +570,7 @@ static Ast *read_ident_or_func(char *name)
     Token tok = read_token();
     if (is_punct(tok, '('))
         return read_func_args(name);
+            
     unget_token(tok);
     Ast *v = dict_get(localenv, name);
     if (!v)
@@ -1257,13 +1310,22 @@ static Ast *read_if_stmt(void)
     Ast *cond = read_expr();
     expect(')');
     Ast *then = read_stmt();
+
     Token tok = read_token();
     if (get_ttype(tok) != TTYPE_IDENT || strcmp(get_ident(tok), "else")) {
         unget_token(tok);
         return ast_if(cond, then, NULL);
     }
-    Ast *els = read_stmt();
-    return ast_if(cond, then, els);
+
+    tok = read_token();
+    if (get_ttype(tok) == TTYPE_IDENT && strcmp(get_ident(tok), "if") == 0) {
+        Ast *els = read_if_stmt();
+        return ast_if(cond, then, els);
+    } else {
+        unget_token(tok);
+        Ast *els = read_stmt();
+        return ast_if(cond, then, els);
+    }
 }
 
 static Ast *read_opt_decl_or_stmt(void)
@@ -1299,6 +1361,59 @@ static Ast *read_for_stmt(void)
     return ast_for(init, cond, step, body);
 }
 
+static Ast *read_while_stmt(void)
+{
+    expect('(');
+    Ast *cond = read_expr();          
+    expect(')');                      
+    Ast *body = read_stmt();          
+    return ast_while(cond, body);     
+}
+
+static Ast *read_dowhile_stmt(void)
+{
+    Ast *body = read_stmt(); 
+    Token tok = read_token();
+    if(!is_ident(tok, "while"))
+        error("Do while need while, but got %s", token_to_string(tok));
+    expect('(');
+    Ast *cond = read_expr();   
+    expect(')');
+    expect(';');             
+    return ast_dowhile(cond, body);
+}
+
+static Ast *read_goto_stmt(void) 
+{
+    Token tok = read_token();
+    if(get_ttype(tok) != TTYPE_IDENT)
+        error("Goto need a identify, but got %s", token_to_string(tok));
+    
+    char* name = get_ident(tok);
+    Iter i = list_iter(labels);
+    for (; !iter_end(i);) {
+        char* label = iter_next(&i);
+        if(!strcmp(name, label)) break;
+    }
+    if(iter_end(i))
+        error("Cant find label(%s) in curr stmt", name);
+
+    expect(':'); 
+    return ast_goto(name);
+}
+
+static Ast *read_break_stmt(void)
+{
+    expect(';');
+    return ast_break();
+}
+
+static Ast *read_continue_stmt(void)
+{
+    expect(';');
+    return ast_continue();
+}
+
 static Ast *read_return_stmt(void)
 {
     Ast *retval = read_expr();
@@ -1306,18 +1421,29 @@ static Ast *read_return_stmt(void)
     return ast_return(retval);
 }
 
+static bool is_first = true;
 static Ast *read_stmt(void)
 {
-    Token tok = read_token();
-    if (is_ident(tok, "if"))
-        return read_if_stmt();
-    if (is_ident(tok, "for"))
-        return read_for_stmt();
-    if (is_ident(tok, "return"))
-        return read_return_stmt();
-    if (is_punct(tok, '{'))
-        return read_compound_stmt();
-    unget_token(tok);
+    Token tok = peek_token();  
+    if(!is_first) {
+        if (is_ident(tok, "continue"))  { read_token(); return read_continue_stmt(); } 
+        if (is_ident(tok, "break"))     { read_token(); return read_break_stmt(); }
+    }
+    is_first = false;
+
+    if (is_ident(tok, "if"))     { read_token(); return read_if_stmt(); }
+    if (is_ident(tok, "for"))    { read_token(); return read_for_stmt(); }
+    if (is_ident(tok, "while"))  { read_token(); return read_while_stmt(); }
+    if (is_ident(tok, "do"))     { read_token(); return read_dowhile_stmt(); }
+    if (is_ident(tok, "return")) { read_token(); return read_return_stmt(); }
+    if (is_punct(tok, '{'))      { read_token(); return read_compound_stmt(); }
+
+    // Token tok2 = peek2_token();    
+    // if (is_punct(tok2, ':')) {
+    //     read_token(); read_token();
+    //     return ast_label(get_ident(tok));
+    // }
+    
     Ast *r = read_expr();
     expect(';');
     return r;
@@ -1328,6 +1454,7 @@ static Ast *read_decl_or_stmt(void)
     Token tok = peek_token();
     if (get_ttype(tok) == TTYPE_NULL)
         return NULL;
+    
     return is_type_keyword(tok) ? read_decl() : read_stmt();
 }
 
@@ -1392,13 +1519,16 @@ static Ast *read_func_def(Ctype *rettype, char *fname)
     localenv = make_dict(globalenv);
     List *params = read_params();
     expect('{');
+    is_first = true;
     localenv = make_dict(localenv);
     localvars = make_list();
+    labels = make_list;
     Ast *body = read_compound_stmt();
-    Ast *r = ast_func(rettype, fname, params, body, localvars);
+    Ast *r = ast_func(rettype, fname, params, body, localvars, labels);
     localenv = dict_parent(localenv);
     localenv = dict_parent(localenv);
     localvars = NULL;
+    labels = NULL;
 
     dict_put(functionenv, fname, r);
     return r;

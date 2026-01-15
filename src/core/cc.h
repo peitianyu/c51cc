@@ -41,6 +41,12 @@ enum {
     AST_IF,
     AST_TERNARY,
     AST_FOR,
+    AST_WHILE,
+    AST_DO_WHILE,
+    AST_LABEL,
+    AST_GOTO,
+    AST_BREAK,
+    AST_CONTINUE,
     AST_RETURN,
     AST_COMPOUND_STMT,
     AST_STRUCT_REF,
@@ -150,6 +156,7 @@ typedef struct __Ast {
                 struct {
                     List *params;
                     List *localvars;
+                    List *labels;
                     struct __Ast *body;
                 };
             };
@@ -185,6 +192,14 @@ typedef struct __Ast {
             struct __Ast *forbody;
         };
 
+        struct {
+            struct __Ast *while_cond;
+            struct __Ast *while_body;
+        };
+
+        /* goto/label */
+        char* label;
+
         /* return statement */
         struct __Ast *retval;
 
@@ -208,6 +223,7 @@ extern char *ctype_to_string(Ctype *ctype);
 extern bool is_punct(const Token tok, int c);
 extern void unget_token(const Token tok);
 extern Token peek_token(void);
+extern Token peek2_token(void);
 extern Token read_token(void);
 extern TokenInfo get_current_token_info(void);
 extern void set_current_filename(const char *filename);

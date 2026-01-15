@@ -194,6 +194,21 @@ static void ast_to_string_int(String *buf, Ast *ast)
                        ast_to_string(ast->forstep));
         string_appendf(buf, "%s)", ast_to_string(ast->forbody));
         break;
+    case AST_WHILE:
+        string_appendf(buf, "(while (%s) %s)", ast_to_string(ast->while_cond), ast_to_string(ast->while_body));
+        break;
+    case AST_DO_WHILE:
+        string_appendf(buf, "(do-while %s (%s))", ast_to_string(ast->while_body), ast_to_string(ast->while_cond));
+        break;
+    case AST_GOTO:
+        string_appendf(buf, "(goto %s)", ast->label);
+        break;
+    case AST_CONTINUE:
+        string_appendf(buf, "(continue)");
+        break;
+    case AST_BREAK:
+        string_appendf(buf, "(break)");
+        break;
     case AST_RETURN:
         string_appendf(buf, "(return %s)", ast_to_string(ast->retval));
         break;

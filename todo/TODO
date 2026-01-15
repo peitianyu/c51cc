@@ -24,7 +24,9 @@
 ✔ 添加变量重复定义, 未定义检测 @done(26-01-15 12:34)
 ✔ 添加函数重复定义与未声明检测 @done(26-01-15 12:51)
 ✘ 添加sfr sfr16 sbit bit data xdata idata bdata code reentrant interrupt using等修饰符支持 @cancelled(26-01-14 17:52)
-☐ 添加控制语句 while do-while switch/case/default break continue goto else if
+☐ 添加控制语句 while do-while continue break  else if
+☐ 添加switch/case/default语句
+☐ 添加goto语句
 ☐ 添加表达式 sizeof (type)cast typeof ~ ^ . -> <<= >>= &= |= ^= >= <= != += -= *= /= %= <<= >>= 
 ✔ 添加对于void foo(void){}语句支持 @done(26-01-12 21:00)
 ☐ 添加对可变参数支持
