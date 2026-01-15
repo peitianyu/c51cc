@@ -24,6 +24,7 @@ static List *localvars = NULL;
 static Ctype *ctype_void = &(Ctype){0, CTYPE_VOID, 0, NULL};
 static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
 static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
+static Ctype *ctype_bool = &(Ctype){0, CTYPE_BOOL, 1, NULL};
 static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
 static Ctype *ctype_float = &(Ctype){0, CTYPE_FLOAT, 4, NULL};
 static Ctype *ctype_double = &(Ctype){0, CTYPE_DOUBLE, 8, NULL};
@@ -161,7 +162,7 @@ static bool valid_init_var(Ast *var, Ast *init)
     if(!init) return true;
 
     switch(var->ctype->type) {
-        case CTYPE_CHAR ... CTYPE_DOUBLE:
+        case CTYPE_BOOL ... CTYPE_DOUBLE:
             return (init->ctype->type <= CTYPE_DOUBLE);
         case CTYPE_ARRAY:
             return (init->type == AST_ARRAY_INIT);
@@ -315,7 +316,7 @@ static Ctype *make_struct_type(Dict *fields, int size)
 
 bool is_inttype(Ctype *ctype)
 {
-    return ctype->type == CTYPE_CHAR || ctype->type == CTYPE_INT ||
+    return ctype->type == CTYPE_BOOL || ctype->type == CTYPE_CHAR || ctype->type == CTYPE_INT ||
            ctype->type == CTYPE_LONG;
 }
 
@@ -574,6 +575,13 @@ static Ctype *arith_bin_type[CTYPE_DOUBLE+1][CTYPE_DOUBLE+1];
 static void init_arith_table(void)
 {
     #define T(a,b,res) arith_bin_type[a][b] = arith_bin_type[b][a] = (res)
+    T(CTYPE_BOOL,   CTYPE_BOOL,   ctype_bool);
+    T(CTYPE_BOOL,   CTYPE_CHAR,   ctype_char);
+    T(CTYPE_BOOL,   CTYPE_INT,    ctype_int);
+    T(CTYPE_BOOL,   CTYPE_LONG,   ctype_long);
+    T(CTYPE_BOOL,   CTYPE_FLOAT,  ctype_float);
+    T(CTYPE_BOOL,   CTYPE_DOUBLE, ctype_double);
+
     T(CTYPE_CHAR,   CTYPE_CHAR,   ctype_char);
     T(CTYPE_CHAR,   CTYPE_INT,    ctype_int);
     T(CTYPE_CHAR,   CTYPE_LONG,   ctype_long);
@@ -780,6 +788,7 @@ static Ctype *get_ctype(const Token tok)
     if (!strcmp(ident, "void"))     return ctype_void;
     if (!strcmp(ident, "int"))      return ctype_int;
     if (!strcmp(ident, "long"))     return ctype_long;
+    if (!strcmp(ident, "bool"))     return ctype_bool;
     if (!strcmp(ident, "char"))     return ctype_char;
     if (!strcmp(ident, "float"))    return ctype_float;
     if (!strcmp(ident, "double"))   return ctype_double;
@@ -826,7 +835,7 @@ static List *init_empty_struct_init(Ctype *ctype) {
         DictEntry *e = iter_next(&it);
         Ctype *type = dict_get(ctype->fields, e->key);
         switch(type->type) {
-            case CTYPE_CHAR ... CTYPE_LONG:
+            case CTYPE_BOOL ... CTYPE_LONG:
                 list_push(initlist, ast_inttype(type, 0));
                 break;
             case CTYPE_FLOAT ... CTYPE_DOUBLE:
@@ -1052,8 +1061,15 @@ static Ast *read_decl_init_val(Ast *var)
 
     Ast *init = read_expr();
     expect(';');
-    init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) 
-                                    : ast_double(eval_floatexpr(init));
+    
+    if (var->type == AST_GVAR) {
+        init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) 
+                                        : ast_double(eval_floatexpr(init));
+    }
+
+    if (init->type == AST_LITERAL && is_inttype(init->ctype) && is_inttype(var->ctype)) 
+        init->ctype = var->ctype;
+
     return ast_decl(var, init);
 }
 

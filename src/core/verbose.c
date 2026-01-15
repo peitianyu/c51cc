@@ -47,6 +47,7 @@ char *ctype_to_string(Ctype *ctype) {
     case CTYPE_VOID:  string_appendf(&s, "void"); break;
     case CTYPE_INT:   string_appendf(&s, "int"); break;
     case CTYPE_LONG:  string_appendf(&s, "long"); break;
+    case CTYPE_BOOL:  string_appendf(&s, "bool"); break;
     case CTYPE_CHAR:  string_appendf(&s, "char"); break;
     case CTYPE_FLOAT: string_appendf(&s, "float"); break;
     case CTYPE_DOUBLE:string_appendf(&s, "double"); break;
@@ -85,6 +86,8 @@ static void ast_to_string_int(String *buf, Ast *ast)
     switch (ast->type) {
     case AST_LITERAL:
         switch (ast->ctype->type) {
+        case CTYPE_BOOL:
+            string_appendf(buf, "%s", ast->ival ? "true" : "false");
         case CTYPE_CHAR:
             if (ast->ival == '\n')
                 string_appendf(buf, "'\n'");
