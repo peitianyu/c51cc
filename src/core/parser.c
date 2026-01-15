@@ -150,8 +150,27 @@ static Ast *ast_func(Ctype *rettype,
     return r;
 }
 
+static bool valid_init_var(Ast *var, Ast *init)
+{
+    switch(var->ctype->type) {
+        case CTYPE_CHAR ... CTYPE_DOUBLE:
+            return (init->ctype->type <= CTYPE_DOUBLE);
+        case CTYPE_ARRAY:
+            return (init->type == AST_ARRAY_INIT);
+        case CTYPE_PTR: 
+            return (init->ctype->type == CTYPE_PTR || init->ctype->type == CTYPE_ARRAY || 
+                    init->ctype->type == CTYPE_INT || init->type == AST_ADDR);
+        case CTYPE_STRUCT:
+            return (init->ctype->type == CTYPE_STRUCT);
+        default: return false;
+    }
+}
+
 static Ast *ast_decl(Ast *var, Ast *init)
 {
+    if(!valid_init_var(var, init))
+        error("Invalid var init: (%s) -> (%s)\n", ctype_to_string(init->ctype), ctype_to_string(var->ctype));
+
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_DECL;
     r->ctype = NULL;
@@ -997,12 +1016,17 @@ static Ast *read_decl_init_val(Ast *var)
         Ast *init = read_decl_struct_init(var->ctype);
         expect(';');
         return ast_decl(var, init);
+    } else if(var->ctype->type == CTYPE_PTR) {
+        Ast *init = read_expr();
+        expect(';');
+        ast_inttype(ctype_int, init); // !!!: 注意这里直接填地址有危险, 不建议这么做, 可能会飞, 后期将这部分限制住????
+        return ast_decl(var, init);
     }
 
     Ast *init = read_expr();
     expect(';');
-    // NOTE: 基础的常量折叠
-    init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) : ast_double(eval_floatexpr(init));
+    init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) 
+                                    : ast_double(eval_floatexpr(init));
     return ast_decl(var, init);
 }
 

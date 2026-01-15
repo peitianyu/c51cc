@@ -59,6 +59,7 @@ enum {
 
 enum {
     CTYPE_VOID,
+    CTYPE_BOOL,
     CTYPE_CHAR,
     CTYPE_INT,
     CTYPE_LONG,
@@ -238,6 +239,24 @@ extern char *make_label(void);
 extern List *read_toplevels(void);
 extern bool is_inttype(Ctype *ctype);
 extern bool is_flotype(Ctype *ctype);
+
+/* debug */
+#define error(...) errorf(__FILE__, __LINE__, __VA_ARGS__)
+static inline void errorf(char *file, int line, char *fmt, ...)
+{
+    #if C51CC_DEBUG
+    fprintf(stderr, "%s:%d: ", file, line);
+    #else 
+    TokenInfo info = get_current_token_info();
+    fprintf(stderr, "%s:%d: ", info.file, info.line);
+    #endif 
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+    exit(1);
+}
 
 
 #endif /* CC_H */
