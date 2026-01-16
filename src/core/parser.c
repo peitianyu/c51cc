@@ -46,6 +46,8 @@ static Ctype *read_decl_int(Token *name);
 static int read_decl_ctype_attr(Token tok, int *attr_out);
 static bool have_redefine_var(char* var_name);
 static bool get_enum_val(char* key, int* val);
+static bool is_type_keyword(const Token tok);
+static Ctype *read_decl_spec(void);
 
 static Ast *ast_uop(int type, Ctype *ctype, Ast *operand)
 {
@@ -175,6 +177,7 @@ static bool valid_init_var(Ast *var, Ast *init)
 {
     // NOTE: 未初始化, 则不判断
     if(!init) return true;
+    if(init->type == AST_CAST) init = init->cast_expr;
 
     switch(var->ctype->type) {
         case CTYPE_BOOL ... CTYPE_DOUBLE:
@@ -371,6 +374,15 @@ static Ast *ast_enum_def(Ctype *ctype) {
     r->ctype = ctype;
     return r;
 };
+
+static Ast *ast_cast(Ast *target, Ast *expr)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_CAST;
+    r->ctype = target;
+    r->cast_expr = expr;
+    return r;
+}
 
 static Ctype *make_ptr_type(Ctype *ctype)
 {
@@ -793,10 +805,16 @@ static Ctype *result_type(char op, Ctype *a, Ctype *b)
 static Ast *read_unary_expr(void)
 {
     Token tok = read_token();
-    printf("tok: %s\n", token_to_string(tok));
     if (get_ttype(tok) != TTYPE_PUNCT && get_ttype(tok) != TTYPE_IDENT) {
         unget_token(tok);
         return read_prim();
+    }
+
+    if (is_punct(tok, '(') && is_type_keyword(peek_token())) {
+        Ctype *target = read_decl_spec();      
+        expect(')');
+        Ast *expr = read_unary_expr();  
+        return ast_cast(target, expr);
     }
 
     if (is_ident(tok, "sizeof")) {

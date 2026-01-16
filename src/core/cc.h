@@ -55,6 +55,7 @@ enum {
     AST_STRUCT_INIT,
     AST_ENUM_DEF,
     AST_TYPE_DEF, 
+    AST_CAST,
     PUNCT_EQ,
     PUNCT_GE,        // >=
     PUNCT_LE,        // <=
@@ -225,6 +226,11 @@ typedef struct __Ast {
         struct {
             struct __Ast *struc;
             char *field; /* specific to ast_to_string only */
+        };
+
+        /* cast */
+        struct {
+            struct __Ast *cast_expr;   
         };
     };
 } Ast;

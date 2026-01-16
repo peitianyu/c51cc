@@ -252,6 +252,11 @@ static void ast_to_string_int(String *buf, Ast *ast)
     case AST_TYPE_DEF:
         string_appendf(buf, "(typedef %s %s)", ctype_to_string(ast->ctype), ast->typename);
         break;
+    case AST_CAST: {
+        string_appendf(buf, "(%s)", ctype_to_string(ast->ctype));
+        string_appendf(buf, "%s", ast_to_string(ast->cast_expr));
+        break;
+    }
     case AST_ADDR:
         uop_to_string(buf, "addr", ast);
         break;
