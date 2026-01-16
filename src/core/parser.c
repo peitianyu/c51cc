@@ -378,6 +378,9 @@ static Ctype *make_ptr_type(Ctype *ctype)
     r->type = CTYPE_PTR;
     r->ptr = ctype;
     r->size = 2; 
+    r->attr = ctype->attr;
+    r->bit_offset = 0;
+    r->bit_size = 0;
     list_push(ctypes, r);
     return r;
 }
@@ -387,6 +390,9 @@ static Ctype *make_array_type(Ctype *ctype, int len)
     Ctype *r = malloc(sizeof(Ctype));
     r->type = CTYPE_ARRAY;
     r->ptr = ctype;
+    r->attr = ctype->attr;
+    r->bit_offset = 0;
+    r->bit_size = 0;
     r->size = (len < 0) ? -1 : ctype->size * len;
     r->len = len;
     list_push(ctypes, r);
@@ -932,27 +938,58 @@ static bool is_type_keyword(const Token tok)
     return dict_get(typedefenv, get_ident(tok));
 }
 
-static Ast *read_decl_array_init_int(Ctype *ctype)
+
+static int array_n_elts(Ctype *ctype)
+{
+    if (ctype->type != CTYPE_ARRAY) return -1;
+    return ctype->len;          /* -1 表示“未知” */
+}
+
+static Ast *read_decl_array_init_recurse(Ctype *ctype)
 {
     Token tok = read_token();
+
     if (ctype->ptr->type == CTYPE_CHAR && get_ttype(tok) == TTYPE_STRING)
         return ast_string(get_strtok(tok));
+
     if (!is_punct(tok, '{'))
-        error("Expected an initializer list for %s, but got %s", ctype_to_string(ctype), token_to_string(tok));
-    List *initlist = make_list();
+        error("Expected '{' for array initializer of %s, got %s",
+              ctype_to_string(ctype), token_to_string(tok));
+
+    List *row_list = make_list();   
+    int expect_rows = array_n_elts(ctype);
+    int actual_rows = 0;
+
     while (1) {
-        Token tok = read_token();
-        if (is_punct(tok, '}'))
+        if (is_punct(peek_token(), '}'))  
             break;
-        unget_token(tok);
-        Ast *init = read_expr();
-        list_push(initlist, init);
-        result_type('=', init->ctype, ctype->ptr);
-        tok = read_token();
-        if (!is_punct(tok, ','))
-            unget_token(tok);
+
+        Ast *one_row;
+        if (ctype->ptr->type == CTYPE_ARRAY)
+            one_row = read_decl_array_init_recurse(ctype->ptr);
+        else {
+            Token t = read_token();
+            unget_token(t);
+            one_row = read_expr();
+            result_type('=', one_row->ctype, ctype->ptr);
+        }
+        list_push(row_list, one_row);
+        actual_rows++;
+
+        if (is_punct(peek_token(), ',')) {
+            read_token();
+            continue;
+        }
+        break;
     }
-    return ast_array_init(initlist);
+
+    expect('}');
+
+    if (expect_rows != -1 && actual_rows != expect_rows)
+        error("Array row count mismatch: expect %d, got %d",
+              expect_rows, actual_rows);
+
+    return ast_array_init(row_list);
 }
 
 static List *init_empty_struct_init(Ctype *ctype) {
@@ -1256,7 +1293,7 @@ static Ctype *read_decl_spec(void)
 static Ast *read_decl_init_val(Ast *var)
 {
     if (var->ctype->type == CTYPE_ARRAY) {
-        Ast *init = read_decl_array_init_int(var->ctype);
+        Ast *init = read_decl_array_init_recurse(var->ctype);
         int len = (init->type == AST_STRING) ? strlen(init->sval) + 1
                                              : list_len(init->arrayinit);
         if (var->ctype->len == -1) {
