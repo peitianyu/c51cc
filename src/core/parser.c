@@ -410,6 +410,8 @@ static Ctype *make_struct_type(Dict *fields, int size)
     r->type = CTYPE_STRUCT;
     r->fields = fields;
     r->size = size;
+    r->bit_offset = 0;
+    r->bit_size = 0;
     list_push(ctypes, r);
     return r;
 }
@@ -542,6 +544,9 @@ static int priority(const Token tok)
     case '|':
         return 10;
     case PUNCT_EQ:
+    case PUNCT_GE:
+    case PUNCT_LE:
+    case PUNCT_NE:
         return 7;
     case PUNCT_LOGAND:
         return 11;

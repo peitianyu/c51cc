@@ -284,6 +284,12 @@ static void ast_to_string_int(String *buf, Ast *ast)
         char *right = ast_to_string(ast->right);
         if (ast->type == PUNCT_EQ)
             string_appendf(buf, "(== ");
+        else if (ast->type == PUNCT_GE)
+            string_appendf(buf, "(>= ");
+        else if (ast->type == PUNCT_LE)
+            string_appendf(buf, "(<= ");
+        else if (ast->type == PUNCT_NE)
+            string_appendf(buf, "(!= ");
         else
             string_appendf(buf, "(%c ", ast->type);
         string_appendf(buf, "%s %s)", left, right);

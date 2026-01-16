@@ -280,7 +280,6 @@ static Token read_token_int(void)
     case ']':
     case '{':
     case '}':
-    case '!':
     case '?':
     case ':':
     case '%':
@@ -318,9 +317,20 @@ static Token read_token_int(void)
             update_token_info(start_line, start_col, &tok);
             return tok;
         } else { 
-            // FIXME: 这里可能存在问题
             ungetc_with_pos(c);
             tok = make_punct(c);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+    case '!':
+        c = getc_with_pos();
+        if(c == '=') {
+            tok = make_punct(PUNCT_NE);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        } else {
+            ungetc_with_pos(c);
+            tok = make_punct('<');
             update_token_info(start_line, start_col, &tok);
             return tok;
         }
@@ -333,13 +343,37 @@ static Token read_token_int(void)
         update_token_info(start_line, start_col, &tok);
         return tok;
     case '<':
-        tok = read_rep('<', '<', PUNCT_LSHIFT);
-        update_token_info(start_line, start_col, &tok);
-        return tok;
+        c = getc_with_pos();
+        if(c == '=') {
+            tok = make_punct(PUNCT_LE);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        } else if (c == '<') {
+            tok = make_punct(PUNCT_LSHIFT);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        } else {
+            ungetc_with_pos(c);
+            tok = make_punct('<');
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
     case '>':
-        tok = read_rep('>', '>', PUNCT_RSHIFT);
-        update_token_info(start_line, start_col, &tok);
-        return tok;
+        c = getc_with_pos();
+        if(c == '=') {
+            tok = make_punct(PUNCT_GE);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        } else if (c == '>') {
+            tok = make_punct(PUNCT_RSHIFT);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        } else {
+            ungetc_with_pos(c);
+            tok = make_punct('>');
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
     case '"':
         tok = read_string();
         update_token_info(start_line, start_col, &tok);

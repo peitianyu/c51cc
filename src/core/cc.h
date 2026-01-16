@@ -56,6 +56,9 @@ enum {
     AST_ENUM_DEF,
     AST_TYPE_DEF, 
     PUNCT_EQ,
+    PUNCT_GE,        // >=
+    PUNCT_LE,        // <=
+    PUNCT_NE,        // !=
     PUNCT_ELLIPSIS,
     PUNCT_INC,
     PUNCT_DEC,
