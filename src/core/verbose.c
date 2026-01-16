@@ -188,6 +188,17 @@ static void ast_to_string_int(String *buf, Ast *ast)
         string_appendf(buf, "(? %s %s %s)", ast_to_string(ast->cond),
                        ast_to_string(ast->then), ast_to_string(ast->els));
         break;
+    case AST_SWITCH: {
+        string_appendf(buf, "(switch %s ", ast_to_string(ast->ctrl));
+        for (Iter i = list_iter(ast->cases); !iter_end(i);) {
+            SwitchCase *c = iter_next(&i);
+            string_appendf(buf, "(case %ld %s) ", c->val, ast_to_string(c->stmt));
+        }
+        if (ast->default_stmt)
+            string_appendf(buf, "(default %s) ", ast_to_string(ast->default_stmt));
+        string_appendf(buf, ")");
+        break;
+    }
     case AST_FOR:
         string_appendf(buf, "(for %s %s %s ", ast_to_string(ast->forinit),
                        ast_to_string(ast->forcond),

@@ -244,6 +244,25 @@ static Ast *ast_ternary(Ctype *ctype, Ast *cond, Ast *then, Ast *els)
     return r;
 }
 
+static Ast *ast_switch(Ast *ctrl, List *cases, Ast *def_stmt)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_SWITCH;
+    r->ctype = NULL;
+    r->ctrl = ctrl;
+    r->cases = cases;
+    r->default_stmt = def_stmt;
+    return r;
+}
+
+static SwitchCase *make_switch_case(long val, Ast *stmt)
+{
+    SwitchCase *c = malloc(sizeof(SwitchCase));
+    c->val  = val;
+    c->stmt = stmt;
+    return c;
+}
+
 static Ast *ast_for(Ast *init, Ast *cond, Ast *step, Ast *body)
 {
     Ast *r = malloc(sizeof(Ast));
@@ -1334,6 +1353,56 @@ static Ast *read_if_stmt(void)
     }
 }
 
+static Ast *read_switch_stmt(void)
+{
+    expect('(');
+    Ast *ctrl = read_expr();
+    expect(')');
+
+    /* 用来查重 case 值 */
+    Dict *seen = &EMPTY_DICT;
+    List *cases = make_list();
+    Ast  *def_stmt = NULL;
+
+    expect('{');
+    while (1) {
+        Token tok = peek_token();
+        if (is_punct(tok, '}')) { read_token(); break; }
+
+        if (is_ident(tok, "case")) {
+            read_token();
+            long cv = eval_intexpr(read_expr());
+
+            String buf = make_string();
+            string_appendf(&buf, "%ld", cv);
+            char *key = get_cstring(buf);
+
+            if (dict_get(seen, key))
+                error("duplicate case value %s", key);
+            dict_put(seen, key, (void *)1);
+
+            expect(':');
+            list_push(cases, make_switch_case(cv, read_stmt()));
+            continue;
+        }
+
+        if (is_ident(tok, "default")) {
+            read_token();
+            if (def_stmt) error("multiple default labels");
+            expect(':'); 
+            def_stmt = read_stmt();
+            continue;
+        }
+
+        /* 普通语句 */
+        read_stmt();   /* 也可收集到 cases 里，看需求 */
+    }
+
+    seen = NULL;
+    return ast_switch(ctrl, cases, def_stmt);
+}
+
+
 static Ast *read_opt_decl_or_stmt(void)
 {
     Token tok = read_token();
@@ -1394,7 +1463,7 @@ static Ast *read_goto_stmt(void)
     Token tok = read_token();
     if(get_ttype(tok) != TTYPE_IDENT)
         error("Goto need a identify, but got %s", token_to_string(tok));
-        
+
     // FIXME: 应该需要检查一下是否存在标签
     expect(';'); 
     return ast_goto(get_ident(tok));
@@ -1430,6 +1499,7 @@ static Ast *read_stmt(void)
     is_first = false;
 
     if (is_ident(tok, "if"))     { read_token(); return read_if_stmt(); }
+    if (is_ident(tok, "switch")) { read_token(); return read_switch_stmt(); }
     if (is_ident(tok, "for"))    { read_token(); return read_for_stmt(); }
     if (is_ident(tok, "while"))  { read_token(); return read_while_stmt(); }
     if (is_ident(tok, "do"))     { read_token(); return read_dowhile_stmt(); }

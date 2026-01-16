@@ -48,6 +48,7 @@ enum {
     AST_BREAK,
     AST_CONTINUE,
     AST_RETURN,
+    AST_SWITCH,
     AST_COMPOUND_STMT,
     AST_STRUCT_REF,
     AST_STRUCT_DEF,
@@ -77,7 +78,6 @@ enum {
     CTYPE_STRUCT,
     CTYPE_ENUM
 };
-
 
 typedef struct __CtypeAttr {
     int ctype_const         : 1;
@@ -192,9 +192,17 @@ typedef struct __Ast {
             struct __Ast *forbody;
         };
 
+        /* while/do-while statement */
         struct {
             struct __Ast *while_cond;
             struct __Ast *while_body;
+        };
+
+        /* switch-case statement */
+        struct {
+            struct __Ast *ctrl;         
+            List *cases;       /* List<SwitchCase*> */
+            struct __Ast *default_stmt; 
         };
 
         /* goto/label */
@@ -213,6 +221,8 @@ typedef struct __Ast {
         };
     };
 } Ast;
+
+typedef struct { long val; Ast *stmt; } SwitchCase;
 
 /* verbose.c */
 extern char *token_to_string(const Token tok);
