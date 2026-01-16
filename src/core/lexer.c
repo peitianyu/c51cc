@@ -283,6 +283,8 @@ static Token read_token_int(void)
     case '?':
     case ':':
     case '%':
+    case '~':
+    case '^':
         tok = make_punct(c);
         update_token_info(start_line, start_col, &tok);
         return tok;
@@ -330,7 +332,7 @@ static Token read_token_int(void)
             return tok;
         } else {
             ungetc_with_pos(c);
-            tok = make_punct('<');
+            tok = make_punct('!');
             update_token_info(start_line, start_col, &tok);
             return tok;
         }

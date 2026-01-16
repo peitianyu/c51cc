@@ -273,6 +273,9 @@ static void ast_to_string_int(String *buf, Ast *ast)
     case '!':
         uop_to_string(buf, "!", ast);
         break;
+    case '~':
+        uop_to_string(buf, "~", ast);
+        break;
     case '&':
         binop_to_string(buf, "&", ast);
         break;

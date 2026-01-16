@@ -489,6 +489,8 @@ static int eval_intexpr(Ast *ast)
         return eval_intexpr(ast->left) / eval_intexpr(ast->right);
     case '%':
         return eval_intexpr(ast->left) % eval_intexpr(ast->right);
+    case '^':
+        return eval_intexpr(ast->left) % eval_intexpr(ast->right);
     case PUNCT_LSHIFT:
         return eval_intexpr(ast->left) << eval_intexpr(ast->right);
     case PUNCT_RSHIFT:
@@ -547,6 +549,8 @@ static int priority(const Token tok)
         return 6;
     case '&':
         return 8;
+    case '^':
+        return 9;
     case '|':
         return 10;
     case PUNCT_EQ:
@@ -789,6 +793,7 @@ static Ctype *result_type(char op, Ctype *a, Ctype *b)
 static Ast *read_unary_expr(void)
 {
     Token tok = read_token();
+    printf("tok: %s\n", token_to_string(tok));
     if (get_ttype(tok) != TTYPE_PUNCT && get_ttype(tok) != TTYPE_IDENT) {
         unget_token(tok);
         return read_prim();
@@ -814,6 +819,10 @@ static Ast *read_unary_expr(void)
     if (is_punct(tok, '!')) {
         Ast *operand = read_unary_expr();
         return ast_uop('!', ctype_int, operand);
+    }
+    if (is_punct(tok, '~')) {
+        Ast *operand = read_unary_expr();
+        return ast_uop('~', ctype_int, operand);
     }
     if (is_punct(tok, '*')) {
         Ast *operand = read_unary_expr();
