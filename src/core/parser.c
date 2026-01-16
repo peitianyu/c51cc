@@ -393,11 +393,13 @@ static Ctype *make_array_type(Ctype *ctype, int len)
     return r;
 }
 
-static Ctype *make_struct_field_type(Ctype *ctype, int offset)
+static Ctype *make_struct_field_type(Ctype *ctype, int offset, int bit_offset, int bit_size)
 {
     Ctype *r = malloc(sizeof(Ctype));
     memcpy(r, ctype, sizeof(Ctype));
     r->offset = offset;
+    r->bit_offset = bit_offset;
+    r->bit_size = bit_size;
     list_push(ctypes, r);
     return r;
 }
@@ -1041,16 +1043,29 @@ static char *read_struct_union_enum_tag(void)
     return NULL;
 }
 
-static Dict *read_struct_union_fields(void)
+static Dict *read_struct_union_fields(bool is_struct_type)
 {
     Dict *r = make_dict(NULL);
     expect('{');
+    int bit_offset = 0;
     while (1) {
         if (!is_type_keyword(peek_token()))
             break;
         Token name;
         Ctype *fieldtype = read_decl_int(&name);
-        dict_put(r, get_ident(name), make_struct_field_type(fieldtype, 0));
+        
+        int bit_size = 0;
+        Token tok = peek_token();
+        if(is_struct_type && is_punct(tok, ':')) {
+            read_token();
+            Ast* bit_ast = read_expr();
+            if(!is_inttype(bit_ast->ctype)) 
+                error("Bit field need int type, but got %s", ctype_to_string(bit_ast->ctype));
+            bit_size = eval_intexpr(bit_ast);
+        }
+
+        dict_put(r, get_ident(name), make_struct_field_type(fieldtype, 0, bit_offset, bit_size));
+        bit_offset += bit_size;
         expect(';');
     }
     expect('}');
@@ -1063,7 +1078,7 @@ static Ctype *read_union_def(void)
     Ctype *ctype = dict_get(union_defs, tag);
     if (ctype)
         return ctype;
-    Dict *fields = read_struct_union_fields();
+    Dict *fields = read_struct_union_fields(false);
     int maxsize = 0;
     for (Iter i = list_iter(dict_values(fields)); !iter_end(i);) {
         Ctype *fieldtype = iter_next(&i);
@@ -1081,16 +1096,23 @@ static Ctype *read_struct_def(void)
     Ctype *ctype = dict_get(struct_defs, tag);
     if (ctype)
         return ctype;
-    Dict *fields = read_struct_union_fields();
+    Dict *fields = read_struct_union_fields(true);
     int offset = 0;
-    for (Iter i = list_iter(dict_values(fields)); !iter_end(i);) {
-        Ctype *fieldtype = iter_next(&i);
+    Iter i = list_iter(dict_values(fields));
+    Ctype *fieldtype;
+    for (; !iter_end(i);) {
+        fieldtype = iter_next(&i);
         int size = (fieldtype->size < MAX_ALIGN) ? fieldtype->size : MAX_ALIGN;
         if (offset % size != 0)
             offset += size - offset % size;
         fieldtype->offset = offset;
         offset += fieldtype->size;
     }
+    if(fieldtype->bit_size) {
+        offset = (fieldtype->bit_offset+fieldtype->bit_size)/8;
+        if((fieldtype->bit_offset+fieldtype->bit_size)%8) offset++;
+    }
+
     Ctype *r = make_struct_type(fields, offset);
     if (tag)
         dict_put(struct_defs, tag, r);

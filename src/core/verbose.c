@@ -42,6 +42,7 @@ char *ctype_to_string(Ctype *ctype) {
     String s = make_string();
     const char *a = ctype_attr_string(ctype->attr);
     if (*a) string_appendf(&s, "%s ", a);
+    if(ctype->bit_size) string_appendf(&s, "%d: ", ctype->bit_size);
 
     switch (ctype->type) {
     case CTYPE_VOID:  string_appendf(&s, "void"); break;

@@ -105,6 +105,9 @@ typedef struct __Ctype {
     /* struct */
     Dict *fields;
     int offset;
+
+    int bit_offset;     /* 位域支持 */
+    int bit_size;
 } Ctype;
 
 typedef struct __Ast {
