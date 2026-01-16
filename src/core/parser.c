@@ -375,7 +375,7 @@ static Ast *ast_enum_def(Ctype *ctype) {
     return r;
 };
 
-static Ast *ast_cast(Ast *target, Ast *expr)
+static Ast *ast_cast(Ctype *target, Ast *expr)
 {
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_CAST;
