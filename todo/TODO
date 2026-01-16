@@ -1,15 +1,15 @@
 ✔ 完成语法功能整理工作 [](./支持语法功能.md) @done(26-01-12 17:14)
 ✘ 拆解出51单片机需要切实添加的语法 @cancelled(26-01-15 10:13)
-☐ 完善struct, union接口
+✔ 完善struct, union接口 @done(26-01-16 10:36)
     ✔ 添加struct union定义ast, 并展示 @done(26-01-12 21:54)
     ✔ struct顺序初始化, {0};初始化 @done(26-01-13 17:50)
     ✔ struct指定初始化器初始化 @done(26-01-13 17:50)
-    ☐ 位域的支持
-☐ 补全变量初始化
+    ✔ 位域的支持 @done(26-01-16 10:36)
+✔ 补全变量初始化 @done(26-01-16 11:22)
     ✔ char int 初始化 @done(26-01-13 22:49)
     ✔ float double初始化 @done(26-01-13 22:49)
-    ☐ arr初始化
-        ☐ 多维数组序列初始化
+    ✔ arr初始化 @done(26-01-16 11:22)
+        ✔ 多维数组序列初始化 @done(26-01-16 11:22)
     ✔ ptr初始化 @done(26-01-13 22:49)
 ✔ 添加对于bool的支持 (这部分在c51中表示为bit) @done(26-01-15 13:20)
 ✔ 添加enum类型支持 @done(26-01-15 18:03)
@@ -24,10 +24,16 @@
 ✔ 添加变量重复定义, 未定义检测 @done(26-01-15 12:34)
 ✔ 添加函数重复定义与未声明检测 @done(26-01-15 12:51)
 ✘ 添加sfr sfr16 sbit bit data xdata idata bdata code reentrant interrupt using等修饰符支持 @cancelled(26-01-14 17:52)
-☐ 添加控制语句 while do-while continue break  else if
-☐ 添加switch/case/default语句
-☐ 添加goto语句
-☐ 添加表达式 sizeof (type)cast typeof ~ ^ . -> <<= >>= &= |= ^= >= <= != += -= *= /= %= <<= >>= 
+✔ 添加控制语句 while do-while continue break  else if @done(26-01-15 22:29)
+✔ 添加switch/case/default语句 @done(26-01-16 08:33)
+    ✔ 添加case 1 ... 9:语法支持 @done(26-01-16 09:13)
+✔ 添加goto语句 @done(26-01-15 23:04)
+✔ 添加判断>= <= !=支持 @done(26-01-16 11:01)
+☐ 添加表达式 sizeof typeof 
+☐ ~ ^ <<= >>= &= |= ^= += -= *= /= %=
+☐ (type)cast
+☐ 添加var_type语句
+☐ 添加defer语句
 ✔ 添加对于void foo(void){}语句支持 @done(26-01-12 21:00)
 ☐ 添加对可变参数支持
 ☐ 添加对于预编译等编译单元支持
