@@ -276,7 +276,6 @@ static Token read_token_int(void)
     case ')':
     case ',':
     case ';':
-    case '.':
     case '[':
     case ']':
     case '{':
@@ -312,6 +311,19 @@ static Token read_token_int(void)
         tok = read_rep('+', '+', PUNCT_INC);
         update_token_info(start_line, start_col, &tok);
         return tok;
+    case '.':
+        c = getc_with_pos();
+        if (c == '.') {
+            tok = read_rep('.', '.', PUNCT_ELLIPSIS);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        } else { 
+            // FIXME: 这里可能存在问题
+            ungetc_with_pos(c);
+            tok = make_punct(c);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
     case '&':
         tok = read_rep('&', '&', PUNCT_LOGAND);
         update_token_info(start_line, start_col, &tok);

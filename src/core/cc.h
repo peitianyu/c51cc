@@ -56,6 +56,7 @@ enum {
     AST_ENUM_DEF,
     AST_TYPE_DEF, 
     PUNCT_EQ,
+    PUNCT_ELLIPSIS,
     PUNCT_INC,
     PUNCT_DEC,
     PUNCT_LOGAND,
@@ -222,7 +223,7 @@ typedef struct __Ast {
     };
 } Ast;
 
-typedef struct { long val; Ast *stmt; } SwitchCase;
+typedef struct { long low, high;; Ast *stmt; } SwitchCase;
 
 /* verbose.c */
 extern char *token_to_string(const Token tok);
@@ -233,7 +234,6 @@ extern char *ctype_to_string(Ctype *ctype);
 extern bool is_punct(const Token tok, int c);
 extern void unget_token(const Token tok);
 extern Token peek_token(void);
-extern Token peek2_token(void);
 extern Token read_token(void);
 extern TokenInfo get_current_token_info(void);
 extern void set_current_filename(const char *filename);

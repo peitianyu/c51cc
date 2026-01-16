@@ -255,10 +255,11 @@ static Ast *ast_switch(Ast *ctrl, List *cases, Ast *def_stmt)
     return r;
 }
 
-static SwitchCase *make_switch_case(long val, Ast *stmt)
+static SwitchCase *make_switch_case(long low, long high, Ast *stmt)
 {
     SwitchCase *c = malloc(sizeof(SwitchCase));
-    c->val  = val;
+    c->low  = low;
+    c->high  = high;
     c->stmt = stmt;
     return c;
 }
@@ -1372,17 +1373,28 @@ static Ast *read_switch_stmt(void)
         if (is_ident(tok, "case")) {
             read_token();
             long cv = eval_intexpr(read_expr());
+            long low = cv, high = cv;
 
-            String buf = make_string();
-            string_appendf(&buf, "%ld", cv);
-            char *key = get_cstring(buf);
+            tok = peek_token();
+            if(is_punct(tok, PUNCT_ELLIPSIS)) {
+                read_token();
+                high = eval_intexpr(read_expr());
+                if (high < low) error("case range end (%ld) < start (%ld)", high, low);
+            }
 
-            if (dict_get(seen, key))
-                error("duplicate case value %s", key);
-            dict_put(seen, key, (void *)1);
-
+            
+            for (long v = low; v <= high; ++v) {
+                String buf = make_string();
+                string_appendf(&buf, "%ld", v);
+                char *key = get_cstring(buf);
+                if (dict_get(seen, key))
+                    error("duplicate case value %ld in range", key);
+                
+                dict_put(seen, key, (void *)1);
+            }
+                
             expect(':');
-            list_push(cases, make_switch_case(cv, read_stmt()));
+            list_push(cases, make_switch_case(low, high, read_stmt()));
             continue;
         }
 
@@ -1394,8 +1406,7 @@ static Ast *read_switch_stmt(void)
             continue;
         }
 
-        /* 普通语句 */
-        read_stmt();   /* 也可收集到 cases 里，看需求 */
+        read_stmt();  
     }
 
     seen = NULL;
