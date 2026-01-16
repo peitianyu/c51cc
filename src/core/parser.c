@@ -612,8 +612,11 @@ static Ast *read_ident_or_func(char *name)
     unget_token(tok);
     Ast *v = dict_get(localenv, name);
     
-    if (!v)
-        error("Undefined varaible: %s", name);
+    if (!v) {
+        v = dict_get(globalenv, name);
+        if(!v) error("Undefined varaible: %s", name);
+    }   
+        
     return v;
 }
 
@@ -786,10 +789,18 @@ static Ctype *result_type(char op, Ctype *a, Ctype *b)
 static Ast *read_unary_expr(void)
 {
     Token tok = read_token();
-    if (get_ttype(tok) != TTYPE_PUNCT) {
+    if (get_ttype(tok) != TTYPE_PUNCT && get_ttype(tok) != TTYPE_IDENT) {
         unget_token(tok);
         return read_prim();
     }
+
+    if (is_ident(tok, "sizeof")) {
+        expect('(');
+        Ast *e = read_expr();
+        expect(')');
+        return ast_inttype(ctype_int, e->ctype->size);
+    }
+
     if (is_punct(tok, '(')) {
         Ast *r = read_expr();
         expect(')');
