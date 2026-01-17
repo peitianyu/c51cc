@@ -139,12 +139,22 @@ static void ast_to_string_int(String *buf, Ast *ast)
         string_appendf(buf, ")");
         break;
     }
-    case AST_FUNC: {
-        string_appendf(buf, "(%s)%s(", ctype_to_string(ast->ctype), ast->fname);
+    case AST_FUNC_DECL:
+        string_appendf(buf, "(funcdecl %s)%s(", ctype_to_string(ast->ctype), ast->fname);
         for (Iter i = list_iter(ast->params); !iter_end(i);) {
             Ast *param = iter_next(&i);
             string_appendf(buf, "%s %s", ctype_to_string(param->ctype),
                            ast_to_string(param));
+            if (!iter_end(i))
+                string_appendf(buf, ",");
+        }
+        string_appendf(buf, ")");
+        break;
+    case AST_FUNC_DEF: {
+        string_appendf(buf, "(%s)%s(", ctype_to_string(ast->ctype), ast->fname);
+        for (Iter i = list_iter(ast->params); !iter_end(i);) {
+            Ast *param = iter_next(&i);
+            string_appendf(buf, "%s %s", ctype_to_string(param->ctype), ast_to_string(param));
             if (!iter_end(i))
                 string_appendf(buf, ",");
         }

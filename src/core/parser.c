@@ -155,7 +155,7 @@ static Ast *ast_typedef(Ctype *ctype, char *typename)
     return r;
 }
 
-static Ast *ast_func(Ctype *rettype,
+static Ast *ast_func_def(Ctype *rettype,
                      char *fname,
                      List *params,
                      Ast *body,
@@ -163,7 +163,7 @@ static Ast *ast_func(Ctype *rettype,
                      List *labels)
 {
     Ast *r = malloc(sizeof(Ast));
-    r->type = AST_FUNC;
+    r->type = AST_FUNC_DEF;
     r->ctype = rettype;
     r->fname = fname;
     r->params = params;
@@ -172,6 +172,20 @@ static Ast *ast_func(Ctype *rettype,
     r->body = body;
     return r;
 }
+
+static Ast *ast_func_decl(Ctype *rettype, char *fname, List *params)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_FUNC_DECL;
+    r->ctype = rettype;
+    r->fname = fname;
+    r->params = params;
+    r->localvars = NULL;
+    r->labels = NULL;
+    r->body = NULL;
+    return r;
+}
+                    
 
 static bool valid_init_var(Ast *var, Ast *init)
 {
@@ -624,10 +638,13 @@ static Ast *read_ident_or_func(char *name)
     Token tok = read_token();
     if (is_punct(tok, '('))
         return read_func_args(name);
-            
-    unget_token(tok);
-    Ast *v = dict_get(localenv, name);
     
+    if (is_punct(tok, ':'))
+        return ast_label(name);
+
+    unget_token(tok);
+
+    Ast *v = dict_get(localenv, name);
     if (!v) {
         v = dict_get(globalenv, name);
         if(!v) error("Undefined varaible: %s", name);
@@ -1620,20 +1637,8 @@ static Ast *read_stmt(void)
     if (is_ident(tok, "goto"))   { read_token(); return read_goto_stmt(); }
     if (is_punct(tok, '{'))      { read_token(); return read_compound_stmt(); }
 
-    if(get_ttype(tok) == TTYPE_IDENT) {
-        char* name = get_ident(tok);
-        Ast *v = dict_get(localenv, name);
-        if(!v) {
-            read_token();  
-            tok = read_token(); 
-            
-            if(!is_punct(tok, ':')) error("Undefined varaible: %s", name);
-            else                    return ast_label(name);
-        }
-    }
-    
     Ast *r = read_expr();
-    expect(';');
+    if(r->type != AST_LABEL) expect(';');
     return r;
 }
 
@@ -1657,6 +1662,7 @@ static Ast *read_compound_stmt(void)
         unget_token(tok);
 
         Ast *stmt = read_decl_or_stmt();
+
         if (stmt)
             list_push(list, stmt);
         if (!stmt)
@@ -1701,24 +1707,33 @@ static List *read_params(void)
 static Ast *read_func_def(Ctype *rettype, char *fname)
 {
     if(have_redefine_func(fname))   
-        error("Redecl function: %s", fname);
+        error("Redeclaration function: %s", fname);
     
     expect('(');
     localenv = make_dict(globalenv);
     List *params = read_params();
-    expect('{');
-    is_first = true;
-    localenv = make_dict(localenv);
-    localvars = make_list();
-    labels = make_list();
-    Ast *body = read_compound_stmt();
-    Ast *r = ast_func(rettype, fname, params, body, localvars, labels);
-    localenv = dict_parent(localenv);
-    localvars = NULL;
-    labels = NULL;
 
-    dict_put(functionenv, fname, r);
-    return r;
+    Token tok = read_token();
+    if(is_punct(tok, '{')) {
+        is_first = true;
+        localenv = make_dict(localenv);
+        localvars = make_list();
+        labels = make_list();
+        Ast *body = read_compound_stmt();
+        Ast *r = ast_func_def(rettype, fname, params, body, localvars, labels);
+        localenv = dict_parent(localenv);
+        localvars = NULL;
+        labels = NULL;
+
+        dict_put(functionenv, fname, r);
+        return r;
+    }else if (is_punct(tok, ';')) {
+        Ast *r = ast_func_decl(rettype, fname, params);
+        dict_put(functionenv, fname, r);
+        return r;
+    }
+
+    return NULL;
 }
 
 static Ast *read_decl_or_func_def(void)
