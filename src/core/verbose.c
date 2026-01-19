@@ -358,15 +358,11 @@ char *token_to_string(const Token tok)
 #include "minitest.h"
 
 TEST(test, verbose) {
-    // char infile[256];
-    // printf("file path: ");
-    // if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
-    //     puts("open fail"), exit(1);
-
-    char infile[256] = "/mnt/d/ws/test/MazuCC/test/test.c";
-    if (!freopen(strtok(infile, "\n"), "r", stdin))
+    char infile[256];
+    printf("file path: ");
+    if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
-    
+
     set_current_filename(infile);
         
     List *toplevels = read_toplevels();
