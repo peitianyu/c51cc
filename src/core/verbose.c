@@ -363,7 +363,7 @@ TEST(test, verbose) {
     // if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
     //     puts("open fail"), exit(1);
 
-    char infile[256] = "/mnt/d/ws/test/MazuCC/test/test_all.c";
+    char infile[256] = "./test/test_all.c";
     if (!freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
 
