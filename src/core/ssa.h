@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include "list.h"
+#include "dict.h"
+#include "cc.h"
 
 typedef enum IrOp {
     IROP_NOP = 0, IROP_CONST, IROP_ADD, IROP_MUL, IROP_SUB, IROP_DIV,
@@ -17,34 +19,20 @@ typedef enum IrOp {
     IROP_LCONST
 } IrOp;
 
-typedef struct Type {
-    enum { TYPE_INT, TYPE_FLOAT, TYPE_PTR, TYPE_ARRAY, TYPE_STRUCT, TYPE_UNION, TYPE_ENUM } kind;
-    union {
-        struct { bool unsign; int bits; } i;      // INT
-        struct {int bits; } f;                    // FLOAT
-        struct Type *base;                        // PTR
-        struct { struct Type *elem; int len; } a; // ARRAY
-        struct { List *fields; int bitsize; } s;  // STRUCT|UNION
-        List *members;                            // List<EnumMember*>   ENUM 
-    };
-} Type;
-
-typedef struct StructField { const char *name; Type *type; int offset, bit_offset, bit_size; } StructField;
-typedef struct EnumMember { const char *name; int64_t val; } EnumMember;
-
 typedef struct Instr {
     int         op;    
-    const char *dest;       /* SSA 名，NULL 表示无 dest */
-    Type       *type;       /* dest 存在时必须          */
-    List *args;             /* SSA 源数组 const char *  */
-    List *labels;           /* 标签数组 const char *    */
+    const char *dest;       /* SSA 名，NULL 表示无 dest     */
+    Ctype       *type;      /* dest 存在时必须, 这里直接复用 */
+    List *args;             /* SSA 源数组 const char *      */
+    List *labels;           /* 标签数组 const char *        */
     union {
         int64_t ival;
         double fval;
+        List *array_val;
+        List *struct_val;
     };
     struct { int restrict_:1, volatile_:1, reg:1, mem:3; } attr;
 } Instr;
-
 
 typedef struct Block {
     uint32_t id;
@@ -57,7 +45,7 @@ typedef struct Block {
 
 typedef struct Func {
     const char  *name;
-    Type        *ret_type;
+    Ctype       *ret_type;
 
     List        *param_names;   // List<const char *>
     List        *blocks;        // List<Block>
@@ -66,7 +54,7 @@ typedef struct Func {
 
 typedef struct Global {
     const char *name;
-    Type       *type;
+    Ctype      *type;
     bool        is_extern;
     union { int64_t i; double f; } init;
 } Global;
@@ -83,6 +71,7 @@ typedef struct SSABuild {
     
     List    *instr_buf;         // List<*Instr> 指令池 
     List    *name_buf;          // List<const char *> 名字池 
+    Dict    *var_map;
 } SSABuild;
 
 #endif /* __SSA_H__ */

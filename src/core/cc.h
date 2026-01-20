@@ -237,7 +237,7 @@ typedef struct __Ast {
     };
 } Ast;
 
-typedef struct { long low, high;; Ast *stmt; } SwitchCase;
+typedef struct { long low, high; Ast *stmt; } SwitchCase;
 
 /* verbose.c */
 extern char *token_to_string(const Token tok);
