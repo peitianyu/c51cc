@@ -192,7 +192,6 @@ static bool valid_init_var(Ast *var, Ast *init)
     // NOTE: 未初始化, 则不判断
     if(!init) return true;
     if(init->type == AST_CAST) init = init->cast_expr;
-
     switch(var->ctype->type) {
         case CTYPE_BOOL ... CTYPE_DOUBLE:
             return (init->ctype->type <= CTYPE_DOUBLE);
@@ -436,7 +435,7 @@ static Ctype *make_struct_field_type(Ctype *ctype, int offset, int bit_offset, i
     return r;
 }
 
-static Ctype *make_struct_type(Dict *fields, int size)
+static Ctype *make_struct_type(Dict *fields, int size, bool is_union)
 {
     Ctype *r = malloc(sizeof(Ctype));
     r->type = CTYPE_STRUCT;
@@ -444,6 +443,7 @@ static Ctype *make_struct_type(Dict *fields, int size)
     r->size = size;
     r->bit_offset = 0;
     r->bit_size = 0;
+    r->is_union = is_union;
     list_push(ctypes, r);
     return r;
 }
@@ -502,25 +502,28 @@ static int eval_intexpr(Ast *ast)
 {
     switch (ast->type) {
     case AST_LITERAL:
-        if (is_inttype(ast->ctype))
-            return ast->ival;
+        if (is_inttype(ast->ctype)) return ast->ival;
         error("Integer expression expected, but got %s", ast_to_string(ast));
-    case '+':
-        return eval_intexpr(ast->left) + eval_intexpr(ast->right);
-    case '-':
-        return eval_intexpr(ast->left) - eval_intexpr(ast->right);
-    case '*':
-        return eval_intexpr(ast->left) * eval_intexpr(ast->right);
-    case '/':
-        return eval_intexpr(ast->left) / eval_intexpr(ast->right);
-    case '%':
-        return eval_intexpr(ast->left) % eval_intexpr(ast->right);
-    case '^':
-        return eval_intexpr(ast->left) % eval_intexpr(ast->right);
-    case PUNCT_LSHIFT:
-        return eval_intexpr(ast->left) << eval_intexpr(ast->right);
-    case PUNCT_RSHIFT:
-        return eval_intexpr(ast->left) >> eval_intexpr(ast->right);
+    case '+': return eval_intexpr(ast->left) + eval_intexpr(ast->right);
+    case '-': return eval_intexpr(ast->left) - eval_intexpr(ast->right);
+    case '*': return eval_intexpr(ast->left) * eval_intexpr(ast->right);
+    case '/': return eval_intexpr(ast->left) / eval_intexpr(ast->right);
+    case '%': return eval_intexpr(ast->left) % eval_intexpr(ast->right);
+    case '^': return eval_intexpr(ast->left) % eval_intexpr(ast->right);
+    case '|': return eval_intexpr(ast->left) | eval_intexpr(ast->right);
+    case '&': return eval_intexpr(ast->left) & eval_intexpr(ast->right);
+    case '>': return eval_intexpr(ast->left) > eval_intexpr(ast->right);
+    case '<': return eval_intexpr(ast->left) < eval_intexpr(ast->right);
+    case '!': return !eval_intexpr(ast->left);
+    case '~': return ~eval_intexpr(ast->left);
+    case PUNCT_LSHIFT: return eval_intexpr(ast->left) << eval_intexpr(ast->right);
+    case PUNCT_RSHIFT: return eval_intexpr(ast->left) >> eval_intexpr(ast->right);
+    case PUNCT_LOGAND: return eval_intexpr(ast->left) && eval_intexpr(ast->right);
+    case PUNCT_LOGOR:  return eval_intexpr(ast->left) || eval_intexpr(ast->right);
+    case PUNCT_EQ:     return eval_intexpr(ast->left) == eval_intexpr(ast->right);
+    case PUNCT_GE:     return eval_intexpr(ast->left) >= eval_intexpr(ast->right);
+    case PUNCT_LE:     return eval_intexpr(ast->left) <= eval_intexpr(ast->right);
+    case PUNCT_NE:     return eval_intexpr(ast->left) != eval_intexpr(ast->right);
     default:
         error("Integer expression expected, but got %s", ast_to_string(ast));
         return 0; /* non-reachable */
@@ -1092,7 +1095,6 @@ static Ast *read_decl_struct_init(Ctype *ctype)
     if (!is_punct(tok, '{'))
         error("Expected an initializer struct for %s, but got %s",
               ctype_to_string(ctype), token_to_string(tok));
-
     List *initlist = init_empty_struct_init(ctype);
     Iter it = list_iter(initlist);
     while (1) {
@@ -1101,8 +1103,7 @@ static Ast *read_decl_struct_init(Ctype *ctype)
         unget_token(tok);
 
         if(get_ttype(tok) == TTYPE_IDENT || (get_ttype(tok) == TTYPE_PUNCT && !is_punct(tok, '.'))) 
-            error("Expected value for struct: %s, but got: %s", 
-                ctype_to_string(ctype), token_to_string(tok)); 
+            error("Expected value for struct: %s, but got: %s", ctype_to_string(ctype), token_to_string(tok)); 
 
         tok = read_token();
         if(is_punct(tok, '.')) {
@@ -1121,7 +1122,7 @@ static Ast *read_decl_struct_init(Ctype *ctype)
             Ast *v = iter_next(&it);
             v = read_expr();
             tok = read_token();
-            if(iter_end(it)) 
+            if(iter_end(it)&&!is_punct(tok, '}')) 
                 error("Expected value for struct: %s, out range", ctype_to_string(ctype)); 
         }
 
@@ -1181,7 +1182,7 @@ static Ctype *read_union_def(void)
         Ctype *fieldtype = iter_next(&i);
         maxsize = (maxsize < fieldtype->size) ? fieldtype->size : maxsize;
     }
-    Ctype *r = make_struct_type(fields, maxsize);
+    Ctype *r = make_struct_type(fields, maxsize, true);
     if (tag)
         dict_put(union_defs, tag, r);
     return r;
@@ -1210,7 +1211,7 @@ static Ctype *read_struct_def(void)
         if((fieldtype->bit_offset+fieldtype->bit_size)%8) offset++;
     }
 
-    Ctype *r = make_struct_type(fields, offset);
+    Ctype *r = make_struct_type(fields, offset, false);
     if (tag)
         dict_put(struct_defs, tag, r);
     return r;

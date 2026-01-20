@@ -55,7 +55,7 @@ char *ctype_to_string(Ctype *ctype) {
     case CTYPE_PTR:   string_appendf(&s, "*%s", ctype_to_string(ctype->ptr)); return get_cstring(s);
     case CTYPE_ARRAY: string_appendf(&s, "[%d]%s", ctype->len, ctype_to_string(ctype->ptr)); return get_cstring(s);
     case CTYPE_STRUCT:
-        string_appendf(&s, ctype->offset==ctype->size?"(union":"(struct");
+        string_appendf(&s, ctype->is_union?"(union":"(struct");
         for (Iter i=list_iter(ctype->fields->list); !iter_end(i);) {
             DictEntry *e=iter_next(&i);
             string_appendf(&s, " (%s %s)", ctype_to_string(e->val), e->key);
@@ -358,9 +358,13 @@ char *token_to_string(const Token tok)
 #include "minitest.h"
 
 TEST(test, verbose) {
-    char infile[256];
-    printf("file path: ");
-    if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
+    // char infile[256];
+    // printf("file path: ");
+    // if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
+    //     puts("open fail"), exit(1);
+
+    char infile[256] = "/mnt/d/ws/test/MazuCC/test/test_all.c";
+    if (!freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
 
     set_current_filename(infile);
@@ -368,12 +372,10 @@ TEST(test, verbose) {
     List *toplevels = read_toplevels();
     for (Iter i = list_iter(toplevels); !iter_end(i);) {
         Ast *v = iter_next(&i);
-        printf("%s", ast_to_string(v));
+        printf("%s\n", ast_to_string(v));
     }
     list_free(cstrings);
     list_free(ctypes);
-
-    printf("\n");
 }
 
 #endif /* MINITEST_IMPLEMENTATION */

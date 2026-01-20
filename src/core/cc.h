@@ -110,6 +110,7 @@ typedef struct __Ctype {
     /* struct */
     Dict *fields;
     int offset;
+    bool is_union;
 
     int bit_offset;     /* 位域支持 */
     int bit_size;
