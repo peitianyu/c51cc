@@ -18,18 +18,26 @@ typedef enum IrOp {
 } IrOp;
 
 typedef struct Type {
-    const char *ctor;       /* "int" "uint" "float" */
-    uint8_t     bits;       /* 8 16 32 64           */
-    int         unsign;     /* 0 或 1               */
-    int         ptr;        /* 0 或 1               */
+    enum { TYPE_INT, TYPE_FLOAT, TYPE_PTR, TYPE_ARRAY, TYPE_STRUCT, TYPE_UNION, TYPE_ENUM } kind;
+    union {
+        struct { bool unsign; int bits; } i;      // INT
+        struct {int bits; } f;                    // FLOAT
+        struct Type *base;                        // PTR
+        struct { struct Type *elem; int len; } a; // ARRAY
+        struct { List *fields; int bitsize; } s;  // STRUCT|UNION
+        List *members;                            // List<EnumMember*>   ENUM 
+    };
 } Type;
+
+typedef struct StructField { const char *name; Type *type; int offset, bit_offset, bit_size; } StructField;
+typedef struct EnumMember { const char *name; int64_t val; } EnumMember;
 
 typedef struct Instr {
     int         op;    
     const char *dest;       /* SSA 名，NULL 表示无 dest */
-    Type       *type;       /* dest 存在时必须        */
-    const char **args;      /* NULL 结尾的 SSA 源数组  */
-    const char **labels;    /* NULL 结尾的标签数组    */
+    Type       *type;       /* dest 存在时必须          */
+    List *args;             /* SSA 源数组 const char *  */
+    List *labels;           /* 标签数组 const char *    */
     union {
         int64_t ival;
         double fval;
@@ -37,21 +45,22 @@ typedef struct Instr {
     struct { int restrict_:1, volatile_:1, reg:1, mem:3; } attr;
 } Instr;
 
+
 typedef struct Block {
     uint32_t id;
     bool     sealed;
 
-    List    *insts;         // List<*Instr>
-    List    *pred_ids;      // List<uint32_t>
-    List    *succ_ids;      // List<uint32_t>
+    List    *instrs;            // List<*Instr>
+    List    *pred_ids;          // List<uint32_t>
+    List    *succ_ids;          // List<uint32_t>
 } Block;
 
 typedef struct Func {
     const char  *name;
     Type        *ret_type;
 
-    List        *param_names; // List<const char *>
-    List        *blocks;      // List<Block>
+    List        *param_names;   // List<const char *>
+    List        *blocks;        // List<Block>
     uint32_t    entry_id;
 } Func;
 

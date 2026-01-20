@@ -302,5 +302,12 @@ static inline void errorf(char *file, int line, char *fmt, ...)
     exit(1);
 }
 
+static inline CtypeAttr get_attr(int in_attr) 
+{
+    union { CtypeAttr c_attr; int i_attr; }attr = {0};
+    attr.i_attr = in_attr;
+    return attr.c_attr;
+}
+
 
 #endif /* CC_H */

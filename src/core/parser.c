@@ -1282,13 +1282,6 @@ static Ctype *read_enum_def(void)
     return r;
 }
 
-static CtypeAttr get_attr(int in_attr) 
-{
-    union { CtypeAttr c_attr; int i_attr; }attr = {0};
-    attr.i_attr = in_attr;
-    return attr.c_attr;
-}
-
 static int read_decl_ctype_attr(Token tok, int *attr_out) {
     if(get_ttype(tok) != TTYPE_IDENT) return 0;
 
