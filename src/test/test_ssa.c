@@ -1,9 +1,14 @@
-int test_simple() {
-    int a = 1;
-    int b = 2;
-    return a + b;
+int max(int a, int b) {
+    if (a > b)
+        return a;
+    else
+        return b;
 }
 
 int main() {
-    return test_simple();
+    int x = 5;
+    int y = 7;
+    int m = max(x, y);
+
+    return m;
 }

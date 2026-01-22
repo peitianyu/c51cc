@@ -362,9 +362,20 @@ static const char *process_binary_op(Ast *ast) {
 
 static const char *process_func_call(Ast *ast) {
     if (!ast || ast->type != AST_FUNCALL) return NULL;
+    
     const char *result_name = make_ssa_name();
     Instr *instr = create_instr(IROP_CALL, result_name, ast->ctype);
+    
     add_arg_to_instr(instr, ast->fname);
+    
+    if (ast->args) {
+    for (Iter i = list_iter(ast->args); !iter_end(i);) {
+        Ast *arg = iter_next(&i);
+        const char *arg_name = ast_to_ssa_expr(current_build, arg);
+        if (arg_name) { add_arg_to_instr(instr, arg_name); }
+    }
+    }
+    
     add_instr_to_current_block(instr);
     return result_name;
 }
@@ -516,12 +527,15 @@ static void ast_to_ssa_func_def(SSABuild *b, Ast *ast) {
 
     for (Iter i = list_iter(ast->params); !iter_end(i);) {
         Ast *param = iter_next(&i);
+        
         const char *param_name = param->varname;
         const char *param_ssa_name = make_ssa_name();
-        list_push(func->param_names, (void *)strdup(param_name));
-        write_variable(param_name, entry_block, param_ssa_name);
+        
         Instr *load_param = create_instr(IROP_LOAD, param_ssa_name, param->ctype);
+        add_arg_to_instr(load_param, param_name);
+        
         add_instr_to_current_block(load_param);
+        write_variable(param_name, entry_block, param_ssa_name);
     }
 
     ast_to_ssa_stmt(b, ast->body);

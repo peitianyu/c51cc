@@ -82,8 +82,9 @@ static void ssa_print_bril_exact(SSABuild *b, FILE *out) {
                 }
                 if (in->op == IROP_CALL) {
                     fprintf(out, "call");
-                    if (in->args->len > 0) 
-                        fprintf(out, " %s", (char*)list_get(in->args, 0));
+                    for (int i = 0; i < in->args->len; i++) {
+                        fprintf(out, " %s", (char*)list_get(in->args, i));
+                    }
                     fprintf(out, ";\n");
                     continue;
                 }
