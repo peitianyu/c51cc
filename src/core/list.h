@@ -135,6 +135,7 @@ static inline int list_len(List *list)
     return list->len;
 }
 
+
 #define list_safe_next(node) ((node) ? (node)->next : NULL)
 #define list_for_each_safe(node, tmp, list)                           \
     for ((node) = (list)->head, (tmp) = list_safe_next(node); (node); \
@@ -147,4 +148,19 @@ static inline void list_free(List *list)
         free(node);
     }
 }
+
+static inline void list_clear(List *list)
+{
+    if (!list) return;
+    
+    ListNode *node, *tmp;
+    list_for_each_safe (node, tmp, list) {
+        free(node->elem);
+        free(node);
+    }
+    list->len = 0;
+    list->head = list->tail = NULL;
+}
+
+
 #endif /* C51CC_LIST_H */

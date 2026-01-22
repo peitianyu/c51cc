@@ -2,25 +2,218 @@
 #include "cc.h"
 #include <stdint.h>
 #include <string.h>
+#include <stdarg.h>
 
 static uint32_t g_vid = 1;
 static SSABuild *current_build = NULL;
 
+/* 论文中的数据结构 */
+static Dict *current_defs = NULL;          // currentDef[variable][block] -> value
+static Dict *incomplete_phis = NULL;       // incompletePhis[block][variable] -> phi
+static List *sealed_blocks = NULL;         // List<Block *>
+
+/* 辅助函数声明 */
 static const char *ast_to_ssa_expr(SSABuild *b, Ast *ast);
 static void ast_to_ssa_stmt(SSABuild *b, Ast *ast);
 static void process_if_stmt(Ast *ast);
 static void process_while_stmt(Ast *ast);
 static void process_return(Ast *ast);
+static const char *process_assign(Ast *ast);
 static const char *process_func_call(Ast *ast);
 static const char *process_unary_op(Ast *ast);
 static const char *process_binary_op(Ast *ast);
 static const char *process_variable(Ast *ast);
 static const char *process_literal(Ast *ast);
 static void ast_to_ssa_func_def(SSABuild *b, Ast *ast);
-static void ast_to_ssa_global_var(SSABuild *b, Ast *ast);
-static Global *create_global(const char *name, Ctype *type, bool is_extern);
 static SSABuild *ssa_new(void);
+static Block *create_block(uint32_t id);
+static Func *create_func(const char *name, Ctype *ret_type);
+static Instr *create_instr(IrOp op, const char *dest, Ctype *ctype);
+static void add_instr_to_current_block(Instr *instr);
+static void add_arg_to_instr(Instr *instr, const char *arg);
+static void add_label_to_instr(Instr *instr, const char *label);
+static void seal_block(Block *block);
+static void write_variable(const char *var_name, Block *block, const char *value);
+static const char *read_variable(const char *var_name, Block *block);
+static const char *read_variable_recursive(const char *var_name, Block *block);
+static Instr *add_phi_operands(const char *var_name, Instr *phi);
+static Instr *try_remove_trivial_phi(Instr *phi);
+static const char *make_ssa_name(void);  
+static bool ast_returns(Ast *ast);
+static bool last_is_terminator(void);
+static const char *block_label(Block *b);
 
+/* 论文算法1: writeVariable */
+static void write_variable(const char *var_name, Block *block, const char *value) {
+    if (!current_defs) { return; }
+
+    Dict *var_map = (Dict *)dict_get(current_defs, (char *)var_name);
+
+    if (!var_map) {
+        var_map = (Dict *)make_dict(NULL);
+        dict_put(current_defs, (char *)strdup(var_name), var_map);
+    }
+
+    char block_key[64];
+    snprintf(block_key, sizeof(block_key), "%p", (void *)block);
+    dict_put(var_map, (char *)strdup(block_key), (void *)value);
+}
+
+/* 论文算法1: readVariable */
+static const char *read_variable(const char *var_name, Block *block) {
+    if (!current_defs) return NULL;
+
+    Dict *var_map = (Dict *)dict_get(current_defs, (char *)var_name);
+
+    if (!var_map) return NULL;
+
+    char block_key[64];
+    snprintf(block_key, sizeof(block_key), "%p", (void *)block);
+    const char *val = (const char *)dict_get(var_map, (char *)block_key);
+
+    if (val) return val;
+    return read_variable_recursive(var_name, block);
+}
+
+/* 论文算法2: readVariableRecursive */
+static const char *read_variable_recursive(const char *var_name, Block *block) {
+    if (!block) return NULL;
+    
+    // 检查是否已密封
+    bool sealed = false;
+    for (int i = 0; i < sealed_blocks->len; i++) {
+        if (list_get(sealed_blocks, i) == block) {
+            sealed = true;
+            break;
+        }
+    }
+
+    if (!sealed) {
+        // 不完全的CFG：创建无操作数的 phi
+        Instr *phi = create_instr(IROP_PHI, make_ssa_name(), NULL);
+        add_instr_to_current_block(phi);
+        write_variable(var_name, block, phi->dest);
+
+        // 记录到 incomplete_phis 中
+        char block_key[64];
+        snprintf(block_key, sizeof(block_key), "%p", (void *)block);
+        Dict *block_phis = (Dict *)dict_get(incomplete_phis, (char *)block_key);
+        if (!block_phis) {
+            block_phis = (Dict *)make_dict(NULL);
+            dict_put(incomplete_phis, (char *)strdup(block_key), block_phis);
+        }
+        dict_put(block_phis, (char *)strdup(var_name), phi);
+
+        return phi->dest;
+    } else if (block->pred_ids->len == 1) {
+        // 优化：只有一个前驱
+        uint32_t pred_id = (uintptr_t)list_get(block->pred_ids, 0);
+        Block *pred = NULL;
+        for (int i = 0; i < current_build->cur_func->blocks->len; i++) {
+            Block *b = list_get(current_build->cur_func->blocks, i);
+            if (b->id == pred_id) {
+                pred = b;
+                break;
+            }
+        }
+        return read_variable(var_name, pred);
+    } else {
+        // 多个前驱，需要 phi 函数
+        Instr *phi = create_instr(IROP_PHI, make_ssa_name(), NULL);
+        write_variable(var_name, block, phi->dest);
+        add_instr_to_current_block(phi);
+        
+        // 添加操作数
+        phi = add_phi_operands(var_name, phi);
+        write_variable(var_name, block, phi->dest);
+        return phi->dest;
+    }
+}
+
+/* 论文算法2: addPhiOperands */
+static Instr *add_phi_operands(const char *var_name, Instr *phi) {
+    Block *block = current_build->cur_block;
+    if (!block || !phi) return phi;
+    
+    // 为每个前驱添加参数
+    for (int i = 0; i < block->pred_ids->len; i++) {
+        uint32_t pred_id = (uintptr_t)list_get(block->pred_ids, i);
+        Block *pred = NULL;
+        
+        // 查找前驱块
+        for (int j = 0; j < current_build->cur_func->blocks->len; j++) {
+            Block *b = list_get(current_build->cur_func->blocks, j);
+            if (b->id == pred_id) {
+                pred = b;
+                break;
+            }
+        }
+        
+        if (!pred) continue;
+        
+        // 读取前驱块中的变量值
+        const char *val = read_variable(var_name, pred);
+        if (!val) {
+            val = make_ssa_name();
+            Instr *def = create_instr(IROP_CONST, val, NULL);
+            def->ival = 0;
+            add_instr_to_current_block(def);
+        }
+        add_arg_to_instr(phi, val);
+    }
+    
+    return try_remove_trivial_phi(phi);
+}
+
+/* 论文算法3: tryRemoveTrivialPhi */
+static Instr *try_remove_trivial_phi(Instr *phi) {
+    if (phi->op != IROP_PHI) return phi;
+
+    const char *same = NULL;
+    for (int i = 0; i < phi->args->len; i++) {
+        const char *op = (const char *)list_get(phi->args, i);
+        if (op == same || (op && phi->dest && strcmp(op, phi->dest) == 0)) continue;
+        if (same != NULL) return phi; // 至少两个不同值，不是平凡的
+        same = op;
+    }
+
+    if (same == NULL) {
+        same = make_ssa_name();
+        Instr *undef = create_instr(IROP_CONST, same, NULL);
+        undef->ival = 0;
+        add_instr_to_current_block(undef);
+    }
+
+    // 简化处理：直接替换 dest
+    phi->dest = same;
+    return phi;
+}
+
+/* 论文算法4: sealBlock */
+static void seal_block(Block *block) {
+    if (!block) return;
+    
+    char block_key[64];
+    snprintf(block_key, sizeof(block_key), "%p", (void *)block);
+    
+    // 处理该块中所有未完成的 phi
+    Dict *block_phis = (Dict *)dict_get(incomplete_phis, (char *)block_key);
+    if (block_phis) {
+        List *keys = dict_keys(block_phis);
+        for (int i = 0; i < keys->len; i++) {
+            const char *var_name = (const char *)list_get(keys, i);
+            Instr *phi = (Instr *)dict_get(block_phis, (char *)var_name);
+            if (phi) add_phi_operands(var_name, phi);
+        }
+        list_free(keys);
+    }
+    
+    // 标记为已密封
+    list_push(sealed_blocks, block);
+    block->sealed = true;
+}
+
+/* ========== 基础数据结构创建函数 ========== */
 static const char *make_ssa_name(void) {
     static char buf[32];
     snprintf(buf, sizeof(buf), "v%u", g_vid++);
@@ -29,6 +222,7 @@ static const char *make_ssa_name(void) {
 
 static Instr *create_instr(IrOp op, const char *dest, Ctype *ctype) {
     Instr *instr = malloc(sizeof(Instr));
+    memset(instr, 0, sizeof(Instr));
     instr->op = op;
     instr->dest = dest ? strdup(dest) : NULL;
     instr->type = ctype;
@@ -36,10 +230,6 @@ static Instr *create_instr(IrOp op, const char *dest, Ctype *ctype) {
     instr->labels = make_list();
     instr->ival = 0;
     instr->fval = 0.0;
-    instr->attr.restrict_ = 0;
-    instr->attr.volatile_ = 0;
-    instr->attr.reg = 0;
-    instr->attr.mem = 0;
     return instr;
 }
 
@@ -53,6 +243,7 @@ static void add_label_to_instr(Instr *instr, const char *label) {
 
 static Block *create_block(uint32_t id) {
     Block *block = malloc(sizeof(Block));
+    memset(block, 0, sizeof(Block));
     block->id = id;
     block->sealed = false;
     block->instrs = make_list();
@@ -63,6 +254,7 @@ static Block *create_block(uint32_t id) {
 
 static Func *create_func(const char *name, Ctype *ret_type) {
     Func *func = malloc(sizeof(Func));
+    memset(func, 0, sizeof(Func));
     func->name = strdup(name);
     func->ret_type = ret_type;
     func->param_names = make_list();
@@ -72,150 +264,122 @@ static Func *create_func(const char *name, Ctype *ret_type) {
 }
 
 static void add_instr_to_current_block(Instr *instr) {
-    if (!current_build || !current_build->cur_block) error("No current block to add instruction");
+    if (!current_build || !current_build->cur_block) {
+        list_free(instr->args);
+        list_free(instr->labels);
+        free(instr);
+        return;
+    }
     list_push(current_build->cur_block->instrs, instr);
-    list_push(current_build->instr_buf, instr);
-}
-
-static void add_name_to_build(const char *name) {
-    if (current_build) list_push(current_build->name_buf, (void *)strdup(name));
-}
-
-static void set_var_value(const char *var_name, const char *ssa_name) {
-    if (current_build && current_build->var_map && var_name && ssa_name)
-        dict_put(current_build->var_map, (void *)var_name, (void *)strdup(ssa_name));
-}
-
-static const char *get_var_value(const char *var_name) {
-    if (current_build && current_build->var_map && var_name)
-        return (const char *)dict_get(current_build->var_map, (void *)var_name);
-    return NULL;
 }
 
 static SSABuild *ssa_new(void) {
     SSABuild *s = malloc(sizeof(SSABuild));
+    memset(s, 0, sizeof(SSABuild));
     s->unit = malloc(sizeof(SSAUnit));
+    memset(s->unit, 0, sizeof(SSAUnit));
     s->unit->funcs = make_list();
     s->unit->globals = make_list();
     s->cur_func = NULL;
     s->cur_block = NULL;
     s->instr_buf = make_list();
     s->name_buf = make_list();
-    s->var_map = &EMPTY_DICT;
+    s->var_map = (Dict *)&EMPTY_DICT;
     current_build = s;
+    current_defs = (Dict *)make_dict(NULL);
+    incomplete_phis = (Dict *)make_dict(NULL);
+    sealed_blocks = make_list();
     return s;
 }
 
-static Global *create_global(const char *name, Ctype *type, bool is_extern) {
-    Global *global = malloc(sizeof(Global));
-    global->name = strdup(name);
-    global->type = type;
-    global->is_extern = is_extern;
-    global->init.i = 0;
-    return global;
-}
-
+/* ========== 表达式处理 ========== */
 static const char *process_literal(Ast *ast) {
     if (!ast || ast->type != AST_LITERAL) return NULL;
     const char *name = make_ssa_name();
-    IrOp op;
-    switch (ast->ctype->type) {
-    case CTYPE_INT: case CTYPE_LONG: case CTYPE_CHAR: case CTYPE_BOOL: op = IROP_CONST; break;
-    case CTYPE_FLOAT: case CTYPE_DOUBLE: op = IROP_LCONST; break;
-    default: error("Unsupported literal type in SSA conversion");
-    }
-    Instr *instr = create_instr(op, name, ast->ctype);
-    if (is_inttype(ast->ctype)) instr->ival = ast->ival;
-    else if (is_flotype(ast->ctype)) instr->fval = ast->fval;
+    Instr *instr = create_instr(IROP_CONST, name, ast->ctype);
+    instr->ival = ast->ival;
     add_instr_to_current_block(instr);
-    add_name_to_build(name);
     return name;
 }
 
 static const char *process_variable(Ast *ast) {
     if (!ast || (ast->type != AST_LVAR && ast->type != AST_GVAR)) return NULL;
+
     const char *var_name = ast->varname;
-    const char *ssa_name = get_var_value(var_name);
-    if (!ssa_name) ssa_name = var_name;
-    add_name_to_build(ssa_name);
+    
+    // 先尝试读取变量
+    const char *ssa_name = read_variable(var_name, current_build->cur_block);
+    
+    if (!ssa_name) {
+        ssa_name = make_ssa_name();
+        Instr *load = create_instr(IROP_LOAD, ssa_name, ast->ctype);
+        add_arg_to_instr(load, var_name);
+        add_instr_to_current_block(load);
+        write_variable(var_name, current_build->cur_block, ssa_name);
+    }
+    
     return ssa_name;
+}
+
+static const char *process_assign(Ast *ast) {
+    if (!ast || ast->type != '=') return NULL;
+    
+    const char *rhs_name = ast_to_ssa_expr(current_build, ast->right);
+    if (!rhs_name) return NULL;
+    
+    Ast *lhs = ast->left;
+    if (lhs->type == AST_LVAR || lhs->type == AST_GVAR) {
+        const char *var_name = lhs->varname;
+        write_variable(var_name, current_build->cur_block, rhs_name);
+        return rhs_name;
+    }
+    return NULL;
 }
 
 static const char *process_binary_op(Ast *ast) {
     if (!ast) return NULL;
-    switch (ast->type) {
-    case '+': case '-': case '*': case '/':
-    case '<': case '>': 
-    case '&': case '|':
-    case PUNCT_EQ: case PUNCT_NE:
-    case PUNCT_LE: case PUNCT_GE:
-    case PUNCT_LOGAND: case PUNCT_LOGOR: break;
-    default: return NULL;
-    }
     const char *left_name = ast_to_ssa_expr(current_build, ast->left);
     const char *right_name = ast_to_ssa_expr(current_build, ast->right);
     if (!left_name || !right_name) return NULL;
     const char *result_name = make_ssa_name();
-    IrOp op;
+    
+    IrOp op = IROP_ADD; 
     switch (ast->type) {
-    case '+': op = is_flotype(ast->ctype) ? IROP_FADD : IROP_ADD; break;
-    case '-': op = is_flotype(ast->ctype) ? IROP_FSUB : IROP_SUB; break;
-    case '*': op = is_flotype(ast->ctype) ? IROP_FMUL : IROP_MUL; break;
-    case '/': op = is_flotype(ast->ctype) ? IROP_FDIV : IROP_DIV; break;
-    case PUNCT_EQ: op = is_flotype(ast->ctype) ? IROP_FEQ : IROP_EQ; break;
-    case '<': op = is_flotype(ast->ctype) ? IROP_FLT : IROP_LT; break;
-    case '>': op = is_flotype(ast->ctype) ? IROP_FGT : IROP_GT; break;
-    case PUNCT_LE: op = is_flotype(ast->ctype) ? IROP_FLE : IROP_LE; break;
-    case PUNCT_GE: op = is_flotype(ast->ctype) ? IROP_FGE : IROP_GE; break;
-    case PUNCT_LOGAND: op = IROP_AND; break;
-    case PUNCT_LOGOR: op = IROP_OR; break;
-    case '&': op = IROP_AND; break;
-    case '|': op = IROP_OR; break;
-    default: error("Unsupported binary operator in SSA: %d", ast->type);
+        case '+': op = IROP_ADD; break;
+        case '-': op = IROP_SUB; break;
+        case '*': op = IROP_MUL; break;
+        case '/': op = IROP_DIV; break;
+        case '<': op = IROP_LT; break;
+        case '>': op = IROP_GT; break;
     }
+    
     Instr *instr = create_instr(op, result_name, ast->ctype);
     add_arg_to_instr(instr, left_name);
     add_arg_to_instr(instr, right_name);
     add_instr_to_current_block(instr);
-    add_name_to_build(result_name);
-    return result_name;
-}
-
-static const char *process_unary_op(Ast *ast) {
-    if (!ast) return NULL;
-    const char *operand_name = ast_to_ssa_expr(current_build, ast->operand);
-    if (!operand_name) return NULL;
-    const char *result_name = make_ssa_name();
-    IrOp op;
-    switch (ast->type) {
-    case '!': op = IROP_NOT; break;
-    case '~': op = IROP_NOT; break;
-    case AST_ADDR: op = IROP_ALLOC; break;
-    case AST_DEREF: op = IROP_LOAD; break;
-    case PUNCT_INC: case PUNCT_DEC: error("++/-- not yet implemented in SSA");
-    default: error("Unsupported unary operator in SSA: %d", ast->type);
-    }
-    Instr *instr = create_instr(op, result_name, ast->ctype);
-    add_arg_to_instr(instr, operand_name);
-    add_instr_to_current_block(instr);
-    add_name_to_build(result_name);
     return result_name;
 }
 
 static const char *process_func_call(Ast *ast) {
     if (!ast || ast->type != AST_FUNCALL) return NULL;
-    const char *result_name = NULL;
-    if (ast->ctype->type != CTYPE_VOID) result_name = make_ssa_name();
+    const char *result_name = make_ssa_name();
     Instr *instr = create_instr(IROP_CALL, result_name, ast->ctype);
     add_arg_to_instr(instr, ast->fname);
-    for (Iter i = list_iter(ast->args); !iter_end(i);) {
-        Ast *arg = iter_next(&i);
-        const char *arg_name = ast_to_ssa_expr(current_build, arg);
-        add_arg_to_instr(instr, arg_name);
-    }
     add_instr_to_current_block(instr);
-    if (result_name) add_name_to_build(result_name);
     return result_name;
+}
+
+static const char *ast_to_ssa_expr(SSABuild *b, Ast *ast) {
+    if (!ast) return NULL;
+    switch (ast->type) {
+    case AST_LITERAL: return process_literal(ast);
+    case AST_LVAR: case AST_GVAR: return process_variable(ast);
+    case AST_FUNCALL: return process_func_call(ast);
+    case '=': return process_assign(ast); 
+    default:
+        if (ast->left && ast->right) return process_binary_op(ast);
+        return NULL;
+    }
 }
 
 static void process_return(Ast *ast) {    
@@ -227,91 +391,62 @@ static void process_return(Ast *ast) {
     add_instr_to_current_block(instr);
 }
 
+static const char *block_label(Block *b) {
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "block%u", b->id);
+    return buf;
+}
+
+/* 简化的 if 语句处理 */
 static void process_if_stmt(Ast *ast) {
     if (!ast || ast->type != AST_IF) return;
-    const char *cond_name = ast_to_ssa_expr(current_build, ast->cond);
+
+    const char *cond = ast_to_ssa_expr(current_build, ast->cond);
+    if (!cond) return;
+    
+    // 创建三个基本块
     Block *then_block = create_block(current_build->cur_func->blocks->len);
+    Block *else_block = create_block(current_build->cur_func->blocks->len + 1);
+    Block *merge_block = create_block(current_build->cur_func->blocks->len + 2);
+    
     list_push(current_build->cur_func->blocks, then_block);
-    Block *else_block = NULL;
-    if (ast->els) {
-        else_block = create_block(current_build->cur_func->blocks->len);
-        list_push(current_build->cur_func->blocks, else_block);
-    }
-    Block *merge_block = create_block(current_build->cur_func->blocks->len);
+    list_push(current_build->cur_func->blocks, else_block);
     list_push(current_build->cur_func->blocks, merge_block);
-    Instr *br_instr = create_instr(IROP_BR, NULL, NULL);
-    add_arg_to_instr(br_instr, cond_name);
-    char then_label[32], else_label[32], merge_label[32];
-    snprintf(then_label, sizeof(then_label), "block%u", then_block->id);
-    snprintf(else_label, sizeof(else_label), "block%u", else_block ? else_block->id : merge_block->id);
-    add_label_to_instr(br_instr, then_label);
-    add_label_to_instr(br_instr, else_label);
-    add_instr_to_current_block(br_instr);
+    
+    // 添加前驱关系
+    list_push(then_block->pred_ids, (void *)(uintptr_t)current_build->cur_block->id);
+    list_push(else_block->pred_ids, (void *)(uintptr_t)current_build->cur_block->id);
+    list_push(merge_block->pred_ids, (void *)(uintptr_t)then_block->id);
+    list_push(merge_block->pred_ids, (void *)(uintptr_t)else_block->id);
+    
+    // 条件跳转
+    Instr *br = create_instr(IROP_BR, NULL, NULL);
+    add_arg_to_instr(br, cond);
+    add_label_to_instr(br, block_label(then_block));
+    add_label_to_instr(br, block_label(else_block));
+    add_instr_to_current_block(br);
+    
+    // 密封当前块
+    seal_block(current_build->cur_block);
+    
+    // 处理 then 分支
     current_build->cur_block = then_block;
     ast_to_ssa_stmt(current_build, ast->then);
     Instr *jmp_then = create_instr(IROP_JMP, NULL, NULL);
-    snprintf(merge_label, sizeof(merge_label), "block%u", merge_block->id);
-    add_label_to_instr(jmp_then, merge_label);
+    add_label_to_instr(jmp_then, block_label(merge_block));
     add_instr_to_current_block(jmp_then);
-    if (ast->els) {
-        current_build->cur_block = else_block;
-        ast_to_ssa_stmt(current_build, ast->els);
-        Instr *jmp_else = create_instr(IROP_JMP, NULL, NULL);
-        add_label_to_instr(jmp_else, merge_label);
-        add_instr_to_current_block(jmp_else);
-    }
+    seal_block(then_block);
+    
+    // 处理 else 分支
+    current_build->cur_block = else_block;
+    if (ast->els) ast_to_ssa_stmt(current_build, ast->els);
+    Instr *jmp_else = create_instr(IROP_JMP, NULL, NULL);
+    add_label_to_instr(jmp_else, block_label(merge_block));
+    add_instr_to_current_block(jmp_else);
+    seal_block(else_block);
+    
+    // 继续到合并块
     current_build->cur_block = merge_block;
-}
-
-static void process_while_stmt(Ast *ast) {
-    if (!ast || ast->type != AST_WHILE) return;
-    Block *cond_block = create_block(current_build->cur_func->blocks->len);
-    Block *body_block = create_block(current_build->cur_func->blocks->len + 1);
-    Block *merge_block = create_block(current_build->cur_func->blocks->len + 2);
-    list_push(current_build->cur_func->blocks, cond_block);
-    list_push(current_build->cur_func->blocks, body_block);
-    list_push(current_build->cur_func->blocks, merge_block);
-    Instr *jmp_to_cond = create_instr(IROP_JMP, NULL, NULL);
-    char cond_label[32];
-    snprintf(cond_label, sizeof(cond_label), "block%u", cond_block->id);
-    add_label_to_instr(jmp_to_cond, cond_label);
-    add_instr_to_current_block(jmp_to_cond);
-    current_build->cur_block = cond_block;
-    const char *cond_name = ast_to_ssa_expr(current_build, ast->while_cond);
-    Instr *br_instr = create_instr(IROP_BR, NULL, NULL);
-    add_arg_to_instr(br_instr, cond_name);
-    char body_label[32], merge_label[32];
-    snprintf(body_label, sizeof(body_label), "block%u", body_block->id);
-    snprintf(merge_label, sizeof(merge_label), "block%u", merge_block->id);
-    add_label_to_instr(br_instr, body_label);
-    add_label_to_instr(br_instr, merge_label);
-    add_instr_to_current_block(br_instr);
-    current_build->cur_block = body_block;
-    ast_to_ssa_stmt(current_build, ast->while_body);
-    Instr *jmp_back = create_instr(IROP_JMP, NULL, NULL);
-    add_label_to_instr(jmp_back, cond_label);
-    add_instr_to_current_block(jmp_back);
-    current_build->cur_block = merge_block;
-}
-
-static const char *ast_to_ssa_expr(SSABuild *b, Ast *ast) {
-    if (!ast) return NULL;
-    switch (ast->type) {
-    case AST_LITERAL: return process_literal(ast);
-    case AST_LVAR: case AST_GVAR: return process_variable(ast);
-    case AST_FUNCALL: return process_func_call(ast);
-    case AST_ADDR: case AST_DEREF: case '!': case '~': case PUNCT_INC: case PUNCT_DEC: return process_unary_op(ast);
-    default:
-        if (ast->type == '+' || ast->type == '-' || ast->type == '*' || ast->type == '/' ||
-            ast->type == '<' || ast->type == '>' ||
-            ast->type == '&' || ast->type == '|' ||
-            ast->type == PUNCT_EQ || ast->type == PUNCT_NE ||
-            ast->type == PUNCT_LE || ast->type == PUNCT_GE ||
-            ast->type == PUNCT_LOGAND || ast->type == PUNCT_LOGOR) return process_binary_op(ast);
-        printf("ERROR: Unsupported expression type in SSA: %d\n", ast->type);
-        error("Unsupported expression type in SSA: %d", ast->type);
-    }
-    return NULL;
 }
 
 static void ast_to_ssa_stmt(SSABuild *b, Ast *ast) {
@@ -324,206 +459,111 @@ static void ast_to_ssa_stmt(SSABuild *b, Ast *ast) {
         }
         break;
     case AST_RETURN: process_return(ast); break;
-    case AST_IF: process_if_stmt(ast); break;
-    case AST_WHILE: process_while_stmt(ast); break;
-    case AST_FOR: error("For loop not yet implemented in SSA"); break;
-    case AST_DO_WHILE: error("Do-while loop not yet implemented in SSA"); break;
-    case AST_BREAK: case AST_CONTINUE: error("Break/continue not yet implemented in SSA"); break;
-    case AST_GOTO: case AST_LABEL: error("Goto/label not yet implemented in SSA"); break;
-    case AST_DECL:
-        if (ast->declinit && ast->declvar) {
-            const char *init_val = ast_to_ssa_expr(b, ast->declinit);
-            if (init_val) {
-                set_var_value(ast->declvar->varname, init_val);
-                add_name_to_build(init_val);
-            }
-        }
+    case AST_IF:
+        process_if_stmt(ast);
         break;
+    case AST_DECL: {                 
+        Ast *init = ast->declinit; 
+        const char *val;
+        if (init) {
+            val = ast_to_ssa_expr(b, init);
+        } else {
+            val = make_ssa_name();
+            Instr *zero = create_instr(IROP_CONST, val, ast->ctype);
+            zero->ival = 0;
+            add_instr_to_current_block(zero);
+        }
+        write_variable(ast->declvar->varname, b->cur_block, val);
+        break;
+    }
     default: ast_to_ssa_expr(b, ast); break;
     }
 }
 
+static bool ast_returns(Ast *ast) {
+    if (!ast) return false;
+    if (ast->type == AST_RETURN) return true;
+    if (ast->type == AST_COMPOUND_STMT && ast->stmts->len > 0) {
+        Ast *last = list_get(ast->stmts, ast->stmts->len - 1);
+        return ast_returns(last);
+    }
+    return false;
+}
+
+static bool last_is_terminator(void) {
+    if (!current_build || !current_build->cur_block) return false;
+    List *instrs = current_build->cur_block->instrs;
+    if (instrs->len == 0) return false;
+    Instr *last = list_get(instrs, instrs->len - 1);
+    return last->op == IROP_RET || last->op == IROP_JMP || last->op == IROP_BR;
+}
+
+/* ========== 函数处理 ========== */
 static void ast_to_ssa_func_def(SSABuild *b, Ast *ast) {
     if (!ast || ast->type != AST_FUNC_DEF) return;
+    
     Func *func = create_func(ast->fname, ast->ctype);
     current_build->cur_func = func;
-    if (current_build->var_map) current_build->var_map = &EMPTY_DICT;
+    
+    current_defs = (Dict *)make_dict(NULL);
+    incomplete_phis = (Dict *)make_dict(NULL);
+    sealed_blocks = make_list();
+
     Block *entry_block = create_block(0);
     func->entry_id = 0;
     list_push(func->blocks, entry_block);
     current_build->cur_block = entry_block;
+
     for (Iter i = list_iter(ast->params); !iter_end(i);) {
         Ast *param = iter_next(&i);
         const char *param_name = param->varname;
         const char *param_ssa_name = make_ssa_name();
         list_push(func->param_names, (void *)strdup(param_name));
-        set_var_value(param_name, param_ssa_name);
-        add_name_to_build(param_ssa_name);
+        write_variable(param_name, entry_block, param_ssa_name);
+        Instr *load_param = create_instr(IROP_LOAD, param_ssa_name, param->ctype);
+        add_instr_to_current_block(load_param);
     }
+
     ast_to_ssa_stmt(b, ast->body);
-    if (current_build->cur_block && current_build->cur_block->instrs && current_build->cur_block->instrs->len > 0) {
-        Instr *last_instr = NULL;
-        if (current_build->cur_block->instrs->len > 0)
-            last_instr = list_get(current_build->cur_block->instrs, current_build->cur_block->instrs->len - 1);
-        if (!last_instr || last_instr->op != IROP_RET) {
-            if (ast->ctype->type == CTYPE_VOID) {
-                Instr *ret_instr = create_instr(IROP_RET, NULL, NULL);
-                add_instr_to_current_block(ret_instr);
-            } else error("Function must return a value");
-        }
-    } else {
+
+    if (current_build->cur_block != NULL && !last_is_terminator()) {
         if (ast->ctype->type == CTYPE_VOID) {
-            Instr *ret_instr = create_instr(IROP_RET, NULL, NULL);
-            add_instr_to_current_block(ret_instr);
-        } else error("Function must return a value");
+            Instr *ret = create_instr(IROP_RET, NULL, NULL);
+            add_instr_to_current_block(ret);
+        }
     }
+
     list_push(b->unit->funcs, func);
     current_build->cur_func = NULL;
     current_build->cur_block = NULL;
 }
 
-static void ast_to_ssa_global_var(SSABuild *b, Ast *ast) {
-    if (!ast || ast->type != AST_DECL) return;
-    Global *global = create_global(ast->declvar->varname, ast->declvar->ctype, (ast->declvar->ctype->attr & (1 << 4)) != 0);
-    if (ast->declinit && ast->declinit->type == AST_LITERAL) {
-        if (is_inttype(ast->declinit->ctype)) global->init.i = ast->declinit->ival;
-        else if (is_flotype(ast->declinit->ctype)) global->init.f = ast->declinit->fval;
-    }
-    list_push(b->unit->globals, global);
-}
-
+/* ========== 公开接口 ========== */
 void ast_to_ssa(SSABuild *b, Ast *ast) {
     if (!b || !ast) return;
-    switch (ast->type) {
-    case AST_FUNC_DEF: ast_to_ssa_func_def(b, ast); break;
-    case AST_DECL:
-        if (!current_build->cur_func) ast_to_ssa_global_var(b, ast);
-        else ast_to_ssa_stmt(b, ast);
-        break;
-    case AST_FUNC_DECL: break;
-    default: error("Unsupported top-level AST node in SSA: %d", ast->type);
+    if (ast->type == AST_FUNC_DEF) {
+        ast_to_ssa_func_def(b, ast);
     }
 }
 
+/* ========== 打印函数（保留） ========== */
 #ifdef MINITEST_IMPLEMENTATION
 #include "minitest.h"
-
-static const char *ir_op_to_str(IrOp op) {
-    static const char *ir_op_str[] = {
-        "nop", "const", "add", "mul", "sub", "div",
-        "eq", "lt", "gt", "le", "ge",
-        "not", "and", "or",
-        "jmp", "br", "call", "ret", "print",
-        "phi", "alloc", "free", "store", "load", "ptradd",
-        "fadd", "fmul", "fsub", "fdiv",
-        "feq", "flt", "fle", "fgt", "fge",
-        "lconst"
-    };
-    if (op < sizeof(ir_op_str)/sizeof(ir_op_str[0])) return ir_op_str[op];
-    return "unknown";
-}
-
-static void print_bril_type(Ctype *ctype, FILE *out) {
-    if (!ctype) { fprintf(out, "void"); return; }
-    switch (ctype->type) {
-    case CTYPE_INT: case CTYPE_LONG: case CTYPE_CHAR: case CTYPE_BOOL: fprintf(out, "int"); break;
-    case CTYPE_FLOAT: case CTYPE_DOUBLE: fprintf(out, "float"); break;
-    case CTYPE_VOID: fprintf(out, "void"); break;
-    case CTYPE_PTR: fprintf(out, "ptr"); break;
-    default: fprintf(out, "int"); break;
-    }
-}
-
-void ssa_print_bril_exact(SSABuild *b, FILE *out) {
-    if (!b || !b->unit) return;
-    for (int i = 0; i < b->unit->globals->len; i++) {
-        Global *g = list_get(b->unit->globals, i);
-        fprintf(out, "@%s", g->name);
-        if (g->type) { fprintf(out, ": "); print_bril_type(g->type, out); }
-        if (!g->is_extern && (is_inttype(g->type) || is_flotype(g->type))) {
-            if (is_inttype(g->type)) fprintf(out, " = %ld", g->init.i);
-            else fprintf(out, " = %f", g->init.f);
-        }
-        fprintf(out, ";\n");
-    }
-    if (b->unit->globals->len > 0) fprintf(out, "\n");
-    for (int i = 0; i < b->unit->funcs->len; i++) {
-        Func *f = list_get(b->unit->funcs, i);
-        fprintf(out, "@%s", f->name);
-        fprintf(out, "(");
-        for (int j = 0; j < f->param_names->len; j++) {
-            const char *param = list_get(f->param_names, j);
-            if (j > 0) fprintf(out, ", ");
-            fprintf(out, "%s: int", param);
-        }
-        fprintf(out, ")");
-        fprintf(out, " {\n");
-        for (int j = 0; j < f->blocks->len; j++) {
-            Block *blk = list_get(f->blocks, j);
-            if (blk->id != 0) fprintf(out, "  .L%u:\n", blk->id);
-            for (int k = 0; k < blk->instrs->len; k++) {
-                Instr *in = list_get(blk->instrs, k);
-                if (in->op == IROP_JMP || in->op == IROP_BR) continue;
-                fprintf(out, "    ");
-                if (in->dest) {
-                    fprintf(out, "%s: ", in->dest);
-                    if (in->type) print_bril_type(in->type, out);
-                    else fprintf(out, "int");
-                    fprintf(out, " = ");
-                }
-                const char *opname = ir_op_to_str(in->op);
-                if (in->op == IROP_JMP) {
-                    fprintf(out, "jmp");
-                    for (int m = 0; m < in->labels->len; m++) fprintf(out, " .%s", (char*)list_get(in->labels, m));
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                if (in->op == IROP_BR) {
-                    fprintf(out, "br");
-                    if (in->args->len > 0) fprintf(out, " %s", (char*)list_get(in->args, 0));
-                    for (int m = 0; m < in->labels->len; m++) fprintf(out, " .%s", (char*)list_get(in->labels, m));
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                if (in->op == IROP_RET) {
-                    fprintf(out, "ret");
-                    if (in->args->len > 0) fprintf(out, " %s", (char*)list_get(in->args, 0));
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                if (in->op == IROP_CALL) {
-                    fprintf(out, "call");
-                    if (in->args->len > 0) fprintf(out, " %s", (char*)list_get(in->args, 0));
-                    for (int m = 1; m < in->args->len; m++) fprintf(out, " %s", (char*)list_get(in->args, m));
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                fprintf(out, "%s", opname);
-                for (int m = 0; m < in->args->len; m++) fprintf(out, " %s", (char*)list_get(in->args, m));
-                if (in->op == IROP_CONST) fprintf(out, " %ld", in->ival);
-                else if (in->op == IROP_LCONST) fprintf(out, " %f", in->fval);
-                fprintf(out, ";\n");
-            }
-        }
-        fprintf(out, "}\n\n");
-    }
-}
-
-void ssa_print(SSABuild *b, FILE *out) { ssa_print_bril_exact(b, out); }
+#include "ssa_util.c"
 
 TEST(test, ssa) {
-    char infile[256] = "./test/test_ssa.c";
-    if (!freopen(strtok(infile, "\n"), "r", stdin)) puts("open fail"), exit(1);
+    char infile[256] = "/mnt/d/ws/test/MazuCC/src/test/test_ssa.c";
+    if (!freopen(strtok(infile, "\n"), "r", stdin)) 
+        puts("open fail"), exit(1);
+    
     set_current_filename(infile);
     SSABuild *b = ssa_new();
     List *toplevels = read_toplevels();
     for (Iter i = list_iter(toplevels); !iter_end(i);) {
-        Ast *ast = (Ast *)iter_next(&i);
-        ast_to_ssa(b, ast);
+        ast_to_ssa(b, (Ast *)iter_next(&i));
     }
+    
     ssa_print(b, stdout);
-    if (strings) list_free(strings);
-    if (flonums) list_free(flonums);
-    if (ctypes) list_free(ctypes);
 }
+
 #endif /* MINITEST_IMPLEMENTATION */

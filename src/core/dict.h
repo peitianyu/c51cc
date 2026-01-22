@@ -45,6 +45,50 @@ static inline void dict_put(Dict *dict, char *key, void *val)
     list_push(dict->list, e);
 }
 
+static inline bool dict_remove(Dict *dict, char *key)
+{
+    if (!dict) return false;
+    
+    // 搜索要删除的条目
+    ListNode *prev = NULL;
+    ListNode *node = dict->list->head;
+    
+    while (node) {
+        DictEntry *entry = (DictEntry *)node->elem;
+        if (!strcmp(entry->key, key)) {
+            // 找到要删除的条目
+            if (prev) {
+                prev->next = node->next;
+                if (node->next) {
+                    node->next->prev = prev;
+                } else {
+                    dict->list->tail = prev;
+                }
+            } else {
+                // 删除头节点
+                dict->list->head = node->next;
+                if (node->next) {
+                    node->next->prev = NULL;
+                } else {
+                    dict->list->tail = NULL;
+                }
+            }
+            
+            // 释放内存
+            free(entry->key);
+            free(entry);
+            free(node);
+            dict->list->len--;
+            return true;
+        }
+        
+        prev = node;
+        node = node->next;
+    }
+    
+    return false; // 未找到
+}
+
 static inline List *dict_keys(Dict *dict)
 {
     List *r = make_list();

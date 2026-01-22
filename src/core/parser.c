@@ -940,6 +940,7 @@ static Ast *read_expr_int(int prec)
         }
         if (is_punct(tok, '='))
             ensure_lvalue(ast);
+        
         Ast *rest = read_expr_int(prec2 + (is_right_assoc(tok) ? 1 : 0));
         if (!rest)
             error("second operand missing");
