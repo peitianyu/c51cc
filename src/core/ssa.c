@@ -512,44 +512,56 @@ static bool last_is_terminator(void) {
 /* ========== 函数处理 ========== */
 static void ast_to_ssa_func_def(SSABuild *b, Ast *ast) {
     if (!ast || ast->type != AST_FUNC_DEF) return;
-    
+
+    /* ---------- 创建 Func 与 entry ---------- */
     Func *func = create_func(ast->fname, ast->ctype);
-    current_build->cur_func = func;
-    
-    current_defs = (Dict *)make_dict(NULL);
-    incomplete_phis = (Dict *)make_dict(NULL);
-    sealed_blocks = make_list();
+    b->cur_func = func;
 
-    Block *entry_block = create_block(0);
+    /* 每个函数独享一张 def 表 */
+    current_defs        = make_dict(NULL);
+    incomplete_phis     = make_dict(NULL);
+    sealed_blocks       = make_list();
+
+    Block *entry = create_block(0);
     func->entry_id = 0;
-    list_push(func->blocks, entry_block);
-    current_build->cur_block = entry_block;
+    list_push(func->blocks, entry);
+    b->cur_block = entry;
 
+    /* ---------- 关键：为每个形参生成 load ---------- */
     for (Iter i = list_iter(ast->params); !iter_end(i);) {
-        Ast *param = iter_next(&i);
-        
-        const char *param_name = param->varname;
-        const char *param_ssa_name = make_ssa_name();
-        
-        Instr *load_param = create_instr(IROP_LOAD, param_ssa_name, param->ctype);
-        add_arg_to_instr(load_param, param_name);
-        
-        add_instr_to_current_block(load_param);
-        write_variable(param_name, entry_block, param_ssa_name);
+        Ast *param_ast = iter_next(&i);
+        const char *src_name = param_ast->varname;   /* 源级名字 a / b */
+
+        /* 生成 SSA 名字 */
+        const char *ssa_name = make_ssa_name();
+
+        /* 生成 load 指令：ssa_name = load src_name */
+        Instr *load = create_instr(IROP_LOAD, ssa_name, param_ast->ctype);
+        add_arg_to_instr(load, src_name);
+        add_instr_to_current_block(load);
+
+        /* 把“当前块里 src_name 的最新 SSA 名字”记到 current_defs */
+        write_variable(src_name, entry, ssa_name);
+
+        /* 同时把源级名字也存进 param_names，供打印函数用 */
+        list_push(func->param_names, strdup(src_name));
     }
 
+    /* ---------- 处理函数体 ---------- */
     ast_to_ssa_stmt(b, ast->body);
 
-    if (current_build->cur_block != NULL && !last_is_terminator()) {
+    /* 末尾自动补 ret（你原来已有，保持） */
+    if (b->cur_block && !last_is_terminator()) {
         if (ast->ctype->type == CTYPE_VOID) {
             Instr *ret = create_instr(IROP_RET, NULL, NULL);
             add_instr_to_current_block(ret);
         }
     }
 
+    /* ---------- 收尾 ---------- */
     list_push(b->unit->funcs, func);
-    current_build->cur_func = NULL;
-    current_build->cur_block = NULL;
+    b->cur_func = NULL;
+    b->cur_block = NULL;
 }
 
 /* ========== 公开接口 ========== */
