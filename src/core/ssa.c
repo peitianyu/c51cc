@@ -1,4 +1,5 @@
 #include "ssa.h"
+#include "ssa_util.c"
 #include "cc.h"
 #include <stdint.h>
 #include <string.h>
@@ -88,13 +89,82 @@ static const char *read_variable_recursive(const char *var_name, Block *block) {
         }
     }
 
-    if (!sealed) {
-        // 不完全的CFG：创建无操作数的 phi
-        Instr *phi = create_instr(IROP_PHI, make_ssa_name(), NULL);
+    printf("%s sealed: %d block->preds->len: %d for var %s\n", __FUNCTION__, sealed, block->preds->len, var_name);
+    
+    // 获取变量类型 - 这里需要从符号表获取，简化处理假设是int
+    Ctype *var_type = NULL;
+    // 创建int类型作为默认
+    var_type = &(Ctype){0, CTYPE_INT, 2, NULL};
+    
+    // 如果已密封且有多个前驱，需要phi函数
+    if (sealed && block->preds->len > 1) {
+        printf("  Creating phi for sealed block with %d predecessors\n", block->preds->len);
+        
+        // 创建phi函数
+        const char *phi_name = make_ssa_name();
+        
+        // 使用变量类型
+        Instr *phi = create_instr(IROP_PHI, phi_name, var_type);
+        
+        // 先添加到当前块
         add_instr_to_current_block(phi);
-        write_variable(var_name, block, phi->dest);
-
-        // 记录到 incomplete_phis 中
+        // 记录定义
+        write_variable(var_name, block, phi_name);
+        
+        // 为每个前驱添加操作数
+        for (int i = 0; i < block->preds->len; i++) {
+            uint32_t pred_id = (uintptr_t)list_get(block->preds, i);
+            Block *pred = NULL;
+            
+            // 查找前驱块
+            for (int j = 0; j < current_build->cur_func->blocks->len; j++) {
+                Block *b = list_get(current_build->cur_func->blocks, j);
+                if (b->id == pred_id) {
+                    pred = b;
+                    break;
+                }
+            }
+            
+            if (!pred) {
+                printf("  Warning: pred not found for id %u\n", pred_id);
+                add_arg_to_instr(phi, "undef");
+                continue;
+            }
+            
+            // 读取前驱块中的变量值
+            const char *val = read_variable(var_name, pred);
+            printf("  Read value from pred %u: %s\n", pred->id, val ? val : "NULL");
+            
+            if (!val) {
+                // 在前驱中未定义，使用未定义值
+                add_arg_to_instr(phi, "undef");
+            } else {
+                add_arg_to_instr(phi, val);
+            }
+        }
+        
+        // 尝试简化平凡phi
+        Instr *simplified = try_remove_trivial_phi(phi);
+        if (simplified != phi) {
+            // phi被简化了，更新定义
+            write_variable(var_name, block, simplified->dest);
+            printf("  Phi simplified to: %s\n", simplified->dest);
+            return simplified->dest;
+        }
+        
+        printf("  Created phi: %s\n", phi_name);
+        return phi_name;
+    }
+    else if (!sealed) {
+        printf("  Creating placeholder phi for unsealed block\n");
+        // 未密封的块：创建占位phi
+        const char *phi_name = make_ssa_name();
+        Instr *phi = create_instr(IROP_PHI, phi_name, var_type);
+        
+        // 重要：不立即添加到当前块，等待密封时处理
+        // 只记录到incomplete_phis中
+        
+        // 记录到incomplete_phis中，等待密封时填充操作数
         char block_key[64];
         snprintf(block_key, sizeof(block_key), "%p", (void *)block);
         Dict *block_phis = (Dict *)dict_get(incomplete_phis, (char *)block_key);
@@ -103,11 +173,14 @@ static const char *read_variable_recursive(const char *var_name, Block *block) {
             dict_put(incomplete_phis, (char *)strdup(block_key), block_phis);
         }
         dict_put(block_phis, (char *)strdup(var_name), phi);
-
-        return phi->dest;
-    } else if (block->pred_ids->len == 1) {
-        // 优化：只有一个前驱
-        uint32_t pred_id = (uintptr_t)list_get(block->pred_ids, 0);
+        
+        printf("  Created placeholder phi: %s\n", phi_name);
+        return phi_name;
+    }
+    else if (block->preds->len == 1) {
+        printf("  Single predecessor, reading from pred\n");
+        // 已密封且只有一个前驱：直接读取前驱的值
+        uint32_t pred_id = (uintptr_t)list_get(block->preds, 0);
         Block *pred = NULL;
         for (int i = 0; i < current_build->cur_func->blocks->len; i++) {
             Block *b = list_get(current_build->cur_func->blocks, i);
@@ -116,18 +189,19 @@ static const char *read_variable_recursive(const char *var_name, Block *block) {
                 break;
             }
         }
-        return read_variable(var_name, pred);
-    } else {
-        // 多个前驱，需要 phi 函数
-        Instr *phi = create_instr(IROP_PHI, make_ssa_name(), NULL);
-        write_variable(var_name, block, phi->dest);
-        add_instr_to_current_block(phi);
-        
-        // 添加操作数
-        phi = add_phi_operands(var_name, phi);
-        write_variable(var_name, block, phi->dest);
-        return phi->dest;
+        if (pred) {
+            const char *val = read_variable(var_name, pred);
+            printf("  Value from pred %u: %s\n", pred->id, val ? val : "NULL");
+            return val;
+        }
     }
+    else {
+        printf("  No definition found\n");
+        // 没有前驱（entry块）且未定义变量
+        return NULL;
+    }
+    
+    return NULL;
 }
 
 /* 论文算法2: addPhiOperands */
@@ -135,10 +209,19 @@ static Instr *add_phi_operands(const char *var_name, Instr *phi) {
     Block *block = current_build->cur_block;
     if (!block || !phi) return phi;
     
-    // 为每个前驱添加参数
-    for (int i = 0; i < block->pred_ids->len; i++) {
-        uint32_t pred_id = (uintptr_t)list_get(block->pred_ids, i);
+    printf("add_phi_operands for var %s in block %u\n", var_name, block->id);
+    
+    // 清空现有参数
+    while (phi->args->len > 0) {
+        free((char *)list_pop(phi->args));
+    }
+    
+    // 为每个前驱添加操作数
+    for (int i = 0; i < block->preds->len; i++) {
+        uint32_t pred_id = (uintptr_t)list_get(block->preds, i);
         Block *pred = NULL;
+        
+        printf("  Processing pred %u\n", pred_id);
         
         // 查找前驱块
         for (int j = 0; j < current_build->cur_func->blocks->len; j++) {
@@ -149,68 +232,172 @@ static Instr *add_phi_operands(const char *var_name, Instr *phi) {
             }
         }
         
-        if (!pred) continue;
+        if (!pred) {
+            printf("  Pred not found\n");
+            add_arg_to_instr(phi, "undef");
+            continue;
+        }
         
         // 读取前驱块中的变量值
         const char *val = read_variable(var_name, pred);
+        printf("  Value from pred %u: %s\n", pred->id, val ? val : "NULL");
+        
         if (!val) {
-            val = make_ssa_name();
-            Instr *def = create_instr(IROP_CONST, val, NULL);
-            def->ival = 0;
-            add_instr_to_current_block(def);
+            add_arg_to_instr(phi, "undef");
+        } else {
+            add_arg_to_instr(phi, val);
         }
-        add_arg_to_instr(phi, val);
     }
     
-    return try_remove_trivial_phi(phi);
+    // 尝试简化平凡phi
+    Instr *result = try_remove_trivial_phi(phi);
+    
+    if (result->ival == 1) { // 这是平凡phi
+        printf("  Trivial phi detected, replacing with: %s\n", 
+               result->args->len > 0 ? (const char *)list_get(result->args, 0) : "NULL");
+        
+        const char *same_value = result->args->len > 0 ? 
+            (const char *)list_get(result->args, 0) : "undef";
+        
+        // 重要：直接返回NULL，表示phi应该被移除
+        // 并且更新定义
+        write_variable(var_name, block, same_value);
+        
+        // 标记phi为已删除
+        phi->op = IROP_NOP;
+        phi->dest = NULL;
+        
+        // 释放result
+        // free(result->dest);
+        list_free(result->args);
+        free(result);
+        
+        return NULL; // 表示phi已被简化移除
+    }
+    
+    printf("  Non-trivial phi: %s with %d args\n", 
+           result->dest ? result->dest : "NULL", result->args->len);
+    
+    return result;
 }
 
 /* 论文算法3: tryRemoveTrivialPhi */
+/* 论文算法3: tryRemoveTrivialPhi - 修复版本 */
 static Instr *try_remove_trivial_phi(Instr *phi) {
-    if (phi->op != IROP_PHI) return phi;
+    if (!phi || phi->op != IROP_PHI) return phi;
 
     const char *same = NULL;
+    int undef_count = 0;
+    bool all_same = true;
+    
+    // 检查所有操作数是否相同
     for (int i = 0; i < phi->args->len; i++) {
         const char *op = (const char *)list_get(phi->args, i);
-        if (op == same || (op && phi->dest && strcmp(op, phi->dest) == 0)) continue;
-        if (same != NULL) return phi; // 至少两个不同值，不是平凡的
-        same = op;
+        if (!op || strcmp(op, "undef") == 0) {
+            undef_count++;
+            continue;
+        }
+        if (same == NULL) {
+            same = op;
+        } else if (strcmp(same, op) != 0) {
+            // 发现不同的操作数，不是平凡phi
+            all_same = false;
+            break;
+        }
     }
 
+    // 如果不是所有操作数都相同，返回原phi
+    if (!all_same) {
+        return phi;
+    }
+    
+    // 如果所有操作数都是undef，则返回undef
+    if (same == NULL && undef_count > 0) {
+        // 标记为平凡phi，值为undef
+        phi->ival = 1; // 使用ival字段标记这是平凡phi
+        return phi;
+    }
+    
+    // 如果same为NULL，说明没有有效操作数
     if (same == NULL) {
-        same = make_ssa_name();
-        Instr *undef = create_instr(IROP_CONST, same, NULL);
-        undef->ival = 0;
-        add_instr_to_current_block(undef);
+        return phi;
     }
 
-    // 简化处理：直接替换 dest
-    phi->dest = same;
-    return phi;
+    // 平凡phi：标记并返回
+    phi->ival = 1; // 使用ival字段标记这是平凡phi
+    
+    // 创建一个简化的副本（如果需要）
+    Instr *result = malloc(sizeof(Instr));
+    if (!result) return phi;
+    
+    memset(result, 0, sizeof(Instr));
+    result->op = IROP_PHI;
+    result->dest = phi->dest ? strdup(phi->dest) : NULL;
+    result->type = phi->type;
+    result->args = make_list();
+    if (same) {
+        add_arg_to_instr(result, same); // 存储相同的值
+    }
+    result->ival = 1; // 标记为平凡phi
+    
+    return result;
 }
 
 /* 论文算法4: sealBlock */
 static void seal_block(Block *block) {
     if (!block) return;
     
+    printf("Sealing block %u\n", block->id);
+    
     char block_key[64];
     snprintf(block_key, sizeof(block_key), "%p", (void *)block);
-    
-    // 处理该块中所有未完成的 phi
     Dict *block_phis = (Dict *)dict_get(incomplete_phis, (char *)block_key);
+    
     if (block_phis) {
+        printf("Found %d incomplete phis\n", block_phis->list->len);
+        
         List *keys = dict_keys(block_phis);
         for (int i = 0; i < keys->len; i++) {
             const char *var_name = (const char *)list_get(keys, i);
             Instr *phi = (Instr *)dict_get(block_phis, (char *)var_name);
-            if (phi) add_phi_operands(var_name, phi);
+            
+            if (phi) {
+                printf("Processing phi for var %s\n", var_name);
+                
+                // 填充phi操作数
+                Instr *new_phi = add_phi_operands(var_name, phi);
+                
+                if (new_phi == NULL) {
+                    // phi被简化移除了
+                    printf("  Phi simplified away\n");
+                    // 不需要添加到指令列表
+                } else {
+                    // 将phi添加到块的指令列表开头
+                    if (new_phi != phi) {
+                        // free(phi->dest);
+                        list_free(phi->args);
+                        free(phi);
+                    }
+                    
+                    // 添加到块的指令列表开头
+                    list_set(block->instrs, 0, new_phi);
+                    
+                    // 更新定义
+                    if (new_phi->dest) {
+                        write_variable(var_name, block, new_phi->dest);
+                    }
+                }
+            }
         }
         list_free(keys);
+        
+        // 清理incomplete_phis
+        dict_remove(incomplete_phis, block_key);
     }
     
-    // 标记为已密封
     list_push(sealed_blocks, block);
     block->sealed = true;
+    printf("Block %u sealed\n", block->id);
 }
 
 /* ========== 基础数据结构创建函数 ========== */
@@ -225,7 +412,7 @@ static Instr *create_instr(IrOp op, const char *dest, Ctype *ctype) {
     memset(instr, 0, sizeof(Instr));
     instr->op = op;
     instr->dest = dest ? strdup(dest) : NULL;
-    instr->type = ctype;
+    instr->type = ctype; 
     instr->args = make_list();
     instr->labels = make_list();
     instr->ival = 0;
@@ -247,8 +434,8 @@ static Block *create_block(uint32_t id) {
     block->id = id;
     block->sealed = false;
     block->instrs = make_list();
-    block->pred_ids = make_list();
-    block->succ_ids = make_list();
+    block->preds = make_list();
+    block->succes = make_list();
     return block;
 }
 
@@ -306,16 +493,24 @@ static const char *process_variable(Ast *ast) {
     if (!ast || (ast->type != AST_LVAR && ast->type != AST_GVAR)) return NULL;
 
     const char *var_name = ast->varname;
+    Ctype *ctype = ast->ctype;
+    
+    printf("process_variable: %s (type: %s) in block %u\n", 
+           var_name, ctype_to_string(ctype), current_build->cur_block->id);
     
     // 先尝试读取变量
     const char *ssa_name = read_variable(var_name, current_build->cur_block);
+    printf("  read_variable returned: %s\n", ssa_name);
     
     if (!ssa_name) {
+        // 变量未定义，创建load指令
         ssa_name = make_ssa_name();
-        Instr *load = create_instr(IROP_LOAD, ssa_name, ast->ctype);
+        Instr *load = create_instr(IROP_LOAD, ssa_name, ctype);
         add_arg_to_instr(load, var_name);
         add_instr_to_current_block(load);
+        // 将load的结果作为该变量的定义
         write_variable(var_name, current_build->cur_block, ssa_name);
+        printf("  created load: %s = load %s\n", ssa_name, var_name);
     }
     
     return ssa_name;
@@ -351,6 +546,8 @@ static const char *process_binary_op(Ast *ast) {
         case '/': op = IROP_DIV; break;
         case '<': op = IROP_LT; break;
         case '>': op = IROP_GT; break;
+        default:
+            error("未知操作数");
     }
     
     Instr *instr = create_instr(op, result_name, ast->ctype);
@@ -393,7 +590,7 @@ static const char *ast_to_ssa_expr(SSABuild *b, Ast *ast) {
     }
 }
 
-static void process_return(Ast *ast) {    
+static void process_return(Ast *ast) {   
     Instr *instr = create_instr(IROP_RET, NULL, NULL);
     if (ast->retval) {
         const char *retval_name = ast_to_ssa_expr(current_build, ast->retval);
@@ -408,29 +605,32 @@ static const char *block_label(Block *b) {
     return buf;
 }
 
-/* 简化的 if 语句处理 */
+static bool last_is_terminator(void) {
+    if (!current_build || !current_build->cur_block) return false;
+    List *instrs = current_build->cur_block->instrs;
+    if (instrs->len == 0) return false;
+    Instr *last = list_get(instrs, instrs->len - 1);
+    return last->op == IROP_RET || last->op == IROP_JMP || last->op == IROP_BR;
+}
+
 static void process_if_stmt(Ast *ast) {
     if (!ast || ast->type != AST_IF) return;
 
     const char *cond = ast_to_ssa_expr(current_build, ast->cond);
     if (!cond) return;
     
-    // 创建三个基本块
+    // 创建新的基本块
     Block *then_block = create_block(current_build->cur_func->blocks->len);
     Block *else_block = create_block(current_build->cur_func->blocks->len + 1);
     Block *merge_block = create_block(current_build->cur_func->blocks->len + 2);
     
-    list_push(current_build->cur_func->blocks, then_block);
-    list_push(current_build->cur_func->blocks, else_block);
-    list_push(current_build->cur_func->blocks, merge_block);
+    // 设置前驱后继关系
+    list_push(then_block->preds, (void *)(uintptr_t)current_build->cur_block->id);
+    list_push(else_block->preds, (void *)(uintptr_t)current_build->cur_block->id);
+    list_push(current_build->cur_block->succes, (void *)(uintptr_t)then_block->id);
+    list_push(current_build->cur_block->succes, (void *)(uintptr_t)else_block->id);
     
-    // 添加前驱关系
-    list_push(then_block->pred_ids, (void *)(uintptr_t)current_build->cur_block->id);
-    list_push(else_block->pred_ids, (void *)(uintptr_t)current_build->cur_block->id);
-    list_push(merge_block->pred_ids, (void *)(uintptr_t)then_block->id);
-    list_push(merge_block->pred_ids, (void *)(uintptr_t)else_block->id);
-    
-    // 条件跳转
+    // 添加条件跳转
     Instr *br = create_instr(IROP_BR, NULL, NULL);
     add_arg_to_instr(br, cond);
     add_label_to_instr(br, block_label(then_block));
@@ -440,28 +640,53 @@ static void process_if_stmt(Ast *ast) {
     // 密封当前块
     seal_block(current_build->cur_block);
     
-    // 处理 then 分支
+    // 添加块到函数
+    list_push(current_build->cur_func->blocks, then_block);
+    list_push(current_build->cur_func->blocks, else_block);
+    list_push(current_build->cur_func->blocks, merge_block);
+    
+    // 处理then分支
     current_build->cur_block = then_block;
     ast_to_ssa_stmt(current_build, ast->then);
-    Instr *jmp_then = create_instr(IROP_JMP, NULL, NULL);
-    add_label_to_instr(jmp_then, block_label(merge_block));
-    add_instr_to_current_block(jmp_then);
+    if(!last_is_terminator()) {
+        // 添加跳转到合并块
+        Instr *jmp_then = create_instr(IROP_JMP, NULL, NULL);
+        add_label_to_instr(jmp_then, block_label(merge_block));
+        add_instr_to_current_block(jmp_then);
+        list_push(then_block->succes, (void *)(uintptr_t)merge_block->id);
+    }
+    
+    // 密封then块
     seal_block(then_block);
     
-    // 处理 else 分支
+    // 处理else分支
     current_build->cur_block = else_block;
-    if (ast->els) ast_to_ssa_stmt(current_build, ast->els);
-    Instr *jmp_else = create_instr(IROP_JMP, NULL, NULL);
-    add_label_to_instr(jmp_else, block_label(merge_block));
-    add_instr_to_current_block(jmp_else);
+    if (ast->els) {
+        ast_to_ssa_stmt(current_build, ast->els);
+    }
+    if((!ast->els || !last_is_terminator())) {
+        // 添加跳转到合并块
+        Instr *jmp_else = create_instr(IROP_JMP, NULL, NULL);
+        add_label_to_instr(jmp_else, block_label(merge_block));
+        add_instr_to_current_block(jmp_else);
+        list_push(else_block->succes, (void *)(uintptr_t)merge_block->id);
+    }
+    
+    // 密封else块
     seal_block(else_block);
     
-    // 继续到合并块
+    // 设置合并块的前驱
+    list_push(merge_block->preds, (void *)(uintptr_t)then_block->id);
+    list_push(merge_block->preds, (void *)(uintptr_t)else_block->id);
+    
+    // 继续处理合并块
     current_build->cur_block = merge_block;
 }
 
 static void ast_to_ssa_stmt(SSABuild *b, Ast *ast) {
     if (!ast) return;
+
+    printf("ast: %s\n", ast_to_string(ast));
     switch (ast->type) {
     case AST_COMPOUND_STMT:
         for (Iter i = list_iter(ast->stmts); !iter_end(i);) {
@@ -469,9 +694,12 @@ static void ast_to_ssa_stmt(SSABuild *b, Ast *ast) {
             ast_to_ssa_stmt(b, stmt);
         }
         break;
-    case AST_RETURN: process_return(ast); break;
+    case AST_RETURN: 
+        process_return(ast); 
+        break;
     case AST_IF:
         process_if_stmt(ast);
+        printf("process_if_stmt preds: %d\n", current_build->cur_block->preds->len);
         break;
     case AST_DECL: {                 
         Ast *init = ast->declinit; 
@@ -501,23 +729,13 @@ static bool ast_returns(Ast *ast) {
     return false;
 }
 
-static bool last_is_terminator(void) {
-    if (!current_build || !current_build->cur_block) return false;
-    List *instrs = current_build->cur_block->instrs;
-    if (instrs->len == 0) return false;
-    Instr *last = list_get(instrs, instrs->len - 1);
-    return last->op == IROP_RET || last->op == IROP_JMP || last->op == IROP_BR;
-}
-
 /* ========== 函数处理 ========== */
 static void ast_to_ssa_func_def(SSABuild *b, Ast *ast) {
     if (!ast || ast->type != AST_FUNC_DEF) return;
 
-    /* ---------- 创建 Func 与 entry ---------- */
     Func *func = create_func(ast->fname, ast->ctype);
     b->cur_func = func;
 
-    /* 每个函数独享一张 def 表 */
     current_defs        = make_dict(NULL);
     incomplete_phis     = make_dict(NULL);
     sealed_blocks       = make_list();
@@ -527,30 +745,28 @@ static void ast_to_ssa_func_def(SSABuild *b, Ast *ast) {
     list_push(func->blocks, entry);
     b->cur_block = entry;
 
-    /* ---------- 关键：为每个形参生成 load ---------- */
     for (Iter i = list_iter(ast->params); !iter_end(i);) {
         Ast *param_ast = iter_next(&i);
-        const char *src_name = param_ast->varname;   /* 源级名字 a / b */
 
-        /* 生成 SSA 名字 */
+        const char *src_name = param_ast->varname;  
         const char *ssa_name = make_ssa_name();
 
-        /* 生成 load 指令：ssa_name = load src_name */
+        // NOTE: 函数参数以load形式加载
         Instr *load = create_instr(IROP_LOAD, ssa_name, param_ast->ctype);
         add_arg_to_instr(load, src_name);
         add_instr_to_current_block(load);
 
-        /* 把“当前块里 src_name 的最新 SSA 名字”记到 current_defs */
         write_variable(src_name, entry, ssa_name);
-
-        /* 同时把源级名字也存进 param_names，供打印函数用 */
         list_push(func->param_names, strdup(src_name));
     }
 
-    /* ---------- 处理函数体 ---------- */
     ast_to_ssa_stmt(b, ast->body);
 
-    /* 末尾自动补 ret（你原来已有，保持） */
+    // 密封最后一个块
+    if (b->cur_block) {
+        seal_block(b->cur_block);
+    }
+
     if (b->cur_block && !last_is_terminator()) {
         if (ast->ctype->type == CTYPE_VOID) {
             Instr *ret = create_instr(IROP_RET, NULL, NULL);
@@ -558,7 +774,6 @@ static void ast_to_ssa_func_def(SSABuild *b, Ast *ast) {
         }
     }
 
-    /* ---------- 收尾 ---------- */
     list_push(b->unit->funcs, func);
     b->cur_func = NULL;
     b->cur_block = NULL;
@@ -575,7 +790,7 @@ void ast_to_ssa(SSABuild *b, Ast *ast) {
 /* ========== 打印函数（保留） ========== */
 #ifdef MINITEST_IMPLEMENTATION
 #include "minitest.h"
-#include "ssa_util.c"
+
 
 TEST(test, ssa) {
     char infile[256] = "/mnt/d/ws/test/MazuCC/src/test/test_ssa.c";
@@ -586,7 +801,9 @@ TEST(test, ssa) {
     SSABuild *b = ssa_new();
     List *toplevels = read_toplevels();
     for (Iter i = list_iter(toplevels); !iter_end(i);) {
-        ast_to_ssa(b, (Ast *)iter_next(&i));
+        Ast *ast = iter_next(&i);
+        printf("ast: %s\n", ast_to_string(ast));
+        ast_to_ssa(b, ast);
     }
     
     ssa_print(b, stdout);

@@ -8,6 +8,8 @@
 #include "dict.h"
 #include "cc.h"
 
+// https://roife.github.io/posts/braun2013/
+
 typedef enum IrOp {
     IROP_NOP = 0, IROP_CONST, IROP_ADD, IROP_MUL, IROP_SUB, IROP_DIV,
     IROP_EQ, IROP_LT, IROP_GT, IROP_LE, IROP_GE,
@@ -38,9 +40,9 @@ typedef struct Block {
     uint32_t id;
     bool     sealed;
 
-    List    *instrs;            // List<*Instr>
-    List    *pred_ids;          // List<uint32_t>
-    List    *succ_ids;          // List<uint32_t>
+    List    *instrs;           // List<*Instr>
+    List    *preds;            // List<Block>
+    List    *succes;           // List<Block>
 } Block;
 
 typedef struct Func {

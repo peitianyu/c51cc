@@ -26,88 +26,115 @@ static void print_bril_type(Ctype *ctype, FILE *out) {
     }
 }
 
-static void ssa_print_bril_exact(SSABuild *b, FILE *out) {
-    if (!b || !b->unit) return;
-    
-    for (int i = 0; i < b->unit->funcs->len; i++) {
-        Func *f = list_get(b->unit->funcs, i);
-        fprintf(out, "@%s", f->name);
-        fprintf(out, "(");
-        for (int j = 0; j < f->param_names->len; j++) {
-            const char *param = list_get(f->param_names, j);
-            if (j > 0) fprintf(out, ", ");
-            fprintf(out, "%s: int", param);
-        }
-        fprintf(out, ") {\n");
-        
-        for (int j = 0; j < f->blocks->len; j++) {
-            Block *blk = list_get(f->blocks, j);
-            if (blk->id != 0 && blk->instrs->len)
-                fprintf(out, "  .block%u:\n", blk->id);
-            
-            for (int k = 0; k < blk->instrs->len; k++) {
-                Instr *in = list_get(blk->instrs, k);
-                fprintf(out, "    ");
-                
-                if (in->dest) {
-                    fprintf(out, "%s: ", in->dest);
-                    if (in->type) print_bril_type(in->type, out);
-                    else fprintf(out, "int");
-                    fprintf(out, " = ");
-                }
-                
-                const char *opname = ir_op_to_str(in->op);
-                if (in->op == IROP_JMP) {
-                    fprintf(out, "jmp");
-                    for (int m = 0; m < in->labels->len; m++) 
-                        fprintf(out, " .%s", (char*)list_get(in->labels, m));
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                if (in->op == IROP_BR) {
-                    fprintf(out, "br");
-                    if (in->args->len > 0) 
-                        fprintf(out, " %s", (char*)list_get(in->args, 0));
-                    for (int m = 0; m < in->labels->len; m++) 
-                        fprintf(out, " .%s", (char*)list_get(in->labels, m));
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                if (in->op == IROP_RET) {
-                    fprintf(out, "ret");
-                    if (in->args->len > 0) 
-                        fprintf(out, " %s", (char*)list_get(in->args, 0));
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                if (in->op == IROP_CALL) {
-                    fprintf(out, "call");
-                    for (int i = 0; i < in->args->len; i++) {
-                        fprintf(out, " %s", (char*)list_get(in->args, i));
-                    }
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                if (in->op == IROP_PHI) {
-                    fprintf(out, "%s", opname);
-                    for (int m = 0; m < in->args->len; m++) 
-                        fprintf(out, " %s", (char*)list_get(in->args, m));
-                    fprintf(out, ";\n");
-                    continue;
-                }
-                
-                fprintf(out, "%s", opname);
-                for (int m = 0; m < in->args->len; m++) 
-                    fprintf(out, " %s", (char*)list_get(in->args, m));
-                if (in->op == IROP_CONST) 
-                    fprintf(out, " %ld", in->ival);
-                fprintf(out, ";\n");
-            }
-        }
-        fprintf(out, "}\n\n");
+/* ---------------- 1. 单条指令打印 ---------------- */
+static void ssa_print_instr(const Instr *in, FILE *out)
+{
+    if (!in) return;
+
+    if (in->dest) {                    /* dest : type = */
+        fprintf(out, "%s: ", in->dest);
+        print_bril_type(in->type, out);
+        fprintf(out, " = ");
+    }
+
+    const char *opname = ir_op_to_str(in->op);
+
+    switch (in->op) {                  /* 特殊格式先处理 */
+    case IROP_JMP:
+        fprintf(out, "jmp");
+        for (int i = 0; i < in->labels->len; ++i)
+            fprintf(out, " .%s", (char*)list_get(in->labels, i));
+        fprintf(out, ";\n");
+        return;
+    case IROP_BR:
+        fprintf(out, "br");
+        if (in->args->len) fprintf(out, " %s", (char*)list_get(in->args, 0));
+        for (int i = 0; i < in->labels->len; ++i)
+            fprintf(out, " .%s", (char*)list_get(in->labels, i));
+        fprintf(out, ";\n");
+        return;
+    case IROP_RET:
+        fprintf(out, "ret");
+        if (in->args->len) fprintf(out, " %s", (char*)list_get(in->args, 0));
+        fprintf(out, ";\n");
+        return;
+    case IROP_CALL:
+        fprintf(out, "call");
+        for (int i = 0; i < in->args->len; ++i)
+            fprintf(out, " %s", (char*)list_get(in->args, i));
+        fprintf(out, ";\n");
+        return;
+    case IROP_PHI:
+        fprintf(out, "%s", opname);
+        for (int i = 0; i < in->args->len; ++i)
+            fprintf(out, " %s", (char*)list_get(in->args, i));
+        fprintf(out, ";\n");
+        return;
+    default:                           /* 普通指令 */
+        fprintf(out, "%s", opname);
+        for (int i = 0; i < in->args->len; ++i)
+            fprintf(out, " %s", (char*)list_get(in->args, i));
+        if (in->op == IROP_CONST) fprintf(out, " %ld", in->ival);
+        fprintf(out, ";\n");
     }
 }
 
-static void ssa_print(SSABuild *b, FILE *out) { 
-    ssa_print_bril_exact(b, out); 
+/* ---------------- 2. 单个 Block 打印 ---------------- */
+static void ssa_print_block(const Block *blk, FILE *out)
+{
+    if (!blk) return;
+    if (blk->id != 0 && blk->instrs->len)
+        fprintf(out, "  .block%u:\n", blk->id);
+
+    for (int i = 0; i < blk->instrs->len; ++i) {
+        fprintf(out, "    ");
+        ssa_print_instr(list_get(blk->instrs, i), out);
+    }
+}
+
+/* ---------------- 3. Global 区打印 ---------------- */
+static void ssa_print_globals(const SSAUnit *unit, FILE *out)
+{
+    if (!unit || !unit->globals) return;
+    for (int i = 0; i < unit->globals->len; ++i) {
+        const Global *g = list_get(unit->globals, i);
+        fprintf(out, "@%s: ", g->name);
+        print_bril_type(g->type, out);
+
+        if (g->is_extern)
+            fprintf(out, " = extern;\n");
+        else {
+            if (g->type->type == CTYPE_FLOAT || g->type->type == CTYPE_DOUBLE)
+                fprintf(out, " = %.17g;\n", g->init.f);
+            else
+                fprintf(out, " = %ld;\n", g->init.i);
+        }
+    }
+    if (unit->globals->len) fprintf(out, "\n");
+}
+
+/* ---------------- 4. 顶层统一接口 ---------------- */
+static void ssa_print(const SSABuild *b, FILE *out)
+{
+    if (!b || !b->unit) return;
+
+    ssa_print_globals(b->unit, out);          /* 先打印全局量 */
+
+    for (int i = 0; i < b->unit->funcs->len; ++i) {
+        Func *f = list_get(b->unit->funcs, i);
+
+        /* 函数头 */
+        fprintf(out, "@%s(", f->name);
+        for (int j = 0; j < f->param_names->len; ++j) {
+            if (j) fprintf(out, ", ");
+            fprintf(out, "%s: int", (char*)list_get(f->param_names, j));
+        }
+        fprintf(out, ") {\n");
+
+        /* 依次打印每个 block */
+        for (int j = 0; j < f->blocks->len; ++j)
+            ssa_print_block(list_get(f->blocks, j), out);
+
+        fprintf(out, "}\n\n");
+    }
 }
