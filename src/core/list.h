@@ -50,6 +50,15 @@ static inline void list_push(List *list, void *elem)
     list->len++;
 }
 
+static inline void list_unique_push(List *list, void *elem, bool (*eq)(void *, void *))
+{
+    for (ListNode *node = list->head; node; node = node->next) {
+        if (eq(node->elem, elem))
+            return;
+    }
+    list_push(list, elem);
+}
+
 static inline void *list_pop(List *list)
 {
     if (!list->head)
@@ -68,7 +77,7 @@ static inline void *list_pop(List *list)
 static inline void list_set(List *list, int idx, void *elem)
 {
     if (idx < 0 || idx >= list->len)
-        abort();          /* 或者你自己想用的错误处理 */
+        abort();        
 
     ListNode *n = list->head;
     for (int i = 0; i < idx; ++i)

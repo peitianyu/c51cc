@@ -21,11 +21,17 @@ typedef enum IrOp {
     IROP_LCONST
 } IrOp;
 
+
+typedef struct Value {
+    int   name;
+    List *users;        // 操作指针, 实际储存的是set, 无重复
+} Value;
+
 typedef struct Instr {
     int         op;    
-    const char *dest;       /* SSA 名，NULL 表示无 dest     */
-    Ctype       *type;      /* dest 存在时必须, 这里直接复用 */
-    List *args;             /* SSA 源数组 const char *      */
+    List       *args;       /* SSA 源数组 int               */
+    int         dest;       /* SSA 名，NULL 表示无 dest     */
+    Ctype      *type;       /* dest 存在时必须, 这里直接复用 */
     List *labels;           /* 标签数组 const char *        */
     union {
         int64_t ival;
@@ -33,16 +39,17 @@ typedef struct Instr {
         List *array_val;
         List *struct_val;
     };
-    struct { int restrict_:1, volatile_:1, reg:1, mem:3; } attr;
 } Instr;
 
 typedef struct Block {
     uint32_t id;
     bool     sealed;
 
-    List    *instrs;           // List<*Instr>
     List    *preds;            // List<Block>
-    List    *succes;           // List<Block>
+    List    *instrs;           // List<*Instr>
+    List    *phi_instrs;       // List<*Instr>
+    Dict    *var_defs;         // Dict<var, val>
+    List    *incomplete_phis;  // List<(var, phi)>
 } Block;
 
 typedef struct Func {
@@ -72,8 +79,6 @@ typedef struct SSABuild {
     Block   *cur_block;
     
     List    *instr_buf;         // List<*Instr> 指令池 
-    List    *name_buf;          // List<const char *> 名字池 
-    Dict    *var_map;
 } SSABuild;
 
 #endif /* __SSA_H__ */

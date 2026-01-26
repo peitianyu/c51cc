@@ -49,14 +49,12 @@ static inline bool dict_remove(Dict *dict, char *key)
 {
     if (!dict) return false;
     
-    // 搜索要删除的条目
     ListNode *prev = NULL;
     ListNode *node = dict->list->head;
     
     while (node) {
         DictEntry *entry = (DictEntry *)node->elem;
         if (!strcmp(entry->key, key)) {
-            // 找到要删除的条目
             if (prev) {
                 prev->next = node->next;
                 if (node->next) {
@@ -65,7 +63,6 @@ static inline bool dict_remove(Dict *dict, char *key)
                     dict->list->tail = prev;
                 }
             } else {
-                // 删除头节点
                 dict->list->head = node->next;
                 if (node->next) {
                     node->next->prev = NULL;
@@ -74,7 +71,6 @@ static inline bool dict_remove(Dict *dict, char *key)
                 }
             }
             
-            // 释放内存
             free(entry->key);
             free(entry);
             free(node);
@@ -86,7 +82,7 @@ static inline bool dict_remove(Dict *dict, char *key)
         node = node->next;
     }
     
-    return false; // 未找到
+    return false;
 }
 
 static inline List *dict_keys(Dict *dict)
@@ -105,6 +101,13 @@ static inline List *dict_values(Dict *dict)
         for (Iter i = list_iter(dict->list); !iter_end(i);)
             list_push(r, ((DictEntry *) iter_next(&i))->val);
     return r;
+}
+
+static inline void dict_clear(Dict *dict)
+{
+    list_free(dict->list);
+    free(dict->list);
+    free(dict);
 }
 
 static inline void *dict_parent(Dict *dict)
