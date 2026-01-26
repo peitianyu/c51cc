@@ -1,0 +1,1 @@
+tcc main.c core/*.c -run -DMINITEST_IMPLEMENTATION -DC51CC_DEBUG
