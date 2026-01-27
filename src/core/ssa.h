@@ -96,4 +96,21 @@ void      ssa_build_destroy(SSABuild *b);
 void      ssa_convert_ast(SSABuild *b, Ast *ast);
 void      ssa_print(FILE *fp, SSAUnit *unit);
 
+/* ============================================================
+ * 优化 Pass API (ssa_pass.c)
+ * ============================================================ */
+
+typedef enum OptimizationLevel {
+    OPT_O0 = 0,     // 无优化
+    OPT_O1 = 1,     // 基本优化
+    OPT_O2 = 2,     // 激进优化
+    OPT_OS = 3      // 大小优化
+} OptimizationLevel;
+
+// 对单个函数进行优化
+void ssa_optimize_func(Func *f, int level);
+
+// 对整个 SSA Unit 进行优化
+void ssa_optimize(SSAUnit *unit, int level);
+
 #endif
