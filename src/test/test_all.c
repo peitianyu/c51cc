@@ -49,6 +49,11 @@ int test_if()
     return a;
 }
 
+int add(int a, int b)
+{
+    return a + b;
+}
+
 int main() {
     
 

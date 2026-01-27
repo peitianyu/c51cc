@@ -143,8 +143,7 @@ static void ast_to_string_int(String *buf, Ast *ast)
         string_appendf(buf, "(funcdecl %s)%s(", ctype_to_string(ast->ctype), ast->fname);
         for (Iter i = list_iter(ast->params); !iter_end(i);) {
             Ast *param = iter_next(&i);
-            string_appendf(buf, "%s %s", ctype_to_string(param->ctype),
-                           ast_to_string(param));
+            string_appendf(buf, "%s %s", ctype_to_string(param->ctype), ast_to_string(param));
             if (!iter_end(i))
                 string_appendf(buf, ",");
         }
@@ -358,13 +357,9 @@ char *token_to_string(const Token tok)
 #include "minitest.h"
 
 TEST(test, verbose) {
-    // char infile[256];
-    // printf("file path: ");
-    // if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
-    //     puts("open fail"), exit(1);
-
-    char infile[256] = "./test/test_all.c";
-    if (!freopen(strtok(infile, "\n"), "r", stdin))
+    char infile[256];
+    printf("file path: ");
+    if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
 
     set_current_filename(infile);

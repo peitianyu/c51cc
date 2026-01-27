@@ -8,77 +8,92 @@
 #include "dict.h"
 #include "cc.h"
 
-// https://roife.github.io/posts/braun2013/
-
 typedef enum IrOp {
-    IROP_NOP = 0, IROP_CONST, IROP_ADD, IROP_MUL, IROP_SUB, IROP_DIV,
-    IROP_EQ, IROP_LT, IROP_GT, IROP_LE, IROP_GE,
-    IROP_NOT, IROP_AND, IROP_OR,
-    IROP_JMP, IROP_BR, IROP_CALL, IROP_RET, IROP_PRINT,
-    IROP_PHI, IROP_ALLOC, IROP_FREE, IROP_STORE, IROP_LOAD, IROP_PTRADD,
-    IROP_FADD, IROP_FMUL, IROP_FSUB, IROP_FDIV,
-    IROP_FEQ, IROP_FLT, IROP_FLE, IROP_FGT, IROP_FGE,
-    IROP_LCONST
+    IROP_NOP = 0,
+    IROP_CONST,
+    IROP_PARAM,
+    // 算术
+    IROP_ADD, IROP_SUB, IROP_MUL, IROP_DIV,
+    IROP_MOD, IROP_NEG,
+    // 位运算
+    IROP_AND, IROP_OR, IROP_XOR, IROP_NOT,
+    IROP_SHL, IROP_SHR,
+    // 比较
+    IROP_EQ, IROP_LT, IROP_GT, IROP_LE, IROP_GE, IROP_NE,
+    // 逻辑
+    IROP_LNOT,
+    // 新增：C基础类型/指针操作（注：位域不单独设IROP，用位运算组合实现）
+    IROP_TRUNC,         // 截断: (char)i
+    IROP_ZEXT,          // 零扩展: unsigned提升
+    IROP_SEXT,          // 符号扩展: signed提升
+    IROP_BITCAST,       // 位重解释（float<->int）
+    IROP_INTTOPTR,      // (void*)0x4000 - MMIO关键
+    IROP_PTRTOINT,      // (uintptr_t)ptr
+    IROP_OFFSET,        // ptr[idx] 地址计算
+    IROP_SELECT,        // ?: 条件选择（替代部分PHI）
+    // 内存
+    IROP_ADDR,          // &var
+    IROP_LOAD,          // *ptr
+    IROP_STORE,         // *ptr = val
+    // 控制流
+    IROP_JMP, IROP_BR, IROP_CALL, IROP_RET, IROP_PHI,
 } IrOp;
 
-
-typedef struct Value {
-    int   name;
-    List *users;        // 操作指针, 实际储存的是set, 无重复
-} Value;
+typedef int ValueName;
 
 typedef struct Instr {
-    int         op;    
-    List       *args;       /* SSA 源数组 int               */
-    int         dest;       /* SSA 名，NULL 表示无 dest     */
-    Ctype      *type;       /* dest 存在时必须, 这里直接复用 */
-    List *labels;           /* 标签数组 const char *        */
-    union {
-        int64_t ival;
-        double fval;
-        List *array_val;
-        List *struct_val;
-    };
+    IrOp        op;
+    ValueName   dest;
+    Ctype      *type;
+    List       *args;       // ValueName* 列表
+    List       *labels;     // char* 列表（用于跳转目标、符号名）
+    union { 
+        int64_t ival; 
+        double fval; 
+    } imm;
 } Instr;
 
 typedef struct Block {
-    uint32_t id;
-    bool     sealed;
-
-    List    *preds;            // List<Block>
-    List    *instrs;           // List<*Instr>
-    List    *phi_instrs;       // List<*Instr>
-    Dict    *var_defs;         // Dict<var, val>
-    List    *incomplete_phis;  // List<(var, phi)>
+    uint32_t    id;
+    bool        sealed;
+    List       *preds;      // Block* 列表
+    List       *instrs;     // Instr* 列表
+    List       *phis;       // Instr* 列表（IROP_PHI）
+    Dict       *var_map;    // char* -> ValueName*
+    List       *incomplete; // IncompletePhi* 列表
 } Block;
 
 typedef struct Func {
     const char  *name;
     Ctype       *ret_type;
-
-    List        *param_names;   // List<const char *>
-    List        *blocks;        // List<Block>
-    uint32_t    entry_id;
+    List        *params;    // char* 列表
+    List        *blocks;    // Block* 列表
+    Block       *entry;
 } Func;
 
-typedef struct Global {
-    const char *name;
-    Ctype      *type;
-    bool        is_extern;
-    union { int64_t i; double f; } init;
-} Global;
-
 typedef struct SSAUnit {
-    List    *globals;           // List<Global>
-    List     *funcs;            // List<Func>
+    List    *funcs;         // Func* 列表
 } SSAUnit;
 
 typedef struct SSABuild {
-    SSAUnit *unit;
-    Func    *cur_func;
-    Block   *cur_block;
-    
-    List    *instr_buf;         // List<*Instr> 指令池 
+    SSAUnit     *unit;
+    Func        *cur_func;
+    Block       *cur_block;
+    struct CFContext *cf_ctx;  // 控制流上下文，定义在ssa.c中
+    int          next_value;
+    uint32_t     next_block;
 } SSABuild;
 
-#endif /* __SSA_H__ */
+/* ============================================================
+ * 仅暴露的4个API
+ * ============================================================ */
+
+// 构建器生命周期
+SSABuild* ssa_build_create(void);
+void      ssa_build_destroy(SSABuild *b);
+
+// AST转换与输出
+void      ssa_convert_ast(SSABuild *b, Ast *ast);
+void      ssa_print(FILE *fp, SSAUnit *unit);
+
+#endif
