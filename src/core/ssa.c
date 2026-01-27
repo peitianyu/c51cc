@@ -4,10 +4,6 @@
 #include <stdio.h>
 #include <assert.h>
 
-/* ============================================================
- * 内部辅助类型
- * ============================================================ */
-
 typedef struct {
     char      *var;
     ValueName  phi;
@@ -18,10 +14,6 @@ typedef struct CFContext {
     Block *continue_target;
     struct CFContext *parent;
 } CFContext;
-
-/* ============================================================
- * 内存管理
- * ============================================================ */
 
 static void* ssa_alloc(size_t size) {
     void *p = malloc(size);
@@ -41,17 +33,9 @@ static char* ssa_strdup(const char *s) {
     return d;
 }
 
-/* ============================================================
- * 值名管理
- * ============================================================ */
-
 static ValueName ssa_new_value(SSABuild *b) {
     return ++b->next_value;  // 从1开始，0表示undef
 }
-
-/* ============================================================
- * 指令构建
- * ============================================================ */
 
 static Instr* ssa_make_instr(SSABuild *b, IrOp op) {
     Instr *i = ssa_alloc(sizeof(Instr));
@@ -78,10 +62,6 @@ static void ssa_emit(SSABuild *b, Instr *i) {
         list_push(b->cur_block->phis, i);
     }
 }
-
-/* ============================================================
- * 块管理
- * ============================================================ */
 
 static Block* ssa_build_block(SSABuild *b) {
     Block *blk = ssa_alloc(sizeof(Block));
@@ -110,10 +90,6 @@ static void ssa_add_pred(Block *blk, Block *pred) {
     }
     list_push(blk->preds, pred);
 }
-
-/* ============================================================
- * 变量管理（Braun算法核心）
- * ============================================================ */
 
 void ssa_build_write(SSABuild *b, const char *var, ValueName val) {
     if (!b->cur_block) return;
@@ -255,10 +231,6 @@ static void ssa_build_seal(SSABuild *b, Block *blk) {
     }
 }
 
-/* ============================================================
- * 控制流上下文
- * ============================================================ */
-
 static void ssa_build_push_cf(SSABuild *b, Block *brk, Block *cont) {
     CFContext *ctx = ssa_alloc(sizeof(CFContext));
     ctx->break_target = brk;
@@ -283,10 +255,6 @@ static Block* ssa_build_get_continue(SSABuild *b) {
     return b->cf_ctx ? b->cf_ctx->continue_target : NULL;
 }
 
-/* ============================================================
- * 构建器生命周期
- * ============================================================ */
-
 SSABuild* ssa_build_create(void) {
     SSABuild *b = ssa_alloc(sizeof(SSABuild));
     b->unit = ssa_alloc(sizeof(SSAUnit));
@@ -309,10 +277,6 @@ void ssa_build_destroy(SSABuild *b) {
     free(b->unit);
     free(b);
 }
-
-/* ============================================================
- * 函数构建
- * ============================================================ */
 
 static Func* ssa_build_function(SSABuild *b, const char *name, Ctype *ret) {
     Func *f = ssa_alloc(sizeof(Func));
@@ -344,10 +308,6 @@ static void ssa_build_param(SSABuild *b, const char *name, Ctype *type) {
     ssa_add_label(p, name);
     ssa_emit(b, p);
 }
-
-/* ============================================================
- * 基础指令构建API（static内部）
- * ============================================================ */
 
 static ValueName ssa_build_const(SSABuild *b, int64_t val) {
     Instr *i = ssa_make_instr(b, IROP_CONST);
@@ -407,11 +367,6 @@ static void ssa_build_ret(SSABuild *b, ValueName val) {
     b->cur_block = NULL;
 }
 
-/* ============================================================
- * 新增：C语言基础操作实现
- * ============================================================ */
-
-/* 类型转换通用辅助 */
 static ValueName ssa_build_cast(SSABuild *b, IrOp op, ValueName val, Ctype *to_type) {
     Instr *i = ssa_make_instr(b, op);
     i->dest = ssa_new_value(b);
@@ -445,7 +400,6 @@ static ValueName ssa_build_ptrtoint(SSABuild *b, ValueName val, Ctype *int_type)
     return ssa_build_cast(b, IROP_PTRTOINT, val, int_type);
 }
 
-/* 指针运算 */
 static ValueName ssa_build_offset(SSABuild *b, ValueName ptr, ValueName idx, int elem_size) {
     // 优化：如果idx是常量0，直接返回ptr
     // 实际实现先用乘法再相加，或依赖后端优化
@@ -482,7 +436,6 @@ static ValueName ssa_build_addr(SSABuild *b, const char *var) {
     return i->dest;
 }
 
-/* 条件选择（?: 表达式） */
 static ValueName ssa_build_select(SSABuild *b, ValueName cond, ValueName v_true, ValueName v_false) {
     Instr *i = ssa_make_instr(b, IROP_SELECT);
     i->dest = ssa_new_value(b);
@@ -493,28 +446,21 @@ static ValueName ssa_build_select(SSABuild *b, ValueName cond, ValueName v_true,
     return i->dest;
 }
 
-/* ============================================================
- * 位域处理（通过位运算组合实现）
- * ============================================================ */
-
-/* 生成位掩码: (1 << bits) - 1 */
 static inline uint64_t bitmask(int bits) {
     return bits >= 64 ? ~0ULL : ((1ULL << bits) - 1);
 }
 
+extern List *ctypes;
 static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
 static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
 static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
-/* 读取位域: 提取指定位并可选符号扩展 */
+
 static ValueName gen_bitfield_read(SSABuild *b, ValueName base_ptr,
                                    int byte_offset, int bit_offset, 
                                    int bit_size, bool is_signed, Ctype *result_type) {
-    // 1. 计算字节地址
     ValueName addr = ssa_build_offset(b, base_ptr, 
         ssa_build_const(b, byte_offset), 1);
     
-    // 2. 加载包含位域的整字（假设最小容器为1字节，最大为int）
-    // 实际应根据bit_offset+bit_size确定容器大小（8/16/32）
     int container_bits = 8;
     if (bit_offset + bit_size > 16) container_bits = 32;
     else if (bit_offset + bit_size > 8) container_bits = 16;
@@ -584,10 +530,6 @@ static void gen_bitfield_write(SSABuild *b, ValueName base_ptr,
     ValueName new_word = ssa_build_binop(b, IROP_OR, cleared, val_shifted);
     ssa_build_store(b, addr, new_word);
 }
-
-/* ============================================================
- * AST转换
- * ============================================================ */
 
 static ValueName gen_expr(SSABuild *b, Ast *ast);
 static void gen_stmt(SSABuild *b, Ast *ast);
@@ -993,15 +935,26 @@ void ssa_convert_ast(SSABuild *b, Ast *ast) {
     }
 }
 
-/* ============================================================
- * 输出格式化
- * ============================================================ */
+static const char* get_type_str(Ctype *type) {
+    if (!type) return "int";
+    switch (type->type) {
+    case CTYPE_VOID: return "void";
+    case CTYPE_BOOL: return "bool";
+    case CTYPE_CHAR: return "char";
+    case CTYPE_INT: return "int";
+    case CTYPE_LONG: return "long";
+    case CTYPE_FLOAT: return "float";
+    case CTYPE_DOUBLE: return "double";
+    case CTYPE_PTR: return "ptr";
+    default: return "int";
+    }
+}
 
 static void print_instr(FILE *fp, Instr *i) {
     if (i->op == IROP_NOP) return;
     
     if (i->dest > 0) {
-        fprintf(fp, "    %%%d = ", i->dest);
+        fprintf(fp, "    v%d: %s = ", i->dest, get_type_str(i->type));
     } else {
         fprintf(fp, "    ");
     }
@@ -1012,6 +965,7 @@ static void print_instr(FILE *fp, Instr *i) {
         break;
     case IROP_CONST:
         fprintf(fp, "const %ld", i->imm.ival);
+        i->type = ctype_int;  // 常量默认int类型
         break;
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD: {
         const char *op_str = (i->op == IROP_ADD) ? "add" :
@@ -1020,12 +974,12 @@ static void print_instr(FILE *fp, Instr *i) {
                             (i->op == IROP_DIV) ? "div" : "mod";
         ValueName *a1 = list_get(i->args, 0);
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "%s %%%d, %%%d", op_str, *a1, *a2);
+        fprintf(fp, "%s v%d, v%d", op_str, *a1, *a2);
         break;
     }
     case IROP_NEG: {
         ValueName *a = list_get(i->args, 0);
-        fprintf(fp, "neg %%%d", *a);
+        fprintf(fp, "neg v%d", *a);
         break;
     }
     case IROP_AND: case IROP_OR: case IROP_XOR: {
@@ -1033,20 +987,20 @@ static void print_instr(FILE *fp, Instr *i) {
                             (i->op == IROP_OR) ? "or" : "xor";
         ValueName *a1 = list_get(i->args, 0);
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "%s %%%d, %%%d", op_str, *a1, *a2);
+        fprintf(fp, "%s v%d, v%d", op_str, *a1, *a2);
         break;
     }
     case IROP_NOT: case IROP_LNOT: {
         const char *op_str = (i->op == IROP_NOT) ? "not" : "lnot";
         ValueName *a = list_get(i->args, 0);
-        fprintf(fp, "%s %%%d", op_str, *a);
+        fprintf(fp, "%s v%d", op_str, *a);
         break;
     }
     case IROP_SHL: case IROP_SHR: {
         const char *op_str = (i->op == IROP_SHL) ? "shl" : "shr";
         ValueName *a1 = list_get(i->args, 0);
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "%s %%%d, %%%d", op_str, *a1, *a2);
+        fprintf(fp, "%s v%d, v%d", op_str, *a1, *a2);
         break;
     }
     case IROP_EQ: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: case IROP_NE: {
@@ -1057,7 +1011,7 @@ static void print_instr(FILE *fp, Instr *i) {
                             (i->op == IROP_GE) ? "ge" : "ne";
         ValueName *a1 = list_get(i->args, 0);
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "%s %%%d, %%%d", op_str, *a1, *a2);
+        fprintf(fp, "%s v%d, v%d", op_str, *a1, *a2);
         break;
     }
     case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT: 
@@ -1068,31 +1022,31 @@ static void print_instr(FILE *fp, Instr *i) {
                             (i->op == IROP_BITCAST) ? "bitcast" :
                             (i->op == IROP_INTTOPTR) ? "inttoptr" : "ptrtoint";
         ValueName *a = list_get(i->args, 0);
-        fprintf(fp, "%s %%%d", op_str, *a);
+        fprintf(fp, "%s v%d", op_str, *a);
         break;
     }
     case IROP_OFFSET: {
         ValueName *a1 = list_get(i->args, 0);
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "offset %%%d, %%%d, #%ld", *a1, *a2, i->imm.ival);
+        fprintf(fp, "offset v%d, v%d, #%ld", *a1, *a2, i->imm.ival);
         break;
     }
     case IROP_SELECT: {
         ValueName *c = list_get(i->args, 0);
         ValueName *t = list_get(i->args, 1);
         ValueName *f = list_get(i->args, 2);
-        fprintf(fp, "select %%%d, %%%d, %%%d", *c, *t, *f);
+        fprintf(fp, "select v%d, v%d, v%d", *c, *t, *f);
         break;
     }
     case IROP_LOAD: {
         ValueName *p = list_get(i->args, 0);
-        fprintf(fp, "load %%%d", *p);
+        fprintf(fp, "load v%d", *p);
         break;
     }
     case IROP_STORE: {
         ValueName *p = list_get(i->args, 0);
         ValueName *v = list_get(i->args, 1);
-        fprintf(fp, "store %%%d, %%%d", *p, *v);
+        fprintf(fp, "store v%d, v%d", *p, *v);
         break;
     }
     case IROP_ADDR:
@@ -1104,19 +1058,29 @@ static void print_instr(FILE *fp, Instr *i) {
             if (k > 0) fprintf(fp, ", ");
             ValueName *v = list_get(i->args, k);
             char *lbl = list_get(i->labels, k);
-            fprintf(fp, "[%%%d, %%%s]", *v, lbl);
+            // label格式是"blockN"，输出为"%N"以保持一致性
+            int block_id = 0;
+            sscanf(lbl, "block%d", &block_id);
+            fprintf(fp, "[v%d, b%d]", *v, block_id);
         }
         break;
     }
     case IROP_JMP: {
-        fprintf(fp, "br label %%%s", (char*)list_get(i->labels, 0));
+        char *lbl = (char*)list_get(i->labels, 0);
+        int block_id = 0;
+        sscanf(lbl, "block%d", &block_id);
+        fprintf(fp, "jmp b%d", block_id);
         break;
     }
     case IROP_BR: {
         ValueName *c = list_get(i->args, 0);
-        fprintf(fp, "br %%%d, label %%%s, label %%%s", *c,
-                (char*)list_get(i->labels, 0),
-                (char*)list_get(i->labels, 1));
+        char *lbl_true = (char*)list_get(i->labels, 0);
+        char *lbl_false = (char*)list_get(i->labels, 1);
+        int block_id_true = 0, block_id_false = 0;
+        sscanf(lbl_true, "block%d", &block_id_true);
+        sscanf(lbl_false, "block%d", &block_id_false);
+        fprintf(fp, "br v%d, b%d, b%d", *c,
+                block_id_true, block_id_false);
         break;
     }
     case IROP_CALL: {
@@ -1124,7 +1088,7 @@ static void print_instr(FILE *fp, Instr *i) {
         for (int k = 0; k < i->args->len; k++) {
             if (k > 0) fprintf(fp, ", ");
             ValueName *v = list_get(i->args, k);
-            fprintf(fp, "%%%d", *v);
+            fprintf(fp, "v%d", *v);
         }
         fprintf(fp, ")");
         break;
@@ -1133,7 +1097,7 @@ static void print_instr(FILE *fp, Instr *i) {
         fprintf(fp, "ret");
         if (i->args->len > 0) {
             ValueName *v = list_get(i->args, 0);
-            fprintf(fp, " %%%d", *v);
+            fprintf(fp, " v%d", *v);
         }
         break;
     }
@@ -1144,26 +1108,18 @@ static void print_instr(FILE *fp, Instr *i) {
 }
 
 static void ssa_print_func(FILE *fp, Func *f) {
-    fprintf(fp, "func @%s(", f->name);
+    // Bril风格函数签名: @name(param: type, ...): ret_type
+    fprintf(fp, "@%s(", f->name);
     for (int i = 0; i < f->params->len; i++) {
         if (i > 0) fprintf(fp, ", ");
-        fprintf(fp, "%%%s", (char*)list_get(f->params, i));
+        fprintf(fp, "%s: int", (char*)list_get(f->params, i));
     }
-    fprintf(fp, ") {\n");
+    fprintf(fp, "): %s {\n", get_type_str(f->ret_type));
     
     for (int j = 0; j < f->blocks->len; j++) {
         Block *blk = list_get(f->blocks, j);
-        fprintf(fp, "\n  %%%d:", blk->id);
-        
-        if (blk->preds->len > 0) {
-            fprintf(fp, " ; preds = ");
-            for (int k = 0; k < blk->preds->len; k++) {
-                Block *p = list_get(blk->preds, k);
-                if (k > 0) fprintf(fp, ", ");
-                fprintf(fp, "%%%d", p->id);
-            }
-        }
-        fprintf(fp, "\n");
+        // Bril风格块标签: .bN:
+        fprintf(fp, "\n  .b%d:\n", blk->id);
         
         // 先打印PHI
         for (int i = 0; i < blk->phis->len; i++) {
@@ -1187,10 +1143,6 @@ void ssa_print(FILE *fp, SSAUnit *unit) {
         fprintf(fp, "\n");
     }
 }
-
-/* ============================================================
- * 测试入口（保持原样）
- * ============================================================ */
 
 #ifdef MINITEST_IMPLEMENTATION
 #include "minitest.h"
