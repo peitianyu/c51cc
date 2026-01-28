@@ -370,14 +370,75 @@ static char *expand_macro_simple(PPContext *ctx, const char *line)
     return strdup(get_cstring(result));
 }
 
+/* 获取目录部分（不含末尾的/）*/
+static void get_dirname(const char *path, char *dir, size_t dir_size)
+{
+    const char *last_slash = strrchr(path, '/');
+    if (!last_slash) {
+        /* 没有/，说明是当前目录 */
+        strncpy(dir, ".", dir_size);
+        dir[dir_size - 1] = '\0';
+        return;
+    }
+    
+    size_t len = last_slash - path;
+    if (len >= dir_size) len = dir_size - 1;
+    strncpy(dir, path, len);
+    dir[len] = '\0';
+}
+
+/* 打开文件，支持额外的搜索目录 */
+static FILE *open_include_file_with_dir(PPContext *ctx, const char *filename,
+                                        const char *extra_dir, char **fullpath)
+{
+    FILE *fp = NULL;
+    char buf[1024];
+    
+    /* 首先尝试作为绝对路径或相对路径打开 */
+    fp = fopen(filename, "r");
+    if (fp) {
+        *fullpath = strdup(filename);
+        return fp;
+    }
+    
+    /* 尝试额外目录（如果提供） */
+    if (extra_dir && extra_dir[0]) {
+        snprintf(buf, sizeof(buf), "%s/%s", extra_dir, filename);
+        fp = fopen(buf, "r");
+        if (fp) {
+            *fullpath = strdup(buf);
+            return fp;
+        }
+    }
+    
+    /* 在包含路径中搜索 */
+    for (Iter i = list_iter(ctx->include_paths); !iter_end(i);) {
+        char *path = iter_next(&i);
+        snprintf(buf, sizeof(buf), "%s/%s", path, filename);
+        fp = fopen(buf, "r");
+        if (fp) {
+            *fullpath = strdup(buf);
+            return fp;
+        }
+    }
+    
+    return NULL;
+}
+
 /* 处理#include */
 static bool handle_include(PPContext *ctx, const char *args)
 {
     const char *p = skip_space(args);
     char filename[512];
+    char current_dir[512] = "";
+    
+    /* 获取当前文件所在目录 */
+    if (ctx->input && ctx->input->filename) {
+        get_dirname(ctx->input->filename, current_dir, sizeof(current_dir));
+    }
     
     if (*p == '"') {
-        /* "filename" - 先在当前目录查找 */
+        /* "filename" - 先在当前文件所在目录查找，再到包含路径 */
         p++;
         int i = 0;
         while (*p && *p != '"' && i < sizeof(filename) - 1) {
@@ -385,11 +446,23 @@ static bool handle_include(PPContext *ctx, const char *args)
         }
         filename[i] = '\0';
         
-        /* 尝试打开 */
-        if (!pp_push_file(ctx, filename)) {
+        /* 使用带额外目录的打开函数 */
+        char *fullpath = NULL;
+        FILE *fp = open_include_file_with_dir(ctx, filename, current_dir, &fullpath);
+        if (!fp) {
             error("Cannot open include file: %s", filename);
             return false;
         }
+        
+        InputFile *f = malloc(sizeof(InputFile));
+        f->fp = fp;
+        f->filename = fullpath;
+        f->line = 0;
+        f->buf = malloc(PP_LINE_SIZE);
+        f->buf_len = 0;
+        f->next = ctx->input;
+        ctx->input = f;
+        
     } else if (*p == '<') {
         /* <filename> - 在系统目录查找 */
         p++;
@@ -696,38 +769,6 @@ bool pp_preprocess_to_stdin(const char *filename)
 #include "minitest.h"
 
 TEST(test, pp) {
-    char infile[256];
-    printf("file path for preprocessing: ");
-    if (!fgets(infile, sizeof infile, stdin))
-        puts("open fail"), exit(1);
-    
-    /* 去掉换行符 */
-    infile[strcspn(infile, "\n")] = '\0';
-
-    PPContext *ctx = pp_init();
-    
-    /* 使用 pp_push_file 打开文件 */
-    if (!pp_push_file(ctx, infile)) {
-        printf("Cannot open file: %s\n", infile);
-        pp_free(ctx);
-        exit(1);
-    }
-    
-    /* 读取预处理后的每一行并输出 */
-    printf("\n=== Preprocessed Output ===\n");
-    char *line;
-    while ((line = pp_read_line(ctx)) != NULL) {
-        if (line[0] != '\0') {
-            printf("%s\n", line);
-        }
-    }
-    /* line 的内存由 pp_read_line 内部管理，pp_free 时会统一释放 */
-    
-    pp_free(ctx);
-}
-
-/* 联合测试：预处理 + 解析 */
-TEST(test, pp_parse) {
     char infile[256];
     printf("file path: ");
     if (!fgets(infile, sizeof infile, stdin) || !pp_preprocess_to_stdin(strtok(infile, "\n")))
