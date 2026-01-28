@@ -1,1 +1,2 @@
-gcc ./src/*.c ./src/core/*.c -DMINITEST_IMPLEMENTATION -o a.out -g 
+tcc ./src/*.c ./src/core/*.c -run -DMINITEST_IMPLEMENTATION -DC51CC_DEBUG 
+
