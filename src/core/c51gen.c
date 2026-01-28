@@ -694,6 +694,168 @@ static void emit_function(C51Gen *gen, Func *f) {
 }
 
 /* ============================================================
+ * C51 全局变量和 SFR 生成
+ * ============================================================ */
+
+// 安全获取attr（处理位域可能的对齐问题）
+static inline int safe_get_attr(int attr) {
+    // 强制使用位域的原始值
+    union { CtypeAttr c; int i; } u;
+    u.i = attr;
+    return u.i;
+}
+
+// 获取存储类段名称
+static const char* get_storage_segment(int data_attr) {
+    switch (data_attr) {
+    case 1: return "DSEG";      // data
+    case 2: return "IDATA";     // idata
+    case 3: return "PDATA";     // pdata
+    case 4: return "XSEG";      // xdata
+    case 5: return "EDATA";     // edata (扩展data)
+    case 6: return "CSEG";      // code
+    default: return "DSEG";     // 默认data
+    }
+}
+
+// 检查是否是register类型（使用位掩码直接检查第6位）
+static bool is_register_type(int attr) {
+    return (attr & 0x40) != 0;  // bit 6
+}
+
+// 获取ctype_data值（使用位掩码直接提取bits 7-9）
+static int get_data_attr(int attr) {
+    return (attr >> 7) & 0x7;
+}
+
+// 生成SFR声明（register int -> sfr16, register char -> sfr, register bit -> sbit）
+static void emit_sfr_decl(C51Buffer *buf, GlobalVar *gvar) {
+    int raw_attr = safe_get_attr(gvar->type->attr);
+    if (!is_register_type(raw_attr)) return;
+    
+    // 必须有初始值作为地址
+    if (!gvar->has_init) return;
+    
+    int addr = (int)gvar->init_value;
+    const char *name = gvar->name;
+    
+    // 根据类型生成对应的SFR指令
+    switch (gvar->type->type) {
+    case CTYPE_INT: {
+        // register int -> sfr16 (16位SFR)
+        char sfr_str[256];
+        snprintf(sfr_str, sizeof(sfr_str), "%s EQU %04XH", name, addr);
+        c51_emit_directive(buf, sfr_str);
+        break;
+    }
+    case CTYPE_CHAR: {
+        // register char -> sfr (8位SFR)
+        char sfr_str[256];
+        snprintf(sfr_str, sizeof(sfr_str), "%s EQU %02XH", name, addr & 0xFF);
+        c51_emit_directive(buf, sfr_str);
+        break;
+    }
+    case CTYPE_BOOL: {
+        // register bool/bit -> sbit (位SFR)
+        char sfr_str[256];
+        // sbit地址格式：字节地址.位号 (如 0x80.0)
+        int byte_addr = addr >> 3;
+        int bit_num = addr & 0x07;
+        snprintf(sfr_str, sizeof(sfr_str), "%s EQU %02XH.%d", name, byte_addr, bit_num);
+        c51_emit_directive(buf, sfr_str);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+// 生成普通全局变量声明
+static void emit_global_var_decl(C51Buffer *buf, GlobalVar *gvar) {
+    int raw_attr = safe_get_attr(gvar->type->attr);
+    
+    // SFR类型已在emit_sfr_decl中处理
+    if (is_register_type(raw_attr)) return;
+    
+    int data_attr = get_data_attr(raw_attr);
+    int size = gvar->type->size;
+    if (size <= 0) size = 1;  // 默认至少1字节
+    
+    // 生成变量声明
+    char seg_str[256];
+    if (data_attr == 6) {
+        // code段（只读）
+        if (gvar->has_init) {
+            snprintf(seg_str, sizeof(seg_str), "%s DB %ld", gvar->name, gvar->init_value);
+            c51_emit_directive(buf, seg_str);
+        } else {
+            snprintf(seg_str, sizeof(seg_str), "%s DS %d", gvar->name, size);
+            c51_emit_directive(buf, seg_str);
+        }
+    } else {
+        // 数据段
+        snprintf(seg_str, sizeof(seg_str), "%s DS %d", gvar->name, size);
+        c51_emit_directive(buf, seg_str);
+    }
+}
+
+// 按存储类分组输出变量
+static void emit_vars_by_segment(C51Buffer *buf, SSAUnit *unit, int data_attr, const char *seg_name) {
+    bool has_var = false;
+    for (Iter it = list_iter(unit->globals); !iter_end(it);) {
+        GlobalVar *gvar = iter_next(&it);
+        int raw_attr = safe_get_attr(gvar->type->attr);
+        
+        // 跳过register类型
+        if (is_register_type(raw_attr)) continue;
+        
+        // 检查是否匹配当前段
+        if (get_data_attr(raw_attr) == data_attr) {
+            if (!has_var) {
+                c51_emit_directive(buf, seg_name);
+                has_var = true;
+            }
+            emit_global_var_decl(buf, gvar);
+        }
+    }
+    if (has_var) c51_emit_directive(buf, "");
+}
+
+// 生成所有全局变量（按段分组）
+static void emit_global_vars(C51Buffer *buf, SSAUnit *unit) {
+    if (!unit->globals || unit->globals->len == 0) return;
+    
+    c51_emit_comment(buf, "=======================================");
+    c51_emit_comment(buf, "Global Variables and SFR Declarations");
+    c51_emit_comment(buf, "=======================================");
+    c51_emit_directive(buf, "");
+    
+    // 首先输出所有SFR声明（register关键字）
+    bool has_sfr = false;
+    for (Iter it = list_iter(unit->globals); !iter_end(it);) {
+        GlobalVar *gvar = iter_next(&it);
+        int raw_attr = safe_get_attr(gvar->type->attr);
+        if (is_register_type(raw_attr)) {
+            if (!has_sfr) {
+                c51_emit_comment(buf, "SFR Declarations (register keyword)");
+                has_sfr = true;
+            }
+            emit_sfr_decl(buf, gvar);
+        }
+    }
+    if (has_sfr) c51_emit_directive(buf, "");
+    
+    // 按存储类分组输出普通全局变量
+    emit_vars_by_segment(buf, unit, 1, "DSEG");     // data
+    emit_vars_by_segment(buf, unit, 2, "IDATA");    // idata
+    emit_vars_by_segment(buf, unit, 3, "PDATA");    // pdata
+    emit_vars_by_segment(buf, unit, 4, "XSEG");     // xdata
+    emit_vars_by_segment(buf, unit, 5, "EDATA");    // edata
+    emit_vars_by_segment(buf, unit, 6, "CSEG");     // code
+    emit_vars_by_segment(buf, unit, 0, "DSEG");     // 默认data
+}
+
+/* ============================================================
  * 公共 API
  * ============================================================ */
 
@@ -719,6 +881,9 @@ void c51_gen(FILE *fp, SSAUnit *unit) {
     c51_emit_comment(buf, "C51 Assembly Generated from SSA IR");
     c51_emit_comment(buf, "Linear Register Allocation");
     c51_emit_directive(buf, "");
+    
+    // 生成全局变量和SFR声明
+    emit_global_vars(buf, unit);
     
     // 生成中断向量表
     c51_emit_directive(buf, "ORG 0000H");

@@ -259,7 +259,19 @@ SSABuild* ssa_build_create(void) {
     SSABuild *b = ssa_alloc(sizeof(SSABuild));
     b->unit = ssa_alloc(sizeof(SSAUnit));
     b->unit->funcs = make_list();
+    b->unit->globals = make_list();
     return b;
+}
+
+// 添加全局变量到SSA Unit
+void ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init) {
+    if (!b || !b->unit) return;
+    GlobalVar *gvar = ssa_alloc(sizeof(GlobalVar));
+    gvar->name = ssa_strdup(name);
+    gvar->type = type;
+    gvar->init_value = init_value;
+    gvar->has_init = has_init;
+    list_push(b->unit->globals, gvar);
 }
 
 static void ssa_build_reset(SSABuild *b) {
@@ -959,6 +971,21 @@ void ssa_convert_ast(SSABuild *b, Ast *ast) {
     switch (ast->type) {
     case AST_FUNC_DEF: gen_func(b, ast); break;
     case AST_INTERRUPT_DEF: gen_interrupt_func(b, ast); break;
+    case AST_DECL: {
+        // 处理全局变量声明
+        Ast *var = ast->declvar;
+        if (var && var->type == AST_GVAR) {
+            long init_val = 0;
+            bool has_init = false;
+            if (ast->declinit && ast->declinit->type == AST_LITERAL &&
+                is_inttype(ast->declinit->ctype)) {
+                init_val = ast->declinit->ival;
+                has_init = true;
+            }
+            ssa_add_global(b, var->varname, var->ctype, init_val, has_init);
+        }
+        break;
+    }
     default: break;
     }
 }

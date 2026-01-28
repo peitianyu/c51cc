@@ -75,8 +75,17 @@ typedef struct Func {
     int         bank_id;
 } Func;
 
+// 全局变量信息（用于C51代码生成）
+typedef struct GlobalVar {
+    char        *name;
+    Ctype       *type;
+    long         init_value;    // 初始值（仅支持整数）
+    bool         has_init;      // 是否有初始值
+} GlobalVar;
+
 typedef struct SSAUnit {
     List    *funcs;         // Func* 列表
+    List    *globals;       // GlobalVar* 列表（C51全局变量）
 } SSAUnit;
 
 typedef struct SSABuild {
@@ -99,6 +108,9 @@ void      ssa_build_destroy(SSABuild *b);
 // AST转换与输出
 void      ssa_convert_ast(SSABuild *b, Ast *ast);
 void      ssa_print(FILE *fp, SSAUnit *unit);
+
+// 全局变量添加（C51代码生成用）
+void      ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init);
 
 /* ============================================================
  * 优化 Pass API (ssa_pass.c)
