@@ -439,8 +439,127 @@ void c51_optimize_jumps(C51Buffer *buf) {
 }
 
 void c51_optimize_peephole(C51Buffer *buf) {
-    // TODO: 实现窥孔优化
-    // 例如: MOV A, R0; MOV R0, A -> 删除第二条
+    if (!buf || !buf->head) return;
+    
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        
+        for (C51Line *line = buf->head; line && line->next; line = line->next) {
+            C51Line *next = line->next;
+            
+            // 模式1: MOV A, Rx; MOV Rx, A -> 删除第二条
+            if (line->op == C51_MOV && next->op == C51_MOV) {
+                if (line->dst.type == C51_OP_REG && line->dst.reg == C51_REG_A &&
+                    line->src.type == C51_OP_REG &&
+                    next->dst.type == C51_OP_REG &&
+                    next->dst.reg == line->src.reg &&
+                    next->src.type == C51_OP_REG && next->src.reg == C51_REG_A) {
+                    // 删除第二条指令
+                    line->next = next->next;
+                    if (buf->tail == next) buf->tail = line;
+                    free_line(next);
+                    changed = true;
+                    continue;
+                }
+            }
+            
+            // 模式2: MOV Rx, A; MOV A, Rx -> 删除第二条
+            if (line->op == C51_MOV && next->op == C51_MOV) {
+                if (line->dst.type == C51_OP_REG &&
+                    line->src.type == C51_OP_REG && line->src.reg == C51_REG_A &&
+                    next->dst.type == C51_OP_REG && next->dst.reg == C51_REG_A &&
+                    next->src.type == C51_OP_REG &&
+                    next->src.reg == line->dst.reg) {
+                    // 删除第二条指令
+                    line->next = next->next;
+                    if (buf->tail == next) buf->tail = line;
+                    free_line(next);
+                    changed = true;
+                    continue;
+                }
+            }
+            
+            // 模式3: MOV A, A -> 删除
+            if (line->op == C51_MOV &&
+                line->dst.type == C51_OP_REG && line->dst.reg == C51_REG_A &&
+                line->src.type == C51_OP_REG && line->src.reg == C51_REG_A) {
+                // 删除这条指令
+                C51Line *prev = buf->head;
+                if (prev == line) {
+                    buf->head = line->next;
+                } else {
+                    while (prev && prev->next != line) prev = prev->next;
+                    if (prev) prev->next = line->next;
+                }
+                if (buf->tail == line) buf->tail = prev;
+                C51Line *to_free = line;
+                line = line->next;
+                free_line(to_free);
+                changed = true;
+                continue;
+            }
+            
+            // 模式4: CLR A; MOV A, #0 -> 保留CLR A（更短）
+            // 模式5: MOV A, #0 -> CLR A（优化为更短的指令）
+            if (line->op == C51_MOV &&
+                line->dst.type == C51_OP_REG && line->dst.reg == C51_REG_A &&
+                line->src.type == C51_OP_IMM && line->src.imm == 0) {
+                line->op = C51_CLR;
+                line->src = c51_none();
+                changed = true;
+                continue;
+            }
+            
+            // 模式6: SJMP .+2 (跳转到下一条) -> 删除
+            if (line->op == C51_SJMP && line->src.type == C51_OP_REL) {
+                if (line->src.imm == 0) {
+                    // 删除这条指令
+                    C51Line *prev = buf->head;
+                    if (prev == line) {
+                        buf->head = line->next;
+                    } else {
+                        while (prev && prev->next != line) prev = prev->next;
+                        if (prev) prev->next = line->next;
+                    }
+                    if (buf->tail == line) buf->tail = prev;
+                    C51Line *to_free = line;
+                    line = line->next;
+                    free_line(to_free);
+                    changed = true;
+                    continue;
+                }
+            }
+            
+            // 模式7: LJMP label; LJMP label (连续相同跳转) -> 删除第二条
+            if (line->op == C51_LJMP && next->op == C51_LJMP) {
+                if (line->dst.type == C51_OP_LABEL && next->dst.type == C51_OP_LABEL &&
+                    line->dst.label && next->dst.label &&
+                    strcmp(line->dst.label, next->dst.label) == 0) {
+                    line->next = next->next;
+                    if (buf->tail == next) buf->tail = line;
+                    free_line(next);
+                    changed = true;
+                    continue;
+                }
+            }
+            
+            // 模式8: MOV direct, A; MOV A, direct -> 如果direct相同，删除第二条
+            if (line->op == C51_MOV && next->op == C51_MOV) {
+                if (line->dst.type == C51_OP_DIRECT &&
+                    line->src.type == C51_OP_REG && line->src.reg == C51_REG_A &&
+                    next->dst.type == C51_OP_REG && next->dst.reg == C51_REG_A &&
+                    next->src.type == C51_OP_DIRECT &&
+                    line->dst.imm == next->src.imm) {
+                    line->next = next->next;
+                    if (buf->tail == next) buf->tail = line;
+                    free_line(next);
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+    }
 }
 
 /* ============================================================

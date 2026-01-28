@@ -277,43 +277,102 @@ static void emit_load_imm_opt(C51Gen *gen, int64_t val) {
     }
 }
 
-// 二元运算
+// 二元运算（带立即数优化）
 static void emit_binary_op(C51Gen *gen, IrOp op, ValueName dest, ValueName lhs, ValueName rhs) {
-    emit_load_vreg(gen, lhs);
-    
-    C51Operand rhs_op = get_vreg_op(gen, rhs);
-    
-    switch (op) {
-    case IROP_ADD:
-        c51_emit_alu(gen->buf, C51_ADD, c51_reg(C51_REG_A), rhs_op);
-        break;
-    case IROP_SUB:
-        c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
-        c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), rhs_op);
-        break;
-    case IROP_MUL:
-        c51_emit_mov(gen->buf, c51_reg(C51_REG_B), rhs_op);
-        c51_emit(gen->buf, C51_MUL, c51_none(), c51_none(), NULL);
-        break;
-    case IROP_DIV:
-        c51_emit_mov(gen->buf, c51_reg(C51_REG_B), rhs_op);
-        c51_emit(gen->buf, C51_DIV, c51_none(), c51_none(), NULL);
-        break;
-    case IROP_AND:
-        c51_emit_alu(gen->buf, C51_ANL, c51_reg(C51_REG_A), rhs_op);
-        break;
-    case IROP_OR:
-        c51_emit_alu(gen->buf, C51_ORL, c51_reg(C51_REG_A), rhs_op);
-        break;
-    case IROP_XOR:
-        c51_emit_alu(gen->buf, C51_XRL, c51_reg(C51_REG_A), rhs_op);
-        break;
-    default:
-        emit_comment(gen, "TODO: op %d", op);
-        break;
+    // 检查右操作数是否是常量立即数
+    int64_t rhs_imm = 0;
+    bool rhs_is_imm = (rhs > 0 && rhs < gen->vreg_map_size && vreg_const_values && vreg_const_values[rhs] != 0);
+    if (rhs_is_imm) {
+        rhs_imm = vreg_const_values[rhs];
+        // 检查是否是8位立即数
+        if (rhs_imm >= -128 && rhs_imm <= 255) {
+            rhs_is_imm = true;
+        } else {
+            rhs_is_imm = false;  // 超出8位范围，需要寄存器
+        }
     }
     
-    emit_store_vreg(gen, dest);
+    // 加载左操作数到A
+    C51Operand lhs_op = get_vreg_op(gen, lhs);
+    if (lhs_op.type == C51_OP_REG && lhs_op.reg == C51_REG_A) {
+        // 已经在A中，无需加载
+    } else {
+        c51_emit_mov(gen->buf, c51_reg(C51_REG_A), lhs_op);
+    }
+    
+    if (rhs_is_imm) {
+        // 立即数优化路径
+        switch (op) {
+        case IROP_ADD:
+            c51_emit_alu(gen->buf, C51_ADD, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            break;
+        case IROP_SUB:
+            c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
+            c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            break;
+        case IROP_AND:
+            c51_emit_alu(gen->buf, C51_ANL, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            break;
+        case IROP_OR:
+            c51_emit_alu(gen->buf, C51_ORL, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            break;
+        case IROP_XOR:
+            c51_emit_alu(gen->buf, C51_XRL, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            break;
+        case IROP_MUL:
+            // MUL AB 需要B寄存器，无法立即数优化
+            c51_emit_mov(gen->buf, c51_reg(C51_REG_B), c51_imm((int)rhs_imm & 0xFF));
+            c51_emit(gen->buf, C51_MUL, c51_none(), c51_none(), NULL);
+            break;
+        case IROP_DIV:
+            // DIV AB 需要B寄存器，无法立即数优化
+            c51_emit_mov(gen->buf, c51_reg(C51_REG_B), c51_imm((int)rhs_imm & 0xFF));
+            c51_emit(gen->buf, C51_DIV, c51_none(), c51_none(), NULL);
+            break;
+        default:
+            emit_comment(gen, "TODO: op %d with imm", op);
+            break;
+        }
+    } else {
+        // 寄存器路径
+        C51Operand rhs_op = get_vreg_op(gen, rhs);
+        
+        switch (op) {
+        case IROP_ADD:
+            c51_emit_alu(gen->buf, C51_ADD, c51_reg(C51_REG_A), rhs_op);
+            break;
+        case IROP_SUB:
+            c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
+            c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), rhs_op);
+            break;
+        case IROP_MUL:
+            c51_emit_mov(gen->buf, c51_reg(C51_REG_B), rhs_op);
+            c51_emit(gen->buf, C51_MUL, c51_none(), c51_none(), NULL);
+            break;
+        case IROP_DIV:
+            c51_emit_mov(gen->buf, c51_reg(C51_REG_B), rhs_op);
+            c51_emit(gen->buf, C51_DIV, c51_none(), c51_none(), NULL);
+            break;
+        case IROP_AND:
+            c51_emit_alu(gen->buf, C51_ANL, c51_reg(C51_REG_A), rhs_op);
+            break;
+        case IROP_OR:
+            c51_emit_alu(gen->buf, C51_ORL, c51_reg(C51_REG_A), rhs_op);
+            break;
+        case IROP_XOR:
+            c51_emit_alu(gen->buf, C51_XRL, c51_reg(C51_REG_A), rhs_op);
+            break;
+        default:
+            emit_comment(gen, "TODO: op %d", op);
+            break;
+        }
+    }
+    
+    // 存储结果（如果目标不是A）
+    C51Operand dst_op = get_vreg_op(gen, dest);
+    if (!(dst_op.type == C51_OP_REG && dst_op.reg == C51_REG_A)) {
+        c51_emit_mov(gen->buf, dst_op, c51_reg(C51_REG_A));
+    }
 }
 
 // 一元运算
@@ -924,6 +983,7 @@ void c51_gen(FILE *fp, SSAUnit *unit) {
     }
     
     // 优化
+    c51_optimize_peephole(buf);
     c51_optimize_jumps(buf);
     
     // 输出
