@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include "cc.h"
 
 #define PP_LINE_SIZE 4096
@@ -660,6 +662,36 @@ int pp_global_current_line(void)
     return pp_current_line(g_pp);
 }
 
+/* 高级接口：预处理文件并重定向到stdin */
+bool pp_preprocess_to_stdin(const char *filename)
+{
+    char tmpfile[] = "/tmp/mazucc_pp_XXXXXX";
+    int fd = mkstemp(tmpfile);
+    if (fd < 0) return false;
+    
+    FILE *tmp = fdopen(fd, "w");
+    if (!tmp) { close(fd); return false; }
+    
+    pp_global_init();
+    if (!pp_global_push_file(filename)) {
+        fclose(tmp);
+        pp_global_free();
+        unlink(tmpfile);
+        return false;
+    }
+    
+    char *line;
+    while ((line = pp_global_read_line()) != NULL)
+        fprintf(tmp, "%s\n", line);
+    
+    fclose(tmp);
+    pp_global_free();
+    
+    bool ok = freopen(tmpfile, "r", stdin) != NULL;
+    unlink(tmpfile);
+    return ok;
+}
+
 #ifdef MINITEST_IMPLEMENTATION
 #include "minitest.h"
 
@@ -692,6 +724,24 @@ TEST(test, pp) {
     /* line 的内存由 pp_read_line 内部管理，pp_free 时会统一释放 */
     
     pp_free(ctx);
+}
+
+/* 联合测试：预处理 + 解析 */
+TEST(test, pp_parse) {
+    char infile[256];
+    printf("file path: ");
+    if (!fgets(infile, sizeof infile, stdin) || !pp_preprocess_to_stdin(strtok(infile, "\n")))
+        puts("preprocess fail"), exit(1);
+
+    set_current_filename(infile);
+        
+    List *toplevels = read_toplevels();
+    for (Iter i = list_iter(toplevels); !iter_end(i);) {
+        Ast *v = iter_next(&i);
+        printf("%s\n", ast_to_string(v));
+    }
+    list_free(cstrings);
+    list_free(ctypes);
 }
 
 #endif /* MINITEST_IMPLEMENTATION */

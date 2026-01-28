@@ -286,25 +286,7 @@ extern bool is_inttype(Ctype *ctype);
 extern bool is_flotype(Ctype *ctype);
 
 /* pp.c - 预处理器 */
-typedef struct PPContext PPContext;
-extern PPContext *pp_init(void);
-extern void pp_free(PPContext *ctx);
-extern bool pp_push_file(PPContext *ctx, const char *filename);
-extern void pp_pop_file(PPContext *ctx);
-extern char *pp_read_line(PPContext *ctx);
-extern void pp_define(PPContext *ctx, const char *name, const char *body);
-extern void pp_undef(PPContext *ctx, const char *name);
-extern bool pp_is_defined(PPContext *ctx, const char *name);
-extern const char *pp_current_file(PPContext *ctx);
-extern int pp_current_line(PPContext *ctx);
-
-/* 全局预处理器接口 */
-extern void pp_global_init(void);
-extern void pp_global_free(void);
-extern bool pp_global_push_file(const char *filename);
-extern char *pp_global_read_line(void);
-extern const char *pp_global_current_file(void);
-extern int pp_global_current_line(void);
+extern bool pp_preprocess_to_stdin(const char *filename);
 
 /* debug */
 #define error(...) errorf(__FILE__, __LINE__, __VA_ARGS__)
