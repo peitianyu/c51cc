@@ -23,6 +23,7 @@ static Dict *functionenv = &EMPTY_DICT;
 static Dict *typedefenv = &EMPTY_DICT;
 static List *localvars = NULL;
 static List *labels = NULL;
+static bool in_cond_expr = false;  // 标记是否在?:的then分支中
 
 static Ctype *ctype_void = &(Ctype){0, CTYPE_VOID, 0, NULL};
 static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
@@ -659,7 +660,8 @@ static Ast *read_ident_or_func(char *name)
         return read_func_args(name, NULL);
     }
     
-    if (is_punct(tok, ':'))
+    // 只有在不在?:的then分支中，且下一个token是:时，才认为是标签
+    if (!in_cond_expr && is_punct(tok, ':'))
         return ast_label(name);
 
     unget_token(tok);
@@ -918,12 +920,17 @@ static Ast *read_unary_expr(void)
 static Ast *read_cond_expr(Ast *cond)
 {
     // 三元运算符是右结合的
-    // 读取 then 分支，使用条件表达式内部优先级，支持嵌套 ?: 但不能跨越 ':'
-    Ast *then = read_expr_int(MAX_OP_PRIO);
+    // then 分支使用优先级14（高于?:的13），这样遇到:时会停止
+    // 设置标志，防止read_ident_or_func将identifier:当作标签
+    in_cond_expr = true;
+    Ast *then = read_expr_int(14);
+    in_cond_expr = false;
     expect(':');
-    // else 分支使用优先级13（?: 的优先级），支持右结合
+    // else 分支使用优先级13（?:的优先级），支持右结合
     Ast *els = read_expr_int(13);
-    return ast_ternary(then->ctype, cond, then, els);
+    // 三元运算符的类型是 then 和 else 分支的公共类型
+    Ctype *ctype = result_type(':', then->ctype, els->ctype);
+    return ast_ternary(ctype, cond, then, els);
 }
 
 static Ast *read_struct_field(Ast *struc)
