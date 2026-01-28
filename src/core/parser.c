@@ -35,6 +35,7 @@ static Ctype *ctype_double = &(Ctype){0, CTYPE_DOUBLE, 8, NULL};
 static int labelseq = 0;
 
 static Ast *read_expr(void);
+static Ast *read_expr_int(int prec);
 static Ctype *make_ptr_type(Ctype *ctype);
 static Ctype *make_array_type(Ctype *ctype, int size);
 static Ast *read_compound_stmt(void);
@@ -196,14 +197,17 @@ static bool valid_init_var(Ast *var, Ast *init)
         case CTYPE_BOOL ... CTYPE_DOUBLE:
             return (init->ctype->type <= CTYPE_DOUBLE);
         case CTYPE_ARRAY:
-            return (init->type == AST_ARRAY_INIT);
-        case CTYPE_PTR: 
-            return (init->ctype->type == CTYPE_PTR || init->ctype->type == CTYPE_ARRAY || 
+            // 支持数组初始化列表和字符串初始化字符数组
+            if (init->type == AST_ARRAY_INIT) return true;
+            if (init->type == AST_STRING && var->ctype->ptr->type == CTYPE_CHAR) return true;
+            return false;
+        case CTYPE_PTR:
+            return (init->ctype->type == CTYPE_PTR || init->ctype->type == CTYPE_ARRAY ||
                     init->ctype->type == CTYPE_INT || init->type == AST_ADDR);
         case CTYPE_STRUCT:
             return (init->ctype->type == CTYPE_STRUCT);
         case CTYPE_ENUM:
-              return (init->ctype->type == CTYPE_ENUM || init->ctype->type == CTYPE_INT);  
+              return (init->ctype->type == CTYPE_ENUM || init->ctype->type == CTYPE_INT);
         default: return false;
     }
 }
@@ -612,7 +616,7 @@ static bool have_redefine_func(char* func_name)
     return dict_get(functionenv, func_name);
 }
 
-static Ast *read_func_args(char *fname)
+static Ast *read_func_args(char *fname, Ast *func_ptr)
 {
     List *args = make_list();
     while (1) {
@@ -630,6 +634,11 @@ static Ast *read_func_args(char *fname)
     if (MAX_ARGS < list_len(args))
         error("Too many arguments: %s", fname);
 
+    // 如果提供了函数指针，使用函数指针的类型
+    if (func_ptr) {
+        return ast_funcall(func_ptr->ctype->ptr, fname, args);
+    }
+    
     Ast *func = dict_get(functionenv, fname);
     if(!func) error("Undecl function: %s", fname);
     
@@ -639,8 +648,16 @@ static Ast *read_func_args(char *fname)
 static Ast *read_ident_or_func(char *name)
 {
     Token tok = read_token();
-    if (is_punct(tok, '('))
-        return read_func_args(name);
+    if (is_punct(tok, '(')) {
+        // 检查是否是函数指针变量调用
+        Ast *v = dict_get(localenv, name);
+        if (!v) v = dict_get(globalenv, name);
+        if (v && v->ctype && v->ctype->type == CTYPE_PTR) {
+            // 可能是函数指针调用，检查返回类型是否有效
+            return read_func_args(name, v);
+        }
+        return read_func_args(name, NULL);
+    }
     
     if (is_punct(tok, ':'))
         return ast_label(name);
@@ -651,7 +668,7 @@ static Ast *read_ident_or_func(char *name)
     if (!v) {
         v = dict_get(globalenv, name);
         if(!v) error("Undefined varaible: %s", name);
-    }   
+    }
         
     return v;
 }
@@ -831,9 +848,9 @@ static Ast *read_unary_expr(void)
     }
 
     if (is_punct(tok, '(') && is_type_keyword(peek_token())) {
-        Ctype *target = read_decl_spec();      
+        Ctype *target = read_decl_spec();
         expect(')');
-        Ast *expr = read_unary_expr();  
+        Ast *expr = read_unary_expr();
         return ast_cast(target, expr);
     }
 
@@ -872,15 +889,40 @@ static Ast *read_unary_expr(void)
                   ast_to_string(operand));
         return ast_uop(AST_DEREF, operand->ctype->ptr, operand);
     }
+    // 一元正号: +a 等同于 a
+    if (is_punct(tok, '+')) {
+        Ast *operand = read_unary_expr();
+        return operand;
+    }
+    // 一元负号: -a 等同于 0 - a
+    if (is_punct(tok, '-')) {
+        Ast *operand = read_unary_expr();
+        return ast_binop('-', ast_inttype(ctype_int, 0), operand);
+    }
+    // 前置自增: ++a
+    if (is_punct(tok, PUNCT_INC)) {
+        Ast *operand = read_unary_expr();
+        ensure_lvalue(operand);
+        return ast_uop(PUNCT_INC, operand->ctype, operand);
+    }
+    // 前置自减: --a
+    if (is_punct(tok, PUNCT_DEC)) {
+        Ast *operand = read_unary_expr();
+        ensure_lvalue(operand);
+        return ast_uop(PUNCT_DEC, operand->ctype, operand);
+    }
     unget_token(tok);
     return read_prim();
 }
 
 static Ast *read_cond_expr(Ast *cond)
 {
-    Ast *then = read_expr();
+    // 三元运算符是右结合的
+    // 读取 then 分支，使用条件表达式内部优先级，支持嵌套 ?: 但不能跨越 ':'
+    Ast *then = read_expr_int(MAX_OP_PRIO);
     expect(':');
-    Ast *els = read_expr();
+    // else 分支使用优先级13（?: 的优先级），支持右结合
+    Ast *els = read_expr_int(13);
     return ast_ternary(then->ctype, cond, then, els);
 }
 
@@ -1090,7 +1132,7 @@ static int struct_field_index(Ctype *ctype, const char *name)
     return -1;
 }
 
-static Ast *read_decl_struct_init(Ctype *ctype) 
+static Ast *read_decl_struct_init(Ctype *ctype)
 {
     Token tok = read_token();
     if (!is_punct(tok, '{'))
@@ -1098,33 +1140,67 @@ static Ast *read_decl_struct_init(Ctype *ctype)
               ctype_to_string(ctype), token_to_string(tok));
     List *initlist = init_empty_struct_init(ctype);
     Iter it = list_iter(initlist);
+    int idx = 0;
     while (1) {
         Token tok = read_token();
         if (is_punct(tok, '}')) break;
         unget_token(tok);
 
-        if(get_ttype(tok) == TTYPE_IDENT || (get_ttype(tok) == TTYPE_PUNCT && !is_punct(tok, '.'))) 
-            error("Expected value for struct: %s, but got: %s", ctype_to_string(ctype), token_to_string(tok)); 
-
-        tok = read_token();
+        // 检查是否为指定初始化器 .field = value
         if(is_punct(tok, '.')) {
+            read_token(); // 消费 '.'
             tok = read_token();
-            if(get_ttype(tok) != TTYPE_IDENT) 
-                error("Expected inentifier for struct: %s, but got: %s", ctype_to_string(ctype), token_to_string(tok)); 
-            int idx = struct_field_index(ctype, get_ident(tok));
+            if(get_ttype(tok) != TTYPE_IDENT)
+                error("Expected identifier for struct: %s, but got: %s", ctype_to_string(ctype), token_to_string(tok));
+            idx = struct_field_index(ctype, get_ident(tok));
             expect('=');
-            Ast *var = read_expr();
+            // 获取该字段的类型，用于可能的嵌套初始化
+            Iter field_it = list_iter(ctype->fields->list);
+            Ctype *field_type = NULL;
+            for (int i = 0; i <= idx && !iter_end(field_it); i++) {
+                DictEntry *e = iter_next(&field_it);
+                if (i == idx) field_type = dict_get(ctype->fields, e->key);
+            }
+            // 根据字段类型选择合适的初始化读取方式
+            Ast *var;
+            if (field_type && field_type->type == CTYPE_STRUCT) {
+                var = read_decl_struct_init(field_type);
+            } else if (field_type && field_type->type == CTYPE_ARRAY) {
+                var = read_decl_array_init_recurse(field_type);
+            } else {
+                var = read_expr();
+            }
             list_set(initlist, idx, var);
             tok = read_token();
         } else {
-            unget_token(tok);
-            // FIXME: 这部分应该判断与ctype是否匹配, 并更新为ctype类型
-            // TODO: 应该添加更多检查
-            Ast *v = iter_next(&it);
-            v = read_expr();
+            // 顺序初始化
+            if(iter_end(it))
+                error("Expected value for struct: %s, out of range", ctype_to_string(ctype));
+            // 获取当前字段的类型
+            Iter field_it = list_iter(ctype->fields->list);
+            Ctype *field_type = NULL;
+            int current_idx = 0;
+            for (; !iter_end(field_it) && current_idx <= idx; current_idx++) {
+                DictEntry *e = iter_next(&field_it);
+                if (current_idx == idx) field_type = dict_get(ctype->fields, e->key);
+            }
+            // 根据字段类型选择合适的初始化读取方式
+            Ast *v;
+            if (field_type && field_type->type == CTYPE_STRUCT) {
+                v = read_decl_struct_init(field_type);
+            } else if (field_type && field_type->type == CTYPE_ARRAY) {
+                v = read_decl_array_init_recurse(field_type);
+            } else {
+                Token t = read_token();
+                unget_token(t);
+                v = read_expr();
+            }
+            list_set(initlist, idx, v);
+            iter_next(&it);
+            idx++;
             tok = read_token();
-            if(iter_end(it)&&!is_punct(tok, '}')) 
-                error("Expected value for struct: %s, out range", ctype_to_string(ctype)); 
+            if(iter_end(it) && !is_punct(tok, '}') && !is_punct(tok, ','))
+                error("Expected value for struct: %s, out of range", ctype_to_string(ctype));
         }
 
         if (!is_punct(tok, ',')) unget_token(tok);
@@ -1340,7 +1416,7 @@ static Ctype *read_decl_spec(void)
     }
 }
 
-static Ast *read_decl_init_val(Ast *var)
+static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
 {
     if (var->ctype->type == CTYPE_ARRAY) {
         Ast *init = read_decl_array_init_recurse(var->ctype);
@@ -1353,31 +1429,38 @@ static Ast *read_decl_init_val(Ast *var)
             error("Invalid array initializer: expected %d items but got %d",
                   var->ctype->len, len);
         }
-        expect(';');
+        if (consume_semicolon) expect(';');
         return ast_decl(var, init);
     } else if(var->ctype->type == CTYPE_STRUCT) {
         Ast *init = read_decl_struct_init(var->ctype);
-        expect(';');
+        if (consume_semicolon) expect(';');
         return ast_decl(var, init);
     } else if(var->ctype->type == CTYPE_PTR) {
         Ast *init = read_expr();
-        expect(';');
+        if (consume_semicolon) expect(';');
         if(init->type == AST_ADDR) return ast_decl(var, init);
+        
+        // 允许数组名直接赋值给指针（数组退化为指向首元素的指针）
+        if(init->ctype->type == CTYPE_ARRAY) {
+            // 将数组类型转换为指针类型
+            init->ctype = make_ptr_type(init->ctype->ptr);
+            return ast_decl(var, init);
+        }
 
         // FIXME: 注意这里直接填地址有危险, 不建议这么做, 程序可能会飞, 后期将这部分限制住????
-        ast_inttype(ctype_int, eval_intexpr(init)); 
+        ast_inttype(ctype_int, eval_intexpr(init));
         return ast_decl(var, init);
     }
 
     Ast *init = read_expr();
-    expect(';');
+    if (consume_semicolon) expect(';');
 
     if (var->type == AST_GVAR) {
-        init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init)) 
+        init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init))
                                         : ast_double(eval_floatexpr(init));
     }
 
-    if (init->type == AST_LITERAL && is_inttype(init->ctype) && is_inttype(var->ctype)) 
+    if (init->type == AST_LITERAL && is_inttype(init->ctype) && is_inttype(var->ctype))
         init->ctype = var->ctype;
 
     return ast_decl(var, init);
@@ -1415,7 +1498,7 @@ static Ast *read_decl_init(Ast *var)
 {
     Token tok = read_token();
     if (is_punct(tok, '='))
-        return read_decl_init_val(var);
+        return read_decl_init_val(var, true);
     if (var->ctype->len == -1)
         error("Missing array initializer");
     unget_token(tok);
@@ -1432,16 +1515,63 @@ static Ctype *read_decl_int(Token *name)
     return read_array_dimensions(ctype);
 }
 
+// 读取单个变量的初始化（不处理分号，由上层统一处理）
+static Ast *read_decl_init_single(Ast *var)
+{
+    Token tok = read_token();
+    if (is_punct(tok, '='))
+        return read_decl_init_val(var, false);
+    if (var->ctype->len == -1)
+        error("Missing array initializer");
+    unget_token(tok);
+    return ast_decl(var, NULL);
+}
+
+// 读取逗号分隔的多个变量声明
+static Ast *read_decl_multi(Ctype *ctype, Token first_name)
+{
+    List *decls = make_list();
+    Token varname = first_name;
+    
+    while (1) {
+        if (ctype == ctype_void)
+            error("Storage size of '%s' is not known", token_to_string(varname));
+        if (have_redefine_var(get_ident(varname)))
+            error("Fuction redefine local val: %s", token_to_string(varname));
+        
+        Ctype *var_ctype = read_array_dimensions(ctype);
+        Ast *var = ast_lvar(var_ctype, get_ident(varname));
+        Ast *decl = read_decl_init_single(var);
+        list_push(decls, decl);
+        
+        Token tok = read_token();
+        if (!is_punct(tok, ',')) {
+            unget_token(tok);
+            break;
+        }
+        
+        // 读取下一个变量名
+        varname = read_token();
+        if (get_ttype(varname) != TTYPE_IDENT)
+            error("Identifier expected, but got %s", token_to_string(varname));
+    }
+    
+    expect(';');
+    
+    if (list_len(decls) == 1)
+        return list_get(decls, 0);
+    
+    // 返回复合声明语句
+    return ast_compound_stmt(decls);
+}
+
 static Ast *read_decl(void)
 {
-    Token varname;
-    Ctype *ctype = read_decl_int(&varname);
-    if (ctype == ctype_void)
-        error("Storage size of '%s' is not known", token_to_string(varname));
-    if (have_redefine_var(get_ident(varname)))
-        error("Fuction redefine local val: %s", token_to_string(varname));
-    Ast *var = ast_lvar(ctype, get_ident(varname));
-    return read_decl_init(var);
+    Ctype *ctype = read_decl_spec();
+    Token varname = read_token();
+    if (get_ttype(varname) != TTYPE_IDENT)
+        error("Identifier expected, but got %s", token_to_string(varname));
+    return read_decl_multi(ctype, varname);
 }
 
 static Ast *read_if_stmt(void)
@@ -1677,6 +1807,50 @@ static List *read_params(void)
     while (1) {
         Ctype *ctype = read_decl_spec();
         tok = read_token();
+        
+        // 检查是否是函数指针语法: type (*name)(params)
+        if (is_punct(tok, '(')) {
+            // 可能是函数指针，检查下一个token是否是 *
+            Token next_tok = read_token();
+            if (is_punct(next_tok, '*')) {
+                // 读取函数指针名称
+                Token name_tok = read_token();
+                if (get_ttype(name_tok) != TTYPE_IDENT)
+                    error("Identifier expected in function pointer, but got %s", token_to_string(name_tok));
+                char *fn_name = get_ident(name_tok);
+                expect(')');
+                expect('(');
+                // 读取函数指针的参数列表（忽略具体参数，只处理到右括号）
+                int depth = 1;
+                while (depth > 0) {
+                    Token t = read_token();
+                    if (is_punct(t, '('))
+                        depth++;
+                    else if (is_punct(t, ')'))
+                        depth--;
+                    else if (get_ttype(t) == TTYPE_NULL)
+                        error("Unexpected end of input in function pointer declaration");
+                }
+                // 创建函数指针类型（作为普通指针处理）
+                Ctype *fn_ptr_type = make_ptr_type(ctype);
+                if(have_redefine_var(fn_name))
+                    error("Function have redefined param: %s", fn_name);
+                list_push(params, ast_lvar(fn_ptr_type, fn_name));
+                
+                tok = read_token();
+                if (is_punct(tok, ')'))
+                    return params;
+                if (!is_punct(tok, ','))
+                    error("Comma expected, but got %s", token_to_string(tok));
+                continue;
+            } else {
+                // 不是函数指针，回退token
+                unget_token(next_tok);
+                unget_token(tok);
+                tok = read_token();
+            }
+        }
+        
         if (get_ttype(tok) != TTYPE_IDENT) {
             if(ctype->type == CTYPE_VOID && is_punct(tok, ')') && params->len == 0) {
                 return params;
@@ -1691,7 +1865,7 @@ static List *read_params(void)
         if(have_redefine_var(get_ident(tok)))
             error("Function have redefined param: %s", token_to_string(tok));
         list_push(params, ast_lvar(ctype, get_ident(tok)));
-        Token tok = read_token();
+        tok = read_token();
         if (is_punct(tok, ')'))
             return params;
         if (!is_punct(tok, ','))
@@ -1701,7 +1875,7 @@ static List *read_params(void)
 
 static Ast *read_func_def(Ctype *rettype, char *fname)
 {
-    if(have_redefine_func(fname))   
+    if(have_redefine_func(fname))
         error("Redeclaration function: %s", fname);
     
     expect('(');
@@ -1711,6 +1885,10 @@ static Ast *read_func_def(Ctype *rettype, char *fname)
     Token tok = read_token();
     if(is_punct(tok, '{')) {
         is_first = true;
+        // 先创建函数声明并添加到符号表，支持递归调用
+        Ast *func_decl = ast_func_decl(rettype, fname, params);
+        dict_put(functionenv, fname, func_decl);
+        
         localenv = make_dict(localenv);
         localvars = make_list();
         labels = make_list();
@@ -1720,6 +1898,7 @@ static Ast *read_func_def(Ctype *rettype, char *fname)
         localvars = NULL;
         labels = NULL;
 
+        // 更新符号表中的函数定义
         dict_put(functionenv, fname, r);
         return r;
     }else if (is_punct(tok, ';')) {
@@ -1784,3 +1963,4 @@ List *read_toplevels(void)
     list_free(globalenv->list);
     return r;
 }
+

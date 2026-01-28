@@ -635,12 +635,6 @@ void c51_gen(FILE *fp, SSAUnit *unit) {
 #ifdef MINITEST_IMPLEMENTATION
 #include "minitest.h"
 
-extern List *ctypes;
-extern List *strings;
-extern List *read_toplevels(void);
-extern void set_current_filename(const char *filename);
-extern char *ast_to_string(Ast *ast);
-
 TEST(test, c51gen) {
     char infile[256];
     printf("file path for C51 code generation: ");

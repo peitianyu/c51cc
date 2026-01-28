@@ -98,6 +98,22 @@ static inline void *list_get(List *list, int idx)
     return n->elem;
 }
 
+static inline void *list_shift(List *list)
+{
+    if (!list->head)
+        return NULL;
+    ListNode *head = list->head;
+    void *r = head->elem;
+    list->head = head->next;
+    if (list->head)
+        list->head->prev = NULL;
+    else
+        list->tail = NULL;
+    free(head);
+    list->len--;
+    return r;
+}
+
 static void list_unshift(List *list, void *elem)
 {
     ListNode *node = make_node(elem);
