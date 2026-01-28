@@ -52,7 +52,7 @@ char *ctype_to_string(Ctype *ctype) {
     case CTYPE_CHAR:  string_appendf(&s, "char"); break;
     case CTYPE_FLOAT: string_appendf(&s, "float"); break;
     case CTYPE_DOUBLE:string_appendf(&s, "double"); break;
-    case CTYPE_PTR:   string_appendf(&s, "*%s", ctype_to_string(ctype->ptr)); return get_cstring(s);
+    case CTYPE_PTR:   string_appendf(&s, "(*%s)", ctype_to_string(ctype->ptr)); return get_cstring(s);
     case CTYPE_ARRAY: string_appendf(&s, "[%d]%s", ctype->len, ctype_to_string(ctype->ptr)); return get_cstring(s);
     case CTYPE_STRUCT:
         string_appendf(&s, ctype->is_union?"(union":"(struct");
@@ -165,7 +165,7 @@ static void ast_to_string_int(String *buf, Ast *ast)
         string_appendf(buf, "(decl %s %s", ctype_to_string(ast->declvar->ctype),
                        ast->declvar->varname);
         if (ast->declinit)
-            string_appendf(buf, " %s)", ast_to_string(ast->declinit));
+            string_appendf(buf, " = %s)", ast_to_string(ast->declinit));
         else
             string_appendf(buf, ")");
         break;

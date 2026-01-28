@@ -159,17 +159,15 @@ int sum_array(int arr[], int n) {
  *=============================*/
 
 int test_arithmetic() {
-    // int a = 10, b = 3;
     int a = 10;
     int b = 3;
     int r;
     
-    // 算术运算符
-    r = a + b;    // 加法
-    r = a - b;    // 减法
-    r = a * b;    // 乘法
-    r = a / b;    // 除法
-    r = a % b;    // 取模
+    r = a + b;
+    r = a - b;
+    r = a * b;
+    r = a / b;
+    r = a % b;
     
     return r;
 }
@@ -179,13 +177,12 @@ int test_bitwise() {
     int b = 0xF0;
     int r;
     
-    // 位运算符
-    r = a & b;    // 与
-    r = a | b;    // 或
-    r = a ^ b;    // 异或
-    r = ~a;       // 取反
-    r = a << 2;   // 左移
-    r = a >> 2;   // 右移
+    r = a & b;
+    r = a | b;
+    r = a ^ b;
+    r = ~a;
+    r = a << 2;
+    r = a >> 2;
     
     return r;
 }
@@ -195,13 +192,12 @@ int test_comparison() {
     int b = 10;
     int r;
     
-    // 比较运算符
-    r = a == b;   // 等于
-    r = a != b;   // 不等于
-    r = a < b;    // 小于
-    r = a > b;    // 大于
-    r = a <= b;   // 小于等于
-    r = a >= b;   // 大于等于
+    r = a == b;
+    r = a != b;
+    r = a < b;
+    r = a > b;
+    r = a <= b;
+    r = a >= b;
     
     return r;
 }
@@ -210,10 +206,9 @@ int test_logical() {
     int a = 1, b = 0;
     int r;
     
-    // 逻辑运算符
-    r = a && b;   // 逻辑与
-    r = a || b;   // 逻辑或
-    r = !a;       // 逻辑非
+    r = a && b;
+    r = a || b;
+    r = !a;
     
     return r;
 }
@@ -223,16 +218,15 @@ int test_unary() {
     int *p;
     int r;
     
-    // 一元运算符
-    r = +a;       // 正号
-    r = -a;       // 负号
-    r = ++a;      // 前置自增
-    r = a++;      // 后置自增
-    r = --a;      // 前置自减
-    r = a--;      // 后置自减
+    r = +a;
+    r = -a;
+    r = ++a;
+    r = a++;
+    r = --a;
+    r = a--;
     
-    p = &a;       // 取地址
-    r = *p;       // 解引用
+    p = &a;
+    r = *p;
     
     return r;
 }
@@ -241,7 +235,6 @@ int test_ternary() {
     int a = 5, b = 10;
     int r;
     
-    // 三元运算符
     r = (a > b) ? a : b;
     r = (a < b) ? 100 : 200;
     
@@ -252,7 +245,6 @@ int test_assignment() {
     int a = 10;
     int b;
     
-    // 赋值运算符
     b = a;
     b = a + 5;
     b = a * 2 + 3;
@@ -265,7 +257,6 @@ int test_cast() {
     float f = 3.14;
     int r;
     
-    // 类型转换
     r = (int)f;
     f = (float)a;
     r = (int)3.7;
@@ -282,19 +273,16 @@ int test_if() {
     int b = 20;
     int r = 0;
     
-    // 简单if
     if (a > 5) {
         r = 1;
     }
     
-    // if-else
     if (a > b) {
         r = a;
     } else {
         r = b;
     }
     
-    // if-else if-else (嵌套实现)
     if (a > 20) {
         r = 1;
     } else {
@@ -309,7 +297,6 @@ int test_if() {
         }
     }
     
-    // 嵌套if
     if (a > 5) {
         if (b > 15) {
             r = a + b;
@@ -323,24 +310,18 @@ int test_for() {
     int sum = 0;
     int i;
     
-    // 基础for循环
     for (i = 0; i < 10; i = i + 1) {
         sum = sum + i;
     }
     
-    // for循环内声明变量
     for (int j = 0; j < 5; j = j + 1) {
         sum = sum + j;
     }
     
-    // 空初始化
     int k = 0;
     for (; k < 5; k = k + 1) {
         sum = sum + 1;
     }
-    
-    // 空条件（无限循环，需内部break，这里省略）
-    // for (int m = 0; ; m = m + 1) { break; }
     
     return sum;
 }
@@ -349,7 +330,6 @@ int test_while() {
     int sum = 0;
     int i = 0;
     
-    // while循环
     while (i < 10) {
         sum = sum + i;
         i = i + 1;
@@ -362,7 +342,6 @@ int test_dowhile() {
     int sum = 0;
     int i = 0;
     
-    // do-while循环
     do {
         sum = sum + i;
         i = i + 1;
@@ -375,7 +354,6 @@ int test_switch() {
     int a = 2;
     int r = 0;
     
-    // switch语句
     switch (a) {
         case 0:
             r = 100;
@@ -398,7 +376,7 @@ int test_goto() {
     int r = 0;
     
     goto skip;
-    r = 100;  // 被跳过
+    r = 100;
 skip:
     r = 200;
     
@@ -408,7 +386,6 @@ skip:
 int test_break_continue() {
     int sum = 0;
     
-    // break测试
     for (int i = 0; i < 100; i = i + 1) {
         if (i == 10) {
             break;
@@ -416,7 +393,6 @@ int test_break_continue() {
         sum = sum + i;
     }
     
-    // continue测试
     sum = 0;
     for (int i = 0; i < 10; i = i + 1) {
         if (i == 5) {
@@ -457,8 +433,8 @@ int test_pointer() {
     int *p = &a;
     int r;
     
-    r = *p;           // 解引用
-    *p = 20;          // 通过指针赋值
+    r = *p;
+    *p = 20;
     r = *p;
     
     return r;
@@ -469,10 +445,10 @@ int test_pointer_arithmetic() {
     int *p = arr;
     int r;
     
-    r = *p;           // arr[0]
+    r = *p;
     p = p + 1;
-    r = *p;           // arr[1]
-    r = *(p + 2);     // arr[3]
+    r = *p;
+    r = *(p + 2);
     
     return r;
 }
@@ -485,34 +461,114 @@ int test_array_access() {
     r = arr[2];
     r = arr[1 + 2];
     
-    // 指针数组访问
     int *p = arr;
     r = p[3];
-    r = 3[p];         // 等价于 p[3]
+    r = 3[p];
     
     return r;
 }
 
 /*=============================*
- * 十、结构体操作测试
+ * 十、函数指针测试
+ *=============================*/
+
+// 基础函数
+int func_int(int a) {
+    return a * 2;
+}
+
+int func_add(int a, int b) {
+    return a + b;
+}
+
+// 1. 函数指针变量声明
+void test_func_ptr_decl() {
+    int (*fp1)(int);
+    int (*fp2)(int, int);
+    void (*fp3)(void);
+}
+
+// 2. 函数指针初始化与赋值
+void test_func_ptr_init() {
+    int (*fp1)(int) = func_int;
+    int (*fp2)(int, int) = func_add;
+    
+    fp1 = func_int;
+    fp2 = func_add;
+}
+
+// 3. 函数指针调用
+int test_func_ptr_call() {
+    int (*fp)(int) = func_int;
+    int r = fp(5);
+    return r;
+}
+
+// 4. 函数指针作为参数
+int binary_op(int (*op)(int, int), int a, int b) {
+    return op(a, b);
+}
+
+// 5. 使用typedef的函数指针
+typedef int (*compare_fn)(int, int);
+
+int compare_desc(int a, int b) {
+    return b - a;
+}
+
+void test_func_ptr_typedef() {
+    compare_fn cmp = compare_desc;
+    int r = cmp(3, 5);
+}
+
+// 6. 结构体中的函数指针 (暂不支持字段赋值)
+// struct Ops {
+//     int (*add)(int, int);
+// };
+//
+// void test_func_ptr_in_struct() {
+//     struct Ops ops;
+//     ops.add = func_add;  // 暂不支持
+//     int r = ops.add(3, 4);
+// }
+
+// 7. 返回函数指针的函数 (暂不支持)
+// typedef int (*int_func_ptr)(int);
+// int_func_ptr get_func() {
+//     return func_int;
+// }
+
+// 综合函数指针测试
+int test_all_func_ptr() {
+    int result = 0;
+    
+    test_func_ptr_decl();
+    test_func_ptr_init();
+    result = test_func_ptr_call();
+    result = result + binary_op(func_add, 3, 4);
+    test_func_ptr_typedef();
+    // test_func_ptr_in_struct();  // 暂不支持
+    
+    return result;
+}
+
+/*=============================*
+ * 十一、结构体操作测试
  *=============================*/
 
 int test_struct() {
     struct Point p;
     int r;
     
-    // 成员访问
     p.x = 10;
     p.y = 20;
     r = p.x + p.y;
     
-    // 结构体指针
     struct Point *ptr = &p;
-    ptr->x = 30;      // 箭头访问
+    ptr->x = 30;
     ptr->y = 40;
     r = ptr->x + ptr->y;
     
-    // 嵌套结构体
     struct Rect rect;
     rect.tl.x = 0;
     rect.tl.y = 0;
@@ -524,7 +580,7 @@ int test_struct() {
 }
 
 /*=============================*
- * 十一、联合体操作测试
+ * 十二、联合体操作测试
  *=============================*/
 
 int test_union() {
@@ -535,47 +591,41 @@ int test_union() {
     r = d.i;
     
     d.f = 3.14;
-    // 注意：此时访问d.i是未定义行为，仅测试语法
     
     return r;
 }
 
 /*=============================*
- * 十二、复杂表达式测试
+ * 十三、复杂表达式测试
  *=============================*/
 
 int test_complex_expr() {
     int a = 5, b = 3, c = 2;
     int r;
     
-    // 复杂算术表达式
-    r = a + b * c;           // 优先级测试
-    r = (a + b) * c;         // 括号测试
-    r = a * b + c * 2;       // 混合运算
+    r = a + b * c;
+    r = (a + b) * c;
+    r = a * b + c * 2;
     
-    // 复杂逻辑表达式
     r = (a > b) && (b > c);
     r = (a == 5) || (b == 10);
     r = !(a < b);
     
-    // 混合位运算
     r = (a & b) | (c << 1);
     r = a ^ b ^ c;
     
-    // 多层嵌套
     r = ((a + b) * (c - 1)) / 2;
     
     return r;
 }
 
 /*=============================*
- * 十三、综合测试函数
+ * 十四、综合测试函数
  *=============================*/
 
 int test_all_features() {
     int result = 0;
     
-    // 测试所有功能
     result = result + test_arithmetic();
     result = result + test_bitwise();
     result = result + test_comparison();
@@ -595,6 +645,7 @@ int test_all_features() {
     result = result + test_pointer();
     result = result + test_pointer_arithmetic();
     result = result + test_array_access();
+    result = result + test_all_func_ptr();
     result = result + test_struct();
     result = result + test_union();
     result = result + test_complex_expr();
@@ -603,7 +654,7 @@ int test_all_features() {
 }
 
 /*=============================*
- * 十四、main函数
+ * 十五、main函数
  *=============================*/
 
 int main() {

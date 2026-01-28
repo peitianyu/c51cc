@@ -50,6 +50,8 @@ static bool have_redefine_var(char* var_name);
 static bool get_enum_val(char* key, int* val);
 static bool is_type_keyword(const Token tok);
 static Ctype *read_decl_spec(void);
+static Ctype *read_array_dimensions(Ctype *basetype);
+static void read_func_ptr_params(void);
 
 static Ast *ast_uop(int type, Ctype *ctype, Ast *operand)
 {
@@ -203,8 +205,14 @@ static bool valid_init_var(Ast *var, Ast *init)
             if (init->type == AST_STRING && var->ctype->ptr->type == CTYPE_CHAR) return true;
             return false;
         case CTYPE_PTR:
-            return (init->ctype->type == CTYPE_PTR || init->ctype->type == CTYPE_ARRAY ||
-                    init->ctype->type == CTYPE_INT || init->type == AST_ADDR);
+            // 函数指针可以接受：其他指针、数组、函数声明、整数字面量、取地址表达式
+            if (init->ctype->type == CTYPE_PTR || init->ctype->type == CTYPE_ARRAY ||
+                init->ctype->type == CTYPE_INT || init->type == AST_ADDR)
+                return true;
+            // 函数名赋值给函数指针（AST_FUNC_DECL/AST_FUNC_DEF的ctype是返回类型）
+            if (init->type == AST_FUNC_DECL || init->type == AST_FUNC_DEF)
+                return true;
+            return false;
         case CTYPE_STRUCT:
             return (init->ctype->type == CTYPE_STRUCT);
         case CTYPE_ENUM:
@@ -669,7 +677,15 @@ static Ast *read_ident_or_func(char *name)
     Ast *v = dict_get(localenv, name);
     if (!v) {
         v = dict_get(globalenv, name);
-        if(!v) error("Undefined varaible: %s", name);
+        if(!v) {
+            // 检查是否是函数名（用于函数指针初始化）
+            Ast *func = dict_get(functionenv, name);
+            if(func) {
+                // 返回函数声明/定义的AST，其ctype是返回类型
+                return func;
+            }
+            error("Undefined varaible: %s", name);
+        }
     }
         
     return v;
@@ -833,6 +849,17 @@ static Ctype *convert_array(Ctype *ctype)
 
 static Ctype *result_type(char op, Ctype *a, Ctype *b)
 {
+    // 特殊处理：函数指针赋值
+    if (op == '=') {
+        // 允许将函数名赋值给函数指针
+        // 或者允许指针之间的赋值
+        if (a->type == CTYPE_PTR && b->type == CTYPE_PTR)
+            return a;
+        // 允许 int 赋值给指针（地址值）
+        if (a->type == CTYPE_PTR && b->type <= CTYPE_LONG)
+            return a;
+    }
+    
     jmp_buf jmpbuf;
     if (setjmp(jmpbuf) == 0)
         return result_type_int(&jmpbuf, op, convert_array(a), convert_array(b));
@@ -980,6 +1007,22 @@ static Ast *read_expr_int(int prec)
         if (is_punct(tok, '[')) {
             ast = read_subscript_expr(ast);
             continue;
+        }
+        // 支持 (*fp)(args) 形式的函数指针调用
+        if (is_punct(tok, '(')) {
+            // 检查左侧是否是解引用表达式（函数指针调用）
+            if (ast->type == AST_DEREF && ast->operand &&
+                ast->operand->ctype && ast->operand->ctype->type == CTYPE_PTR) {
+                // (*fp)(args) 形式 - 获取函数指针变量名
+                Ast *func_ptr = ast->operand;
+                if (func_ptr->type == AST_LVAR || func_ptr->type == AST_GVAR) {
+                    ast = read_func_args(func_ptr->varname, func_ptr);
+                    continue;
+                }
+            }
+            // 普通函数调用已在 read_ident_or_func 处理
+            unget_token(tok);
+            return ast;
         }
         // FIXME: this is BUG!! ++ should be in read_unary_expr() , I think.
         if (is_punct(tok, PUNCT_INC) || is_punct(tok, PUNCT_DEC)) {
@@ -1233,20 +1276,47 @@ static Dict *read_struct_union_fields(bool is_struct_type)
     while (1) {
         if (!is_type_keyword(peek_token()))
             break;
-        Token name;
-        Ctype *fieldtype = read_decl_int(&name);
+        
+        // 读取类型说明符
+        Ctype *ctype = read_decl_spec();
+        Token name = read_token();
+        
+        // 检查是否是函数指针语法: type (*name)(params)
+        if (is_punct(name, '(')) {
+            Token next_tok = read_token();
+            if (is_punct(next_tok, '*')) {
+                // 函数指针: type (*name)(params)
+                name = read_token();
+                if (get_ttype(name) != TTYPE_IDENT)
+                    error("Identifier expected in function pointer, but got %s", token_to_string(name));
+                expect(')');
+                expect('(');
+                // 读取参数列表
+                read_func_ptr_params();
+                // 创建函数指针类型
+                ctype = make_ptr_type(ctype);
+            } else {
+                unget_token(next_tok);
+                error("Identifier expected, but got %s", token_to_string(name));
+            }
+        } else if (get_ttype(name) != TTYPE_IDENT) {
+            error("Identifier expected, but got %s", token_to_string(name));
+        }
+        
+        // 读取数组维度
+        ctype = read_array_dimensions(ctype);
         
         int bit_size = 0;
         Token tok = peek_token();
         if(is_struct_type && is_punct(tok, ':')) {
             read_token();
             Ast* bit_ast = read_expr();
-            if(!is_inttype(bit_ast->ctype)) 
+            if(!is_inttype(bit_ast->ctype))
                 error("Bit field need int type, but got %s", ctype_to_string(bit_ast->ctype));
             bit_size = eval_intexpr(bit_ast);
         }
 
-        dict_put(r, get_ident(name), make_struct_field_type(fieldtype, 0, bit_offset, bit_size));
+        dict_put(r, get_ident(name), make_struct_field_type(ctype, 0, bit_offset, bit_size));
         bit_offset += bit_size;
         expect(';');
     }
@@ -1453,6 +1523,12 @@ static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
             init->ctype = make_ptr_type(init->ctype->ptr);
             return ast_decl(var, init);
         }
+        
+        // 允许函数名赋值给函数指针
+        if(init->type == AST_FUNC_DECL || init->type == AST_FUNC_DEF) {
+            // 函数名作为指针，使用函数标签作为地址
+            return ast_decl(var, init);
+        }
 
         // FIXME: 注意这里直接填地址有危险, 不建议这么做, 程序可能会飞, 后期将这部分限制住????
         ast_inttype(ctype_int, eval_intexpr(init));
@@ -1471,6 +1547,22 @@ static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
         init->ctype = var->ctype;
 
     return ast_decl(var, init);
+}
+
+// 读取函数指针参数列表并跳过
+static void read_func_ptr_params(void)
+{
+    // 读取参数列表，只处理到匹配的 ')'
+    int depth = 1;
+    while (depth > 0) {
+        Token t = read_token();
+        if (is_punct(t, '('))
+            depth++;
+        else if (is_punct(t, ')'))
+            depth--;
+        else if (get_ttype(t) == TTYPE_NULL)
+            error("Unexpected end of input in function pointer declaration");
+    }
 }
 
 static Ctype *read_array_dimensions_int(Ctype *basetype)
@@ -1513,10 +1605,35 @@ static Ast *read_decl_init(Ast *var)
     return ast_decl(var, NULL);
 }
 
+
 static Ctype *read_decl_int(Token *name)
 {
     Ctype *ctype = read_decl_spec();
     *name = read_token();
+    
+    // 检查是否是函数指针语法: type (*name)(params)
+    if (is_punct(*name, '(')) {
+        Token next_tok = read_token();
+        if (is_punct(next_tok, '*')) {
+            // 函数指针: type (*name)(params)
+            *name = read_token();
+            if (get_ttype((*name)) != TTYPE_IDENT)
+                error("Identifier expected in function pointer, but got %s", token_to_string((*name)));
+            expect(')');
+            expect('(');
+            // 读取参数列表
+            read_func_ptr_params();
+            // 创建函数指针类型：作为指向函数的指针
+            // 这里我们使用普通指针类型，运行时通过名称调用
+            return make_ptr_type(ctype);
+        } else {
+            // 不是函数指针，回退token
+            unget_token(next_tok);
+            // 继续正常处理，但此时*name是'('
+            error("Identifier expected, but got %s", token_to_string(*name));
+        }
+    }
+    
     if (get_ttype((*name)) != TTYPE_IDENT)
         error("Identifier expected, but got %s", token_to_string(*name));
     return read_array_dimensions(ctype);
@@ -1576,6 +1693,28 @@ static Ast *read_decl(void)
 {
     Ctype *ctype = read_decl_spec();
     Token varname = read_token();
+    
+    // 检查是否是函数指针语法: type (*name)(params)
+    if (is_punct(varname, '(')) {
+        Token next_tok = read_token();
+        if (is_punct(next_tok, '*')) {
+            // 函数指针: type (*name)(params)
+            varname = read_token();
+            if (get_ttype(varname) != TTYPE_IDENT)
+                error("Identifier expected in function pointer, but got %s", token_to_string(varname));
+            expect(')');
+            expect('(');
+            // 读取参数列表
+            read_func_ptr_params();
+            // 创建函数指针类型
+            ctype = make_ptr_type(ctype);
+            return read_decl_multi(ctype, varname);
+        } else {
+            unget_token(next_tok);
+            error("Identifier expected, but got %s", token_to_string(varname));
+        }
+    }
+    
     if (get_ttype(varname) != TTYPE_IDENT)
         error("Identifier expected, but got %s", token_to_string(varname));
     return read_decl_multi(ctype, varname);
@@ -1925,6 +2064,32 @@ static Ast *read_decl_or_func_def(void)
     Ctype *ctype = read_decl_spec();
     Token tok1 = read_token();
     char *ident;
+    
+    // 检查是否是typedef函数指针: typedef type (*name)(params);
+    if (is_punct(tok1, '(')) {
+        Token next_tok = read_token();
+        if (is_punct(next_tok, '*')) {
+            // typedef函数指针: typedef type (*name)(params);
+            Token name_tok = read_token();
+            if (get_ttype(name_tok) != TTYPE_IDENT)
+                error("Identifier expected in typedef function pointer, but got %s", token_to_string(name_tok));
+            ident = get_ident(name_tok);
+            expect(')');
+            expect('(');
+            read_func_ptr_params();
+            // 创建函数指针类型
+            ctype = make_ptr_type(ctype);
+            // 继续处理typedef
+            expect(';');
+            dict_put(typedefenv, ident, ctype);
+            return ast_typedef(ctype, ident);
+        } else {
+            unget_token(next_tok);
+            unget_token(tok1);
+            tok1 = read_token();
+        }
+    }
+    
     if (get_ttype(tok1) != TTYPE_IDENT) {
         if(is_punct(tok1, ';')) {
             if(ctype->type == CTYPE_STRUCT) return ast_struct_def(ctype);
