@@ -488,6 +488,111 @@ static void emit_function(C51Gen *gen, Func *f) {
     gen->frame.reg_spill_base = 0;
     gen->label_count = 0;
     
+    // 中断函数特殊处理
+    if (f->is_interrupt) {
+        emit_comment(gen, "=======================================");
+        emit_comment(gen, "ISR %d, Bank %d", f->interrupt_id, f->bank_id);
+        emit_comment(gen, "=======================================");
+        
+        // 生成 USING 指令（如果寄存器组不为0）
+        if (f->bank_id != 0) {
+            char using_str[32];
+            snprintf(using_str, sizeof(using_str), "USING %d", f->bank_id);
+            c51_emit_directive(gen->buf, using_str);
+        }
+        
+        // 函数标签
+        char proc_label[64];
+        snprintf(proc_label, sizeof(proc_label), "%s PROC", f->name);
+        c51_emit_directive(gen->buf, proc_label);
+        
+        // 生成函数体...
+        scan_const_values(f);
+        linear_regalloc(gen, f);
+        
+        // PHI copy 收集
+        for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+            Block *blk = iter_next(&it);
+            for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
+                Instr *phi = iter_next(&jt);
+                for (int i = 0; i < phi->args->len && i < phi->labels->len; i++) {
+                    ValueName *src = list_get(phi->args, i);
+                    char *pred_label = list_get(phi->labels, i);
+                    for (Iter kt = list_iter(f->blocks); !iter_end(kt);) {
+                        Block *pred = iter_next(&kt);
+                        char label_buf[32];
+                        if (pred == f->entry) {
+                            snprintf(label_buf, sizeof(label_buf), "%s_entry", f->name);
+                        } else {
+                            snprintf(label_buf, sizeof(label_buf), "block%u", pred->id);
+                        }
+                        if (strcmp(pred_label, label_buf) == 0) {
+                            phi_copy_add(*src, phi->dest, pred);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 生成基本块代码
+        for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+            Block *blk = iter_next(&it);
+            
+            if (blk != f->entry) {
+                char block_label[32];
+                snprintf(block_label, sizeof(block_label), "block%u", blk->id);
+                emit_label(gen, block_label);
+            }
+            
+            for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
+                Instr *phi = iter_next(&jt);
+                emit_comment(gen, "PHI: v%d = phi ...", phi->dest);
+            }
+            
+            for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
+                Instr *inst = iter_next(&jt);
+                
+                if (inst->op == IROP_JMP || inst->op == IROP_BR ||
+                    inst->op == IROP_RET || inst->op == IROP_CALL) {
+                    PhiCopy *copy = phi_copies;
+                    while (copy) {
+                        if (copy->pred == blk) {
+                            emit_phi_copy(gen, copy->src, copy->dest);
+                        }
+                        copy = copy->next;
+                    }
+                }
+                
+                emit_instr(gen, inst);
+            }
+            
+            if (blk->instrs->len == 0 || !is_terminator(list_get(blk->instrs, blk->instrs->len - 1))) {
+                PhiCopy *copy = phi_copies;
+                while (copy) {
+                    if (copy->pred == blk) {
+                        emit_phi_copy(gen, copy->src, copy->dest);
+                    }
+                    copy = copy->next;
+                }
+            }
+        }
+        
+        phi_copies_clear();
+        
+        // RETI 返回（中断返回）
+        c51_emit(gen->buf, C51_RETI, c51_none(), c51_none(), NULL);
+        
+        char endp_label[64];
+        snprintf(endp_label, sizeof(endp_label), "%s ENDP", f->name);
+        c51_emit_directive(gen->buf, endp_label);
+        c51_emit_directive(gen->buf, "");
+        
+        free(gen->vreg_map);
+        gen->vreg_map = NULL;
+        return;
+    }
+    
     scan_const_values(f);
     linear_regalloc(gen, f);
     
@@ -599,18 +704,52 @@ void c51_gen(FILE *fp, SSAUnit *unit) {
     C51Gen gen = {0};
     gen.buf = buf;
     
+    // 收集中断函数信息
+    Func *isr_funcs[8] = {NULL};
+    int max_isr = -1;
+    for (Iter it = list_iter(unit->funcs); !iter_end(it);) {
+        Func *f = iter_next(&it);
+        if (f->is_interrupt && f->interrupt_id >= 0 && f->interrupt_id < 8) {
+            isr_funcs[f->interrupt_id] = f;
+            if (f->interrupt_id > max_isr) max_isr = f->interrupt_id;
+        }
+    }
+    
     // 文件头
     c51_emit_comment(buf, "C51 Assembly Generated from SSA IR");
     c51_emit_comment(buf, "Linear Register Allocation");
     c51_emit_directive(buf, "");
+    
+    // 生成中断向量表
     c51_emit_directive(buf, "ORG 0000H");
     c51_emit_jump(buf, C51_LJMP, "main");
+    
+    // 生成中断向量（0003H, 000BH, 0013H, 001BH, 0023H, 002BH, 0033H, 003BH）
+    for (int i = 0; i <= max_isr; i++) {
+        int vector = 0x0003 + i * 8;
+        char org_str[32];
+        snprintf(org_str, sizeof(org_str), "ORG %04XH", vector);
+        c51_emit_directive(buf, org_str);
+        if (isr_funcs[i]) {
+            c51_emit_jump(buf, C51_LJMP, isr_funcs[i]->name);
+        } else {
+            // 未使用的中断，跳转到空处理
+            c51_emit_jump(buf, C51_LJMP, "_empty_isr");
+        }
+    }
+    
     c51_emit_directive(buf, "");
     c51_emit_comment(buf, "Internal RAM for spilled registers");
     c51_emit_directive(buf, "DSEG AT 20H");
     c51_emit_directive(buf, "spill_area: DS 32");
     c51_emit_directive(buf, "");
     c51_emit_directive(buf, "CSEG");
+    c51_emit_directive(buf, "");
+    
+    // 空中断处理（防止未使用的中断导致程序崩溃）
+    c51_emit_directive(buf, "_empty_isr PROC");
+    c51_emit(buf, C51_RETI, c51_none(), c51_none(), NULL);
+    c51_emit_directive(buf, "_empty_isr ENDP");
     c51_emit_directive(buf, "");
     
     // 生成每个函数

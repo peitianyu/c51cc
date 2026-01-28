@@ -161,6 +161,10 @@ static void ast_to_string_int(String *buf, Ast *ast)
         ast_to_string_int(buf, ast->body);
         break;
     }
+    case AST_INTERRUPT_DEF:
+        string_appendf(buf, "(interrupt %d %d)", ast->interrupt_id, ast->bank_id);
+        ast_to_string_int(buf, ast->body);
+        break;
     case AST_DECL:
         string_appendf(buf, "(decl %s %s", ctype_to_string(ast->declvar->ctype),
                        ast->declvar->varname);

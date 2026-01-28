@@ -902,7 +902,7 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
 static void gen_func(SSABuild *b, Ast *ast) {
     if (!ast || ast->type != AST_FUNC_DEF) return;
     
-    Ctype *ret = (ast->ctype && ast->ctype->type == CTYPE_PTR) 
+    Ctype *ret = (ast->ctype && ast->ctype->type == CTYPE_PTR)
                  ? ast->ctype->ptr : NULL;
     
     ssa_build_function(b, ast->fname, ret);
@@ -927,10 +927,38 @@ static void gen_func(SSABuild *b, Ast *ast) {
     }
 }
 
+static void gen_interrupt_func(SSABuild *b, Ast *ast) {
+    if (!ast || ast->type != AST_INTERRUPT_DEF) return;
+    
+    // 生成中断函数名：ISR_0, ISR_1, ...
+    char isr_name[32];
+    snprintf(isr_name, sizeof(isr_name), "ISR_%d", ast->interrupt_id);
+    
+    Ctype *ret = (ast->ctype && ast->ctype->type == CTYPE_PTR)
+                 ? ast->ctype->ptr : NULL;
+    
+    // 创建函数并标记为中断
+    Func *f = ssa_build_function(b, ssa_strdup(isr_name), ret);
+    f->is_interrupt = true;
+    f->interrupt_id = ast->interrupt_id;
+    f->bank_id = ast->bank_id;
+    
+    // 中断函数无参数
+    
+    if (ast->body) {
+        gen_stmt(b, ast->body);
+    }
+    
+    if (b->cur_block) {
+        ssa_build_ret(b, 0);
+    }
+}
+
 void ssa_convert_ast(SSABuild *b, Ast *ast) {
     if (!ast) return;
     switch (ast->type) {
     case AST_FUNC_DEF: gen_func(b, ast); break;
+    case AST_INTERRUPT_DEF: gen_interrupt_func(b, ast); break;
     default: break;
     }
 }

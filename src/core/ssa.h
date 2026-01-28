@@ -69,6 +69,10 @@ typedef struct Func {
     List        *params;    // char* 列表
     List        *blocks;    // Block* 列表
     Block       *entry;
+    // 中断函数信息
+    bool        is_interrupt;
+    int         interrupt_id;
+    int         bank_id;
 } Func;
 
 typedef struct SSAUnit {

@@ -2019,8 +2019,60 @@ static List *read_params(void)
     }
 }
 
+static Ast *ast_interrupt_def(Ctype *rettype, int int_id, int bank_id,
+                               Ast *body, List *localvars, List *labels)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_INTERRUPT_DEF;
+    r->ctype = rettype;
+    r->interrupt_id = int_id;   // 使用专用字段
+    r->bank_id = bank_id;
+    r->body = body;
+    r->localvars = localvars;
+    r->labels = labels;
+    return r;
+}
+
 static Ast *read_func_def(Ctype *rettype, char *fname)
 {
+    // 检测是否是 interrupt_func 特殊函数
+    if (strcmp(fname, "interrupt_func") == 0) {
+        expect('(');
+        // 解析中断号 (常量表达式)
+        Ast *id_ast = read_expr();
+        int int_id = eval_intexpr(id_ast);
+        expect(',');
+        // 解析寄存器组号 (常量表达式)
+        Ast *bank_ast = read_expr();
+        int bank_id = eval_intexpr(bank_ast);
+        expect(')');
+        
+        // 验证范围
+        if (int_id < 0 || int_id > 7)
+            error("Interrupt id must be 0-7, got %d", int_id);
+        if (bank_id < 0 || bank_id > 3)
+            error("Bank id must be 0-3, got %d", bank_id);
+        
+        // 读取函数体
+        Token tok = read_token();
+        if (!is_punct(tok, '{'))
+            error("Expected '{' for interrupt function body");
+        
+        is_first = true;
+        localenv = make_dict(globalenv);
+        localenv = make_dict(localenv);
+        localvars = make_list();
+        labels = make_list();
+        Ast *body = read_compound_stmt();
+        
+        Ast *r = ast_interrupt_def(rettype, int_id, bank_id, body, localvars, labels);
+        
+        localenv = dict_parent(dict_parent(localenv));
+        localvars = NULL;
+        labels = NULL;
+        return r;
+    }
+    
     if(have_redefine_func(fname))
         error("Redeclaration function: %s", fname);
     

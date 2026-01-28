@@ -55,8 +55,9 @@ enum {
     AST_STRUCT_DEF,
     AST_STRUCT_INIT,
     AST_ENUM_DEF,
-    AST_TYPE_DEF, 
+    AST_TYPE_DEF,
     AST_CAST,
+    AST_INTERRUPT_DEF,  /* 中断函数定义 */
     PUNCT_EQ,
     PUNCT_GE,        // >=
     PUNCT_LE,        // <=
@@ -162,12 +163,15 @@ typedef struct __Ast {
         struct {
             char *fname;
             struct {
-                List *args;  
+                List *args;
                 struct {
                     List *params;
                     List *localvars;
                     List *labels;
                     struct __Ast *body;
+                    /* 中断函数专用 */
+                    int interrupt_id;
+                    int bank_id;
                 };
             };
         };
