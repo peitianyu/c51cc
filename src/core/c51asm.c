@@ -769,3 +769,90 @@ void c51_print_hex(C51Buffer *buf, FILE *fp) {
     // 文件结束标记
     fprintf(fp, ":00000001FF\n");
 }
+
+/* ============================================================
+ * Link文件生成 (符号表和重定位信息)
+ * ============================================================ */
+
+void c51_print_link(C51Buffer *buf, FILE *fp) {
+    fprintf(fp, "; C51 Linker File\n");
+    fprintf(fp, "; Generated from SSA IR\n\n");
+    
+    // 输出符号表
+    fprintf(fp, "; Symbol Table\n");
+    fprintf(fp, "; Name\t\tAddress\tType\n");
+    fprintf(fp, "; ------------------------------\n");
+    
+    for (int i = 0; i < buf->symtab.count; i++) {
+        C51Symbol *sym = &buf->symtab.syms[i];
+        fprintf(fp, "SYMBOL\t%s\t0x%04X\t%s\n",
+                sym->name,
+                sym->addr,
+                sym->is_global ? "GLOBAL" : "LOCAL");
+    }
+    
+    fprintf(fp, "\n; Memory Map\n");
+    fprintf(fp, "; Segment\tStart\tEnd\tSize\n");
+    fprintf(fp, "; ------------------------------\n");
+    
+    uint16_t end_addr = buf->base_addr;
+    if (buf->tail) {
+        end_addr = buf->tail->addr + buf->tail->size;
+    }
+    fprintf(fp, "SEGMENT\tCODE\t0x%04X\t0x%04X\t%d\n",
+            buf->base_addr,
+            end_addr,
+            end_addr - buf->base_addr);
+    
+    fprintf(fp, "\n; External References\n");
+    fprintf(fp, "; Name\t\tLocation\n");
+    fprintf(fp, "; ------------------------------\n");
+    
+    // 遍历指令查找外部引用（标签引用）
+    for (C51Line *line = buf->head; line; line = line->next) {
+        if (line->dst.type == C51_OP_LABEL && line->op != C51_LABEL) {
+            fprintf(fp, "EXTERN\t%s\t0x%04X\n", line->dst.label, line->addr);
+        }
+        if (line->src.type == C51_OP_LABEL) {
+            fprintf(fp, "EXTERN\t%s\t0x%04X\n", line->src.label, line->addr);
+        }
+    }
+    
+    fprintf(fp, "\n; End of Link File\n");
+}
+
+/* ============================================================
+ * 多格式输出 API
+ * ============================================================ */
+
+void c51_gen_all_formats(C51Buffer *buf, const char *basename) {
+    char filename[256];
+    FILE *fp;
+    
+    // 输出 .asm 文件
+    snprintf(filename, sizeof(filename), "%s.asm", basename);
+    fp = fopen(filename, "w");
+    if (fp) {
+        printf("Writing ASM file: %s\n", filename);
+        c51_print_asm(buf, fp);
+        fclose(fp);
+    }
+    
+    // 输出 .hex 文件 (Intel HEX格式)
+    snprintf(filename, sizeof(filename), "%s.hex", basename);
+    fp = fopen(filename, "w");
+    if (fp) {
+        printf("Writing HEX file: %s\n", filename);
+        c51_print_hex(buf, fp);
+        fclose(fp);
+    }
+    
+    // 输出 .lnk 文件 (链接信息)
+    snprintf(filename, sizeof(filename), "%s.lnk", basename);
+    fp = fopen(filename, "w");
+    if (fp) {
+        printf("Writing LINK file: %s\n", filename);
+        c51_print_link(buf, fp);
+        fclose(fp);
+    }
+}

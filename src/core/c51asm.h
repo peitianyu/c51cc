@@ -199,6 +199,8 @@ void c51_optimize_peephole(C51Buffer *buf);
 // 输出格式
 void c51_print_asm(C51Buffer *buf, FILE *fp);
 void c51_print_hex(C51Buffer *buf, FILE *fp);
+void c51_print_link(C51Buffer *buf, FILE *fp);
+void c51_gen_all_formats(C51Buffer *buf, const char *basename);
 
 // 获取指令编码
 int c51_encode_insn(C51Line *line, uint8_t *out, int max_len);

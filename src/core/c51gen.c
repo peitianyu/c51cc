@@ -561,6 +561,8 @@ static void emit_function(C51Gen *gen, Func *f) {
         }
         
         // 函数标签
+        c51_emit_label(gen->buf, f->name);
+        
         char proc_label[64];
         snprintf(proc_label, sizeof(proc_label), "%s PROC", f->name);
         c51_emit_directive(gen->buf, proc_label);
@@ -686,6 +688,9 @@ static void emit_function(C51Gen *gen, Func *f) {
     emit_comment(gen, "=======================================");
     c51_emit_directive(gen->buf, "PUBLIC");
     c51_emit_directive(gen->buf, f->name);
+    
+    // 添加函数入口标签（用于符号表）
+    c51_emit_label(gen->buf, f->name);
     
     char proc_label[64];
     snprintf(proc_label, sizeof(proc_label), "%s PROC", f->name);
@@ -1001,9 +1006,22 @@ void c51_gen(FILE *fp, SSAUnit *unit) {
 
 TEST(test, c51gen) {
     char infile[256];
+    char basename[256];
+    
     printf("file path for C51 code generation: ");
     if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
+
+    // 从输入文件名生成基础名
+    strncpy(basename, infile, sizeof(basename) - 1);
+    basename[sizeof(basename) - 1] = '\0';
+    char *dot = strrchr(basename, '.');
+    if (dot) *dot = '\0';
+    // 去除可能的路径前缀
+    char *slash = strrchr(basename, '/');
+    if (slash) {
+        memmove(basename, slash + 1, strlen(slash));
+    }
 
     set_current_filename(infile);
     
@@ -1023,8 +1041,81 @@ TEST(test, c51gen) {
     printf("\n=== C51 Assembly Output ===\n");
     c51_gen(stdout, b->unit);
     
+    // 生成hex和link文件
+    printf("\n=== Generating HEX and LINK files ===\n");
+    C51Buffer *buf = c51_buffer_create();
+    c51_buffer_set_base(buf, 0x0000);
+    
+    C51Gen gen = {0};
+    gen.buf = buf;
+    
+    // 收集中断函数信息
+    Func *isr_funcs[8] = {NULL};
+    int max_isr = -1;
+    for (Iter it = list_iter(b->unit->funcs); !iter_end(it);) {
+        Func *f = iter_next(&it);
+        if (f->is_interrupt && f->interrupt_id >= 0 && f->interrupt_id < 8) {
+            isr_funcs[f->interrupt_id] = f;
+            if (f->interrupt_id > max_isr) max_isr = f->interrupt_id;
+        }
+    }
+    
+    // 文件头
+    c51_emit_comment(buf, "C51 Assembly Generated from SSA IR");
+    c51_emit_comment(buf, "Linear Register Allocation");
+    c51_emit_directive(buf, "");
+    
+    // 生成全局变量和SFR声明
+    emit_global_vars(buf, b->unit);
+    
+    // 生成中断向量表
+    c51_emit_directive(buf, "ORG 0000H");
+    c51_emit_jump(buf, C51_LJMP, "main");
+    
+    for (int i = 0; i <= max_isr; i++) {
+        int vector = 0x0003 + i * 8;
+        char org_str[32];
+        snprintf(org_str, sizeof(org_str), "ORG %04XH", vector);
+        c51_emit_directive(buf, org_str);
+        if (isr_funcs[i]) {
+            c51_emit_jump(buf, C51_LJMP, isr_funcs[i]->name);
+        } else {
+            c51_emit_jump(buf, C51_LJMP, "_empty_isr");
+        }
+    }
+    
+    c51_emit_directive(buf, "");
+    c51_emit_comment(buf, "Internal RAM for spilled registers");
+    c51_emit_directive(buf, "DSEG AT 20H");
+    c51_emit_directive(buf, "spill_area: DS 32");
+    c51_emit_directive(buf, "");
+    c51_emit_directive(buf, "CSEG");
+    c51_emit_directive(buf, "");
+    
+    c51_emit_directive(buf, "_empty_isr PROC");
+    c51_emit(buf, C51_RETI, c51_none(), c51_none(), NULL);
+    c51_emit_directive(buf, "_empty_isr ENDP");
+    c51_emit_directive(buf, "");
+    
+    // 生成每个函数
+    for (Iter it = list_iter(b->unit->funcs); !iter_end(it);) {
+        Func *f = iter_next(&it);
+        emit_function(&gen, f);
+    }
+    
+    // 优化
+    c51_optimize_peephole(buf);
+    c51_optimize_jumps(buf);
+    
+    // 生成所有格式文件
+    c51_gen_all_formats(buf, basename);
+    
+    c51_buffer_free(buf);
+    
     ssa_build_destroy(b);
     list_free(strings);
     list_free(ctypes);
+    
+    printf("\n=== All files generated successfully ===\n");
 }
 #endif  // MINITEST_IMPLEMENTATION
