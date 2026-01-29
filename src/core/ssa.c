@@ -1284,6 +1284,16 @@ static void ssa_print_func(FILE *fp, Func *f) {
 }
 
 void ssa_print(FILE *fp, SSAUnit *unit) {
+    if (unit->globals && unit->globals->len > 0) {
+        fprintf(fp, "@globals {\n");
+        for (Iter it = list_iter(unit->globals); !iter_end(it);) {
+            GlobalVar *g = iter_next(&it);
+            fprintf(fp, "  @%s: %s", g->name, ctype_to_string(g->type));
+            if (g->has_init) fprintf(fp, " = %ld", g->init_value);
+            fprintf(fp, "\n");
+        }
+        fprintf(fp, "}\n\n");
+    }
     for (Iter it = list_iter(unit->funcs); !iter_end(it);) {
         Func *f = iter_next(&it);
         ssa_print_func(fp, f);
