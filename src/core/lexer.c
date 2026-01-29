@@ -4,6 +4,8 @@
 #include <string.h>
 #include "cc.h"
 
+#define PP_LINE_SIZE 4096
+
 #define make_null(x) make_token(TTYPE_NULL, (uintptr_t) 0)
 #define make_strtok(x) make_token(TTYPE_STRING, (uintptr_t) get_cstring(x))
 #define make_ident(x) make_token(TTYPE_IDENT, (uintptr_t) get_cstring(x))
@@ -58,6 +60,52 @@ static int ungetc_with_pos(int c) {
         curr_col--;
     }
     return ungetc(c, stdin);
+}
+
+static const char *skip_space_str(const char *p)
+{
+    while (*p && isspace((unsigned char)*p)) p++;
+    return p;
+}
+
+static bool handle_line_directive(void)
+{
+    char buf[PP_LINE_SIZE];
+    int i = 0;
+    int c;
+
+    while ((c = getc_with_pos()) != EOF && c != '\n') {
+        if (i < (int)sizeof(buf) - 1) buf[i++] = (char)c;
+    }
+    buf[i] = '\0';
+
+    const char *p = skip_space_str(buf);
+    if (strncmp(p, "line", 4) == 0 && isspace((unsigned char)p[4])) {
+        p += 4;
+        p = skip_space_str(p);
+    }
+
+    if (!isdigit((unsigned char)*p)) return false;
+    int line = (int)strtol(p, (char **)&p, 10);
+    p = skip_space_str(p);
+
+    if (*p == '"') {
+        p++;
+        const char *start = p;
+        while (*p && *p != '"') p++;
+        if (*p == '"') {
+            size_t len = p - start;
+            char *fname = malloc(len + 1);
+            memcpy(fname, start, len);
+            fname[len] = '\0';
+            curr_filename = fname;
+        }
+    }
+
+    curr_line = line;
+    curr_col = 1;
+    last_line_length = 0;
+    return true;
 }
 
 static int getc_nonspace(void)
@@ -246,6 +294,13 @@ static Token read_token_int(void)
 
     Token tok;
     switch (c) {
+    case '#':
+        if (handle_line_directive())
+            return read_token_int();
+        error("invalid preprocessor directive");
+        tok = make_null();
+        update_token_info(start_line, start_col, &tok);
+        return tok;
     case '0' ... '9':
         tok = read_number(c);
         update_token_info(start_line, start_col, &tok);

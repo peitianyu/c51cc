@@ -749,8 +749,22 @@ bool pp_preprocess_to_stdin(const char *filename)
     }
     
     char *line;
-    while ((line = pp_global_read_line()) != NULL)
+    char *last_file = NULL;
+    int last_line = 0;
+    while ((line = pp_global_read_line()) != NULL) {
+        const char *cur_file = pp_global_current_file();
+        int cur_line = pp_global_current_line();
+        if (cur_file) {
+            if (!last_file || strcmp(cur_file, last_file) != 0 || cur_line != last_line + 1) {
+                fprintf(tmp, "#line %d \"%s\"\n", cur_line, cur_file);
+            }
+            if (last_file) free(last_file);
+            last_file = strdup(cur_file);
+            last_line = cur_line;
+        }
         fprintf(tmp, "%s\n", line);
+    }
+    if (last_file) free(last_file);
     
     fclose(tmp);
     pp_global_free();
