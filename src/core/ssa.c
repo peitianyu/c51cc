@@ -264,13 +264,15 @@ SSABuild* ssa_build_create(void) {
 }
 
 // 添加全局变量到SSA Unit
-void ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init) {
+void ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init, bool is_static, bool is_extern) {
     if (!b || !b->unit) return;
     GlobalVar *gvar = ssa_alloc(sizeof(GlobalVar));
     gvar->name = ssa_strdup(name);
     gvar->type = type;
     gvar->init_value = init_value;
     gvar->has_init = has_init;
+    gvar->is_static = is_static;
+    gvar->is_extern = is_extern;
     list_push(b->unit->globals, gvar);
 }
 
@@ -281,6 +283,15 @@ static void ssa_build_reset(SSABuild *b) {
     b->cf_ctx = NULL;
     b->next_value = 0;
     b->next_block = 0;
+}
+
+static Func* ssa_find_func(SSAUnit *unit, const char *name) {
+    if (!unit || !name) return NULL;
+    for (Iter it = list_iter(unit->funcs); !iter_end(it);) {
+        Func *f = iter_next(&it);
+        if (f->name && strcmp(f->name, name) == 0) return f;
+    }
+    return NULL;
 }
 
 void ssa_build_destroy(SSABuild *b) {
@@ -296,6 +307,8 @@ static Func* ssa_build_function(SSABuild *b, const char *name, Ctype *ret) {
     f->ret_type = ret;
     f->params = make_list();
     f->blocks = make_list();
+    f->is_inline = false;
+    f->is_noreturn = false;
     
     list_push(b->unit->funcs, f);
     b->cur_func = f;
@@ -329,6 +342,15 @@ static ValueName ssa_build_const(SSABuild *b, int64_t val) {
     return i->dest;
 }
 
+static ValueName ssa_build_const_t(SSABuild *b, int64_t val, Ctype *type) {
+    Instr *i = ssa_make_instr(b, IROP_CONST);
+    i->dest = ssa_new_value(b);
+    i->imm.ival = val;
+    i->type = type;
+    ssa_emit(b, i);
+    return i->dest;
+}
+
 static ValueName ssa_build_binop(SSABuild *b, IrOp op, ValueName lhs, ValueName rhs) {
     Instr *i = ssa_make_instr(b, op);
     i->dest = ssa_new_value(b);
@@ -338,9 +360,28 @@ static ValueName ssa_build_binop(SSABuild *b, IrOp op, ValueName lhs, ValueName 
     return i->dest;
 }
 
+static ValueName ssa_build_binop_t(SSABuild *b, IrOp op, ValueName lhs, ValueName rhs, Ctype *type) {
+    Instr *i = ssa_make_instr(b, op);
+    i->dest = ssa_new_value(b);
+    i->type = type;
+    ssa_add_arg(i, lhs);
+    ssa_add_arg(i, rhs);
+    ssa_emit(b, i);
+    return i->dest;
+}
+
 static ValueName ssa_build_unop(SSABuild *b, IrOp op, ValueName val) {
     Instr *i = ssa_make_instr(b, op);
     i->dest = ssa_new_value(b);
+    ssa_add_arg(i, val);
+    ssa_emit(b, i);
+    return i->dest;
+}
+
+static ValueName ssa_build_unop_t(SSABuild *b, IrOp op, ValueName val, Ctype *type) {
+    Instr *i = ssa_make_instr(b, op);
+    i->dest = ssa_new_value(b);
+    i->type = type;
     ssa_add_arg(i, val);
     ssa_emit(b, i);
     return i->dest;
@@ -424,25 +465,28 @@ static ValueName ssa_build_offset(SSABuild *b, ValueName ptr, ValueName idx, int
     return i->dest;
 }
 
-static ValueName ssa_build_load(SSABuild *b, ValueName ptr, Ctype *type) {
+static ValueName ssa_build_load(SSABuild *b, ValueName ptr, Ctype *type, Ctype *mem_type) {
     Instr *i = ssa_make_instr(b, IROP_LOAD);
     i->dest = ssa_new_value(b);
     i->type = type;
+    i->mem_type = mem_type;
     ssa_add_arg(i, ptr);
     ssa_emit(b, i);
     return i->dest;
 }
 
-static void ssa_build_store(SSABuild *b, ValueName ptr, ValueName val) {
+static void ssa_build_store(SSABuild *b, ValueName ptr, ValueName val, Ctype *mem_type) {
     Instr *i = ssa_make_instr(b, IROP_STORE);
+    i->mem_type = mem_type;
     ssa_add_arg(i, ptr);
     ssa_add_arg(i, val);
     ssa_emit(b, i);
 }
 
-static ValueName ssa_build_addr(SSABuild *b, const char *var) {
+static ValueName ssa_build_addr(SSABuild *b, const char *var, Ctype *mem_type) {
     Instr *i = ssa_make_instr(b, IROP_ADDR);
     i->dest = ssa_new_value(b);
+    i->mem_type = mem_type;
     ssa_add_label(i, var);
     ssa_emit(b, i);
     return i->dest;
@@ -480,7 +524,7 @@ static ValueName gen_bitfield_read(SSABuild *b, ValueName base_ptr,
     Ctype *container_type = (container_bits == 32) ? ctype_long : 
                            (container_bits == 16) ? ctype_int : ctype_char;
     
-    ValueName word = ssa_build_load(b, addr, container_type);
+    ValueName word = ssa_build_load(b, addr, container_type, result_type);
     
     // 3. 右移丢弃低位: word >> bit_offset
     ValueName shifted = ssa_build_binop(b, IROP_SHR, word,
@@ -525,7 +569,7 @@ static void gen_bitfield_write(SSABuild *b, ValueName base_ptr,
         ssa_build_const(b, byte_offset), 1);
     
     // 2. 加载旧值
-    ValueName old_word = ssa_build_load(b, addr, container_type);
+    ValueName old_word = ssa_build_load(b, addr, container_type, container_type);
     
     // 3. 清除旧位: old & ~(mask << offset)
     uint64_t m = bitmask(bit_size);
@@ -540,7 +584,7 @@ static void gen_bitfield_write(SSABuild *b, ValueName base_ptr,
     
     // 5. 合并写入
     ValueName new_word = ssa_build_binop(b, IROP_OR, cleared, val_shifted);
-    ssa_build_store(b, addr, new_word);
+    ssa_build_store(b, addr, new_word, container_type);
 }
 
 static ValueName gen_expr(SSABuild *b, Ast *ast);
@@ -614,16 +658,24 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
     
     switch (ast->type) {
     case AST_LITERAL:
-        return ssa_build_const(b, ast->ival);
+        return ssa_build_const_t(b, ast->ival, ast->ctype);
         
     case AST_LVAR: {
         return ssa_build_read(b, ast->varname);
+    }
+
+    case AST_GVAR: {
+        ValueName addr = ssa_build_addr(b, ast->varname, ast->ctype);
+        return ssa_build_load(b, addr, ast->ctype, ast->ctype);
     }
         
     case AST_ADDR: {
         // &var
         if (ast->operand && ast->operand->type == AST_LVAR) {
-            return ssa_build_addr(b, ast->operand->varname);
+            return ssa_build_addr(b, ast->operand->varname, ast->operand->ctype);
+        }
+        if (ast->operand && ast->operand->type == AST_GVAR) {
+            return ssa_build_addr(b, ast->operand->varname, ast->operand->ctype);
         }
         // &array[i] 等复杂情况
         ValueName ptr = gen_expr(b, ast->operand);
@@ -633,7 +685,7 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
     case AST_DEREF: {
         // *ptr
         ValueName ptr = gen_expr(b, ast->operand);
-        return ssa_build_load(b, ptr, ast->ctype);
+        return ssa_build_load(b, ptr, ast->ctype, ast->ctype);
     }
         
     case AST_FUNCALL: {
@@ -657,6 +709,10 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             ssa_add_arg(i, *p);
         }
         ssa_emit(b, i);
+        Func *callee = ssa_find_func(b->unit, ast->fname);
+        if (callee && callee->is_noreturn) {
+            b->cur_block = NULL;
+        }
         return i->dest;
     }
     
@@ -669,14 +725,14 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         ValueName rhs = gen_expr(b, ast->right);
         // 类型转换（算术转换）
         // 简化：假设左右类型相同，实际应查找common type
-        ValueName res = ssa_build_binop(b, ast_to_irop(ast->type), lhs, rhs);
+        ValueName res = ssa_build_binop_t(b, ast_to_irop(ast->type), lhs, rhs, ast->ctype);
         return res;
     }
     
     case '~': case '!': {
         ValueName val = gen_expr(b, ast->operand);
         IrOp op = (ast->type == '~') ? IROP_NOT : IROP_LNOT;
-        return ssa_build_unop(b, op, val);
+        return ssa_build_unop_t(b, op, val, ast->ctype);
     }
     
     case '=': {
@@ -686,11 +742,17 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             val = gen_type_cast(b, val, ast->right->ctype, ast->left->ctype);
             ssa_build_write(b, ast->left->varname, val);
             return val;
+        } else if (ast->left && ast->left->type == AST_GVAR) {
+            ValueName addr = ssa_build_addr(b, ast->left->varname, ast->left->ctype);
+            ValueName val = gen_expr(b, ast->right);
+            val = gen_type_cast(b, val, ast->right->ctype, ast->left->ctype);
+            ssa_build_store(b, addr, val, ast->left->ctype);
+            return val;
         } else if (ast->left && ast->left->type == AST_DEREF) {
             // *ptr = val
             ValueName ptr = gen_expr(b, ast->left->operand);
             ValueName val = gen_expr(b, ast->right);
-            ssa_build_store(b, ptr, val);
+            ssa_build_store(b, ptr, val, ast->left->ctype);
             return val;
         }
         return gen_expr(b, ast->right);
@@ -738,7 +800,7 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         
         if (ast->struc->type == AST_LVAR) {
             // s.field -> (&s)->field
-            base = ssa_build_addr(b, ast->struc->varname);
+            base = ssa_build_addr(b, ast->struc->varname, ast->struc->ctype);
             struct_type = ast->struc->ctype;
         } else {
             base = gen_expr(b, ast->struc);
@@ -759,7 +821,7 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         // 普通字段：计算偏移地址后加载
         ValueName field_addr = ssa_build_offset(b, base,
             ssa_build_const(b, field->offset), 1);
-        return ssa_build_load(b, field_addr, field);
+        return ssa_build_load(b, field_addr, field, field);
     }
     
     default:
@@ -917,7 +979,12 @@ static void gen_func(SSABuild *b, Ast *ast) {
     Ctype *ret = (ast->ctype && ast->ctype->type == CTYPE_PTR)
                  ? ast->ctype->ptr : NULL;
     
-    ssa_build_function(b, ast->fname, ret);
+    Func *f = ssa_build_function(b, ast->fname, ret);
+    if (ast->ctype) {
+        CtypeAttr attr = get_attr(ast->ctype->attr);
+        f->is_inline = attr.ctype_inline;
+        f->is_noreturn = attr.ctype_noreturn;
+    }
     
     if (ast->params) {
         for (Iter it = list_iter(ast->params); !iter_end(it);) {
@@ -934,7 +1001,7 @@ static void gen_func(SSABuild *b, Ast *ast) {
         gen_stmt(b, ast->body);
     }
     
-    if (b->cur_block) {
+    if (b->cur_block && !f->is_noreturn) {
         ssa_build_ret(b, 0);
     }
 }
@@ -982,7 +1049,10 @@ void ssa_convert_ast(SSABuild *b, Ast *ast) {
                 init_val = ast->declinit->ival;
                 has_init = true;
             }
-            ssa_add_global(b, var->varname, var->ctype, init_val, has_init);
+            CtypeAttr attr = get_attr(var->ctype->attr);
+            if (attr.ctype_extern && !has_init) break;
+            ssa_add_global(b, var->varname, var->ctype, init_val, has_init,
+                           attr.ctype_static, attr.ctype_extern);
         }
         break;
     }
@@ -1003,6 +1073,25 @@ static const char* get_type_str(Ctype *type) {
     case CTYPE_PTR: return "ptr";
     default: return "int";
     }
+}
+
+static const char* get_addrspace_str(Ctype *type) {
+    if (!type) return NULL;
+    int data = get_attr(type->attr).ctype_data;
+    switch (data) {
+    case 1: return "data";
+    case 2: return "idata";
+    case 3: return "pdata";
+    case 4: return "xdata";
+    case 5: return "edata";
+    case 6: return "code";
+    default: return NULL;
+    }
+}
+
+static void print_addrspace_suffix(FILE *fp, Ctype *type) {
+    const char *s = get_addrspace_str(type);
+    if (s) fprintf(fp, " @%s", s);
 }
 
 static void print_instr(FILE *fp, Instr *i) {
@@ -1096,16 +1185,19 @@ static void print_instr(FILE *fp, Instr *i) {
     case IROP_LOAD: {
         ValueName *p = list_get(i->args, 0);
         fprintf(fp, "load v%d", *p);
+        print_addrspace_suffix(fp, i->mem_type);
         break;
     }
     case IROP_STORE: {
         ValueName *p = list_get(i->args, 0);
         ValueName *v = list_get(i->args, 1);
         fprintf(fp, "store v%d, v%d", *p, *v);
+        print_addrspace_suffix(fp, i->mem_type);
         break;
     }
     case IROP_ADDR:
         fprintf(fp, "addr @%s", (char*)list_get(i->labels, 0));
+        print_addrspace_suffix(fp, i->mem_type);
         break;
     case IROP_PHI: {
         fprintf(fp, "phi ");

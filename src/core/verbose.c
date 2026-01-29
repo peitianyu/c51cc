@@ -6,23 +6,23 @@ static const char *ctype_attr_string(int attr)
     /* 64 字节足够放下所有关键字 + 空格 + '\0' */
     static char buf[64];
     char *p = buf;
+    CtypeAttr a = get_attr(attr);
     *p = '\0';
 
     /* 注意顺序：一般按 C 语法习惯把 "const/volatile" 放最前 */
-    if (attr & (1 << 0)) { strcpy(p, "const ");     p += 6; }
-    if (attr & (1 << 1)) { strcpy(p, "volatile "); p += 9; }
-    if (attr & (1 << 2)) { strcpy(p, "restrict "); p += 9; }
-    if (attr & (1 << 3)) { strcpy(p, "static ");    p += 7; }
-    if (attr & (1 << 4)) { strcpy(p, "extern ");    p += 7; }
-    if (attr & (1 << 5)) { strcpy(p, "unsigned "); p += 9; }
-    if (attr & (1 << 6)) { strcpy(p, "register "); p += 9; }
+    if (a.ctype_const)    { strcpy(p, "const ");     p += 6; }
+    if (a.ctype_volatile) { strcpy(p, "volatile "); p += 9; }
+    if (a.ctype_restrict) { strcpy(p, "restrict "); p += 9; }
+    if (a.ctype_static)   { strcpy(p, "static ");   p += 7; }
+    if (a.ctype_extern)   { strcpy(p, "extern ");   p += 7; }
+    if (a.ctype_unsigned) { strcpy(p, "unsigned "); p += 9; }
+    if (a.ctype_register) { strcpy(p, "register "); p += 9; }
     /* 函数限定符 */
-    if (attr & (1 << 8)) { strcpy(p, "inline ");    p += 7; }
-    if (attr & (1 << 9)) { strcpy(p, "noreturn "); p += 10; }
+    if (a.ctype_inline)   { strcpy(p, "inline ");   p += 7; }
+    if (a.ctype_noreturn) { strcpy(p, "noreturn "); p += 10; }
 
     /* 51 地址空间关键字 */
-    int data = (attr >> 7) & 7;          /* 提取 3-bit data 字段 */
-    switch (data) {
+    switch (a.ctype_data) {
     case 1:  strcpy(p, "data ");    p += 5; break;
     case 2:  strcpy(p, "idata ");   p += 6; break;
     case 3:  strcpy(p, "pdata ");   p += 6; break;
@@ -327,10 +327,10 @@ char *ast_to_string(Ast *ast)
 
 char *token_to_string(const Token tok)
 {
-    enum TokenType ttype = get_ttype(tok);
+    int ttype = get_ttype(tok);
+    String s = make_string();
     if (ttype == TTYPE_NULL)
         return "(null)";
-    String s = make_string();
     switch (ttype) {
     case TTYPE_NULL:
         error("internal error: unknown token type: %d", get_ttype(tok));

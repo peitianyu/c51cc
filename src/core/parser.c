@@ -423,6 +423,15 @@ static Ctype *make_ptr_type(Ctype *ctype)
     return r;
 }
 
+static Ctype *clone_ctype_with_attr(Ctype *ctype, int attr)
+{
+    Ctype *r = malloc(sizeof(Ctype));
+    memcpy(r, ctype, sizeof(Ctype));
+    r->attr = attr;
+    list_push(ctypes, r);
+    return r;
+}
+
 static Ctype *make_array_type(Ctype *ctype, int len)
 {
     Ctype *r = malloc(sizeof(Ctype));
@@ -1037,8 +1046,7 @@ static Ast *read_expr_int(int prec)
         if (!rest)
             error("second operand missing");
         if (is_punct(tok, PUNCT_LSHIFT) || is_punct(tok, PUNCT_RSHIFT)) {
-            if ((ast->ctype != ctype_int && ast->ctype != ctype_char) ||
-                (rest->ctype != ctype_int && rest->ctype != ctype_char))
+            if (!is_inttype(ast->ctype) || !is_inttype(rest->ctype))
                 error("invalid operand to shift");
         }
         ast = ast_binop(get_punct(tok), ast, rest);
@@ -1486,8 +1494,7 @@ static Ctype *read_decl_spec(void)
         if (!is_punct(tok, '*')) {
             while(read_decl_ctype_attr(tok, &attr)) tok = read_token();
             unget_token(tok);
-            ctype->attr = attr;
-            return ctype;
+            return clone_ctype_with_attr(ctype, attr);
         }
         ctype = make_ptr_type(ctype);
     }
@@ -1658,7 +1665,7 @@ static Ast *read_decl_multi(Ctype *ctype, Token first_name)
     Token varname = first_name;
     
     while (1) {
-        if (ctype == ctype_void)
+        if (ctype->type == CTYPE_VOID)
             error("Storage size of '%s' is not known", token_to_string(varname));
         if (have_redefine_var(get_ident(varname)))
             error("Fuction redefine local val: %s", token_to_string(varname));
@@ -2153,7 +2160,7 @@ static Ast *read_decl_or_func_def(void)
     tok = peek_token();
     if (is_punct(tok, '('))
         return read_func_def(ctype, ident);
-    if (ctype == ctype_void)
+    if (ctype->type == CTYPE_VOID)
         error("Storage size of '%s' is not known", token_to_string(tok1));
     ctype = read_array_dimensions(ctype);
     if (is_punct(tok, '=') || ctype->type == CTYPE_ARRAY) {

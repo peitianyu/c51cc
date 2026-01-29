@@ -45,6 +45,7 @@ typedef struct Instr {
     IrOp        op;
     ValueName   dest;
     Ctype      *type;
+    Ctype      *mem_type;   // 内存访问对象类型（用于volatile/register/data）
     List       *args;       // ValueName* 列表
     List       *labels;     // char* 列表（用于跳转目标、符号名）
     union { 
@@ -69,6 +70,8 @@ typedef struct Func {
     List        *params;    // char* 列表
     List        *blocks;    // Block* 列表
     Block       *entry;
+    bool        is_inline;
+    bool        is_noreturn;
     // 中断函数信息
     bool        is_interrupt;
     int         interrupt_id;
@@ -81,6 +84,8 @@ typedef struct GlobalVar {
     Ctype       *type;
     long         init_value;    // 初始值（仅支持整数）
     bool         has_init;      // 是否有初始值
+    bool         is_static;
+    bool         is_extern;
 } GlobalVar;
 
 typedef struct SSAUnit {
@@ -110,7 +115,7 @@ void      ssa_convert_ast(SSABuild *b, Ast *ast);
 void      ssa_print(FILE *fp, SSAUnit *unit);
 
 // 全局变量添加（C51代码生成用）
-void      ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init);
+void      ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init, bool is_static, bool is_extern);
 
 /* ============================================================
  * 优化 Pass API (ssa_pass.c)
