@@ -1,8 +1,3 @@
-/*
- * 预处理器 - C语言预处理实现
- * 支持: #include, #define, #undef, #ifdef, #ifndef, #else, #endif
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
