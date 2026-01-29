@@ -92,38 +92,101 @@ static void free_reg(C51Gen *gen, C51Reg reg) {
     }
 }
 
-// 线性寄存器分配
+// 线性寄存器分配，考虑C51调用约定
 static void linear_regalloc(C51Gen *gen, Func *f) {
     int max_vreg = 0;
+    
+    if (!f->blocks) {
+        gen->vreg_map_size = 1;
+        gen->vreg_map = gen_alloc(sizeof(int));
+        gen->vreg_map[0] = -1;
+        return;
+    }
+    
+    // 扫描最大 vreg 号
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *blk = iter_next(&it);
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
-            if (inst->dest > max_vreg) max_vreg = inst->dest;
+        if (!blk) continue;
+        
+        if (blk->instrs) {
+            for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
+                Instr *inst = iter_next(&jt);
+                if (inst && inst->dest > max_vreg) max_vreg = inst->dest;
+            }
         }
-        for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
-            Instr *phi = iter_next(&jt);
-            if (phi->dest > max_vreg) max_vreg = phi->dest;
+        if (blk->phis) {
+            for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
+                Instr *phi = iter_next(&jt);
+                if (phi && phi->dest > max_vreg) max_vreg = phi->dest;
+            }
         }
     }
+    
+    if (max_vreg < 1) max_vreg = 1;
     
     gen->vreg_map_size = max_vreg + 1;
     gen->vreg_map = gen_alloc(sizeof(int) * gen->vreg_map_size);
     
+    for (int i = 0; i < gen->vreg_map_size; i++) {
+        gen->vreg_map[i] = -1;
+    }
+    
+    // C51 调用约定：R7, R5, R3, R1 用于参数
+    static const C51Reg param_regs[4] = {
+        C51_REG_R7, C51_REG_R5, C51_REG_R3, C51_REG_R1
+    };
+    
+    // 识别参数
+    int param_vregs[4] = {-1, -1, -1, -1};
+    int param_count = 0;
+    
+    if (f->entry && f->entry->instrs) {
+        for (Iter jt = list_iter(f->entry->instrs); !iter_end(jt);) {
+            Instr *inst = iter_next(&jt);
+            if (inst && inst->op == IROP_PARAM && param_count < 4) {
+                param_vregs[param_count++] = inst->dest;
+            }
+        }
+    }
+    
+    bool reg_used[8] = {false};
+    
+    // 分配参数寄存器
+    for (int i = 0; i < param_count && i < 4; i++) {
+        int vreg = param_vregs[i];
+        if (vreg > 0 && vreg < gen->vreg_map_size) {
+            gen->vreg_map[vreg] = param_regs[i];
+            reg_used[param_regs[i] - C51_REG_R0] = true;
+        }
+    }
+    
+    // 分配其他虚拟寄存器
     int spill_offset = 0;
     for (int i = 1; i <= max_vreg; i++) {
-        if (i <= 8) {
-            gen->vreg_map[i] = C51_REG_R0 + (i - 1);
-        } else {
+        if (gen->vreg_map[i] != -1) continue;
+        
+        int r;
+        for (r = 0; r < 8; r++) {
+            if (!reg_used[r]) {
+                gen->vreg_map[i] = C51_REG_R0 + r;
+                reg_used[r] = true;
+                break;
+            }
+        }
+        if (r == 8) {
+            // 溢出到内存（负值表示偏移）
             gen->vreg_map[i] = -(gen->frame.reg_spill_base + spill_offset);
             spill_offset += 1;
         }
     }
+    
+    gen->frame.reg_spill_base = spill_offset;
 }
 
 // 获取虚拟寄存器作为操作数
 static C51Operand get_vreg_op(C51Gen *gen, ValueName vreg) {
     if (vreg < 0 || vreg >= gen->vreg_map_size) {
+        // 越界返回安全地址
         return c51_direct(0x20);
     }
     
@@ -131,6 +194,7 @@ static C51Operand get_vreg_op(C51Gen *gen, ValueName vreg) {
     if (loc >= 0) {
         return c51_reg(loc);
     } else {
+        // 溢出到内部 RAM（0x20 起）
         return c51_direct(0x20 + (-loc));
     }
 }
@@ -138,6 +202,7 @@ static C51Operand get_vreg_op(C51Gen *gen, ValueName vreg) {
 /* ============================================================
  * 指令生成辅助函数
  * ============================================================ */
+
 
 static void emit_load_vreg(C51Gen *gen, ValueName vreg) {
     C51Operand src = get_vreg_op(gen, vreg);
@@ -230,23 +295,36 @@ static void emit_phi_copy(C51Gen *gen, ValueName src, ValueName dest) {
 }
 
 static int64_t *vreg_const_values = NULL;
+static int vreg_const_count = 0;
 
 static void scan_const_values(Func *f) {
     if (vreg_const_values) free(vreg_const_values);
     int max_vreg = 0;
+    
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *blk = iter_next(&it);
+        if (!blk->instrs) continue;
         for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
             Instr *inst = iter_next(&jt);
-            if (inst->dest > max_vreg) max_vreg = inst->dest;
+            if (inst && inst->dest > max_vreg) max_vreg = inst->dest;
+        }
+        if (blk->phis) {
+            for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
+                Instr *phi = iter_next(&jt);
+                if (phi && phi->dest > max_vreg) max_vreg = phi->dest;
+            }
         }
     }
-    vreg_const_values = calloc(max_vreg + 1, sizeof(int64_t));
+    
+    vreg_const_count = max_vreg + 1;
+    vreg_const_values = calloc(vreg_const_count, sizeof(int64_t));
+    
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *blk = iter_next(&it);
+        if (!blk->instrs) continue;
         for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
             Instr *inst = iter_next(&jt);
-            if (inst->op == IROP_CONST) {
+            if (inst && inst->op == IROP_CONST && inst->dest < vreg_const_count) {
                 vreg_const_values[inst->dest] = inst->imm.ival;
             }
         }
@@ -259,7 +337,11 @@ static void scan_const_values(Func *f) {
 
 // 加载立即数到 A
 static void emit_load_imm(C51Gen *gen, int64_t val) {
-    c51_emit_mov(gen->buf, c51_reg(C51_REG_A), c51_imm((int)val & 0xFF));
+    if (val == 0) {
+        c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_A));
+    } else {
+        c51_emit_mov(gen->buf, c51_reg(C51_REG_A), c51_imm((int)val & 0xFF));
+    }
     if (val > 255 || val < -128) {
         c51_emit_mov(gen->buf, c51_reg(C51_REG_B), c51_imm((int)(val >> 8) & 0xFF));
     }
@@ -279,64 +361,55 @@ static void emit_load_imm_opt(C51Gen *gen, int64_t val) {
 
 // 二元运算（带立即数优化）
 static void emit_binary_op(C51Gen *gen, IrOp op, ValueName dest, ValueName lhs, ValueName rhs) {
-    // 检查右操作数是否是常量立即数
+    // 检查右操作数是否为立即数
+    bool rhs_is_imm = false;
     int64_t rhs_imm = 0;
-    bool rhs_is_imm = (rhs > 0 && rhs < gen->vreg_map_size && vreg_const_values && vreg_const_values[rhs] != 0);
-    if (rhs_is_imm) {
+    
+    if (rhs >= 0 && rhs < vreg_const_count && vreg_const_values[rhs] != 0) {
         rhs_imm = vreg_const_values[rhs];
-        // 检查是否是8位立即数
         if (rhs_imm >= -128 && rhs_imm <= 255) {
             rhs_is_imm = true;
-        } else {
-            rhs_is_imm = false;  // 超出8位范围，需要寄存器
         }
     }
     
-    // 加载左操作数到A
+    // 加载左操作数
     C51Operand lhs_op = get_vreg_op(gen, lhs);
-    if (lhs_op.type == C51_OP_REG && lhs_op.reg == C51_REG_A) {
-        // 已经在A中，无需加载
-    } else {
+    if (!(lhs_op.type == C51_OP_REG && lhs_op.reg == C51_REG_A)) {
         c51_emit_mov(gen->buf, c51_reg(C51_REG_A), lhs_op);
     }
     
     if (rhs_is_imm) {
-        // 立即数优化路径
+        int imm = (int)rhs_imm & 0xFF;
         switch (op) {
         case IROP_ADD:
-            c51_emit_alu(gen->buf, C51_ADD, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            c51_emit_alu(gen->buf, C51_ADD, c51_reg(C51_REG_A), c51_imm(imm));
             break;
         case IROP_SUB:
             c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
-            c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), c51_imm(imm));
             break;
         case IROP_AND:
-            c51_emit_alu(gen->buf, C51_ANL, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            c51_emit_alu(gen->buf, C51_ANL, c51_reg(C51_REG_A), c51_imm(imm));
             break;
         case IROP_OR:
-            c51_emit_alu(gen->buf, C51_ORL, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            c51_emit_alu(gen->buf, C51_ORL, c51_reg(C51_REG_A), c51_imm(imm));
             break;
         case IROP_XOR:
-            c51_emit_alu(gen->buf, C51_XRL, c51_reg(C51_REG_A), c51_imm((int)rhs_imm & 0xFF));
+            c51_emit_alu(gen->buf, C51_XRL, c51_reg(C51_REG_A), c51_imm(imm));
             break;
         case IROP_MUL:
-            // MUL AB 需要B寄存器，无法立即数优化
-            c51_emit_mov(gen->buf, c51_reg(C51_REG_B), c51_imm((int)rhs_imm & 0xFF));
-            c51_emit(gen->buf, C51_MUL, c51_none(), c51_none(), NULL);
-            break;
         case IROP_DIV:
-            // DIV AB 需要B寄存器，无法立即数优化
-            c51_emit_mov(gen->buf, c51_reg(C51_REG_B), c51_imm((int)rhs_imm & 0xFF));
-            c51_emit(gen->buf, C51_DIV, c51_none(), c51_none(), NULL);
+            // 需要加载到 B
+            c51_emit_mov(gen->buf, c51_reg(C51_REG_B), c51_imm(imm));
+            c51_emit(gen->buf, (op == IROP_MUL) ? C51_MUL : C51_DIV, 
+                    c51_none(), c51_none(), NULL);
             break;
         default:
             emit_comment(gen, "TODO: op %d with imm", op);
             break;
         }
     } else {
-        // 寄存器路径
         C51Operand rhs_op = get_vreg_op(gen, rhs);
-        
         switch (op) {
         case IROP_ADD:
             c51_emit_alu(gen->buf, C51_ADD, c51_reg(C51_REG_A), rhs_op);
@@ -368,10 +441,12 @@ static void emit_binary_op(C51Gen *gen, IrOp op, ValueName dest, ValueName lhs, 
         }
     }
     
-    // 存储结果（如果目标不是A）
-    C51Operand dst_op = get_vreg_op(gen, dest);
-    if (!(dst_op.type == C51_OP_REG && dst_op.reg == C51_REG_A)) {
-        c51_emit_mov(gen->buf, dst_op, c51_reg(C51_REG_A));
+    // 存储结果
+    if (dest >= 0) {
+        C51Operand dst_op = get_vreg_op(gen, dest);
+        if (!(dst_op.type == C51_OP_REG && dst_op.reg == C51_REG_A)) {
+            c51_emit_mov(gen->buf, dst_op, c51_reg(C51_REG_A));
+        }
     }
 }
 
@@ -391,11 +466,11 @@ static void emit_unary_op(C51Gen *gen, IrOp op, ValueName dest, ValueName src) {
         char label_zero[32], label_end[32];
         c51_make_label(gen, label_zero, sizeof(label_zero), "lnot_zero");
         c51_make_label(gen, label_end, sizeof(label_end), "lnot_end");
-        c51_emit_branch(gen->buf, C51_JNZ, c51_reg(C51_REG_A), label_zero);
+        c51_emit_jump(gen->buf, C51_JNZ, label_zero);
         c51_emit_mov(gen->buf, c51_reg(C51_REG_A), c51_imm(1));
         c51_emit_jump(gen->buf, C51_SJMP, label_end);
         emit_label(gen, label_zero);
-        c51_emit_mov(gen->buf, c51_reg(C51_REG_A), c51_imm(0));
+        c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_A));
         emit_label(gen, label_end);
         break;
     }
@@ -404,7 +479,7 @@ static void emit_unary_op(C51Gen *gen, IrOp op, ValueName dest, ValueName src) {
         break;
     }
     
-    emit_store_vreg(gen, dest);
+    if (dest >= 0) emit_store_vreg(gen, dest);
 }
 
 // 比较运算
@@ -413,117 +488,160 @@ static void emit_compare(C51Gen *gen, IrOp op, ValueName dest, ValueName lhs, Va
     c51_make_label(gen, label_true, sizeof(label_true), "cmp_true");
     c51_make_label(gen, label_end, sizeof(label_end), "cmp_end");
     
-    emit_load_vreg(gen, lhs);
     C51Operand rhs_op = get_vreg_op(gen, rhs);
+    emit_load_vreg(gen, lhs);
     
-    c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
-    c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), rhs_op);
+    C51Op jump_op;
+    bool invert = false;
     
-    C51Op jump_op = C51_JZ;
     switch (op) {
-    case IROP_EQ: jump_op = C51_JZ; break;
-    case IROP_NE: jump_op = C51_JNZ; break;
-    case IROP_LT: jump_op = C51_JC; break;
-    case IROP_GT: jump_op = C51_JNC; break;
-    default: break;
+    case IROP_EQ:
+        c51_emit_alu(gen->buf, C51_XRL, c51_reg(C51_REG_A), rhs_op);
+        jump_op = C51_JZ;
+        break;
+    case IROP_NE:
+        c51_emit_alu(gen->buf, C51_XRL, c51_reg(C51_REG_A), rhs_op);
+        jump_op = C51_JNZ;
+        break;
+    case IROP_LT:
+        c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
+        c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), rhs_op);
+        jump_op = C51_JC;
+        break;
+    case IROP_GT:
+        c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
+        c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), rhs_op);
+        jump_op = C51_JNC;
+        break;
+    case IROP_LE:
+        c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
+        c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), rhs_op);
+        jump_op = C51_JNC;  // GT 的反向
+        break;
+    case IROP_GE:
+        c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_C));
+        c51_emit_alu(gen->buf, C51_SUBB, c51_reg(C51_REG_A), rhs_op);
+        jump_op = C51_JC;   // LT 的反向
+        break;
+    default:
+        emit_comment(gen, "Unknown compare op %d", op);
+        return;
     }
     
-    c51_emit_branch(gen->buf, jump_op, c51_reg(C51_REG_A), label_true);
-    c51_emit_mov(gen->buf, c51_reg(C51_REG_A), c51_imm(0));
+    c51_emit_jump(gen->buf, jump_op, label_true);
+    c51_emit_unary(gen->buf, C51_CLR, c51_reg(C51_REG_A));  // false = 0
     c51_emit_jump(gen->buf, C51_SJMP, label_end);
     emit_label(gen, label_true);
-    c51_emit_mov(gen->buf, c51_reg(C51_REG_A), c51_imm(1));
+    c51_emit_mov(gen->buf, c51_reg(C51_REG_A), c51_imm(1));  // true = 1
     emit_label(gen, label_end);
     
-    emit_store_vreg(gen, dest);
+    if (dest >= 0) emit_store_vreg(gen, dest);
 }
+
 
 // 生成单条指令
 static void emit_instr(C51Gen *gen, Instr *inst) {
+    if (!inst) return;
+    
     switch (inst->op) {
     case IROP_NOP:
         break;
         
     case IROP_CONST:
-        emit_load_imm_opt(gen, inst->imm.ival);
-        emit_store_vreg(gen, inst->dest);
+        emit_load_imm(gen, inst->imm.ival);
+        if (inst->dest >= 0) emit_store_vreg(gen, inst->dest);
         break;
         
-    case IROP_PARAM: {
-        if (inst->dest <= 4) {
-            C51Reg dst_reg = C51_REG_R0 + (inst->dest - 1);
-            c51_emit_mov(gen->buf, c51_reg(dst_reg), c51_reg(C51_REG_A));
-        }
+    case IROP_PARAM:
+        // 已在 regalloc 中处理
         break;
-    }
     
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV:
     case IROP_AND: case IROP_OR: case IROP_XOR:
-        if (inst->args->len >= 2) {
-            ValueName lhs = *(ValueName*)list_get(inst->args, 0);
-            ValueName rhs = *(ValueName*)list_get(inst->args, 1);
-            emit_binary_op(gen, inst->op, inst->dest, lhs, rhs);
+        if (!inst->args || inst->args->len < 2) {
+            emit_comment(gen, "ERROR: binary op missing args");
+            break;
+        }
+        {
+            ValueName *lhs = list_get(inst->args, 0);
+            ValueName *rhs = list_get(inst->args, 1);
+            if (lhs && rhs) {
+                emit_binary_op(gen, inst->op, inst->dest, *lhs, *rhs);
+            }
         }
         break;
         
     case IROP_NEG: case IROP_NOT: case IROP_LNOT:
-        if (inst->args->len >= 1) {
-            ValueName src = *(ValueName*)list_get(inst->args, 0);
-            emit_unary_op(gen, inst->op, inst->dest, src);
+        if (!inst->args || inst->args->len < 1) break;
+        {
+            ValueName *src = list_get(inst->args, 0);
+            if (src) emit_unary_op(gen, inst->op, inst->dest, *src);
         }
         break;
         
-    case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE:
-        if (inst->args->len >= 2) {
-            ValueName lhs = *(ValueName*)list_get(inst->args, 0);
-            ValueName rhs = *(ValueName*)list_get(inst->args, 1);
-            emit_compare(gen, inst->op, inst->dest, lhs, rhs);
+    case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: 
+    case IROP_LE: case IROP_GE:
+        if (!inst->args || inst->args->len < 2) break;
+        {
+            ValueName *lhs = list_get(inst->args, 0);
+            ValueName *rhs = list_get(inst->args, 1);
+            if (lhs && rhs) emit_compare(gen, inst->op, inst->dest, *lhs, *rhs);
         }
         break;
         
-    case IROP_JMP: {
-        char *label = list_get(inst->labels, 0);
-        c51_emit_jump(gen->buf, C51_LJMP, label);
+    case IROP_JMP:
+        if (inst->labels && inst->labels->len >= 1) {
+            char *label = list_get(inst->labels, 0);
+            if (label) c51_emit_jump(gen->buf, C51_LJMP, label);
+        }
         break;
-    }
     
-    case IROP_BR: {
-        ValueName cond = *(ValueName*)list_get(inst->args, 0);
-        char *label_true = list_get(inst->labels, 0);
-        char *label_false = list_get(inst->labels, 1);
-        
-        emit_load_vreg(gen, cond);
-        c51_emit_branch(gen->buf, C51_JNZ, c51_reg(C51_REG_A), label_true);
-        c51_emit_jump(gen->buf, C51_LJMP, label_false);
+    case IROP_BR:
+        if (inst->args && inst->args->len >= 1 && inst->labels && inst->labels->len >= 2) {
+            ValueName *cond = list_get(inst->args, 0);
+            char *label_true = list_get(inst->labels, 0);
+            char *label_false = list_get(inst->labels, 1);
+            if (cond && label_true && label_false) {
+                emit_load_vreg(gen, *cond);
+                c51_emit_jump(gen->buf, C51_JNZ, label_true);
+                c51_emit_jump(gen->buf, C51_LJMP, label_false);
+            }
+        }
         break;
-    }
     
     case IROP_RET:
-        if (inst->args->len > 0) {
-            ValueName val = *(ValueName*)list_get(inst->args, 0);
-            emit_load_vreg(gen, val);
+        if (inst->args && inst->args->len > 0) {
+            ValueName *val = list_get(inst->args, 0);
+            if (val) emit_load_vreg(gen, *val);
         }
         c51_emit_ret(gen->buf);
         break;
         
-    case IROP_CALL: {
-        char *fname = list_get(inst->labels, 0);
-        c51_emit_call(gen->buf, fname, true);
-        if (inst->dest > 0) {
-            emit_store_vreg(gen, inst->dest);
+    case IROP_CALL:
+        if (inst->labels && inst->labels->len >= 1) {
+            char *fname = list_get(inst->labels, 0);
+            if (fname) {
+                c51_emit_call(gen->buf, fname, true);
+                if (inst->dest >= 0) emit_store_vreg(gen, inst->dest);
+            }
         }
         break;
-    }
     
     case IROP_PHI:
-        emit_comment(gen, "PHI: v%d", inst->dest);
+        // PHI 本身不生成代码，COPY 在块末尾生成
+        if (inst->dest >= 0) {
+            emit_comment(gen, "PHI: v%d = phi ...", inst->dest);
+        }
         break;
         
     default:
-        emit_comment(gen, "TODO: IROP_%d", inst->op);
+        emit_comment(gen, "TODO: IROP_%d (dest=%d, args=%d)", 
+                    inst->op, inst->dest, inst->args ? inst->args->len : 0);
+        c51_emit(gen->buf, C51_NOP, c51_none(), c51_none(), NULL);
         break;
     }
 }
+
 
 /* ============================================================
  * 函数生成
@@ -532,61 +650,102 @@ static void emit_instr(C51Gen *gen, Instr *inst) {
 static bool func_has_ret(Func *f) {
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *blk = iter_next(&it);
+        if (!blk->instrs) continue;
         for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
             Instr *inst = iter_next(&jt);
-            if (inst->op == IROP_RET) return true;
+            if (inst && inst->op == IROP_RET) return true;
         }
     }
     return false;
 }
 
-static void emit_function(C51Gen *gen, Func *f) {
-    gen->cur_func = f;
-    gen->frame.local_size = 0;
-    gen->frame.param_size = f->params->len * 2;
-    gen->frame.reg_spill_base = 0;
-    gen->label_count = 0;
+
+
+
+// 关键修复：实际生成 MOV 指令而不仅是注释
+static void emit_phi_copies_for_block(C51Gen *gen, Block *pred) {
+    if (!pred) return;
     
-    // 中断函数特殊处理
-    if (f->is_interrupt) {
-        emit_comment(gen, "=======================================");
-        emit_comment(gen, "ISR %d, Bank %d", f->interrupt_id, f->bank_id);
-        emit_comment(gen, "=======================================");
+    int count = 0;
+    for (PhiCopy *p = phi_copies; p; p = p->next) {
+        if (p->pred == pred) count++;
+    }
+    if (count == 0) return;
+    
+    emit_comment(gen, "PHI copies for block %u", pred->id);
+    
+    // 检测并处理循环依赖（简单策略：全部通过 A 中转）
+    for (PhiCopy *p = phi_copies; p; p = p->next) {
+        if (p->pred != pred) continue;
         
-        // 生成 USING 指令（如果寄存器组不为0）
-        if (f->bank_id != 0) {
-            char using_str[32];
-            snprintf(using_str, sizeof(using_str), "USING %d", f->bank_id);
-            c51_emit_directive(gen->buf, using_str);
+        C51Operand src = get_vreg_op(gen, p->src);
+        C51Operand dst = get_vreg_op(gen, p->dest);
+        
+        // 跳过相同位置
+        if (src.type == dst.type && 
+            ((src.type == C51_OP_REG && src.reg == dst.reg) ||
+             (src.type == C51_OP_DIRECT && src.imm == dst.imm))) {
+            continue;
         }
         
-        // 函数标签
-        c51_emit_label(gen->buf, f->name);
-        
-        char proc_label[64];
-        snprintf(proc_label, sizeof(proc_label), "%s PROC", f->name);
-        c51_emit_directive(gen->buf, proc_label);
-        
-        // 生成函数体...
-        scan_const_values(f);
-        linear_regalloc(gen, f);
-        
-        // PHI copy 收集
+        // 8051 不支持内存到内存，必须通过 A
+        if (src.type == C51_OP_DIRECT && dst.type == C51_OP_DIRECT) {
+            c51_emit_mov(gen->buf, c51_reg(C51_REG_A), src);
+            c51_emit_mov(gen->buf, dst, c51_reg(C51_REG_A));
+        } else if (dst.type == C51_OP_REG && dst.reg == C51_REG_A) {
+            c51_emit_mov(gen->buf, c51_reg(C51_REG_A), src);
+        } else if (src.type == C51_OP_REG && src.reg == C51_REG_A) {
+            c51_emit_mov(gen->buf, dst, c51_reg(C51_REG_A));
+        } else {
+            c51_emit_mov(gen->buf, c51_reg(C51_REG_A), src);
+            c51_emit_mov(gen->buf, dst, c51_reg(C51_REG_A));
+        }
+    }
+}
+
+static void emit_function(C51Gen *gen, Func *f) {
+    if (!f || !f->name) return;
+    
+    gen->cur_func = f;
+    scan_const_values(f);
+    
+    // 重置并分配寄存器
+    if (gen->vreg_map) {
+        free(gen->vreg_map);
+        gen->vreg_map = NULL;
+    }
+    gen->vreg_map_size = 0;
+    linear_regalloc(gen, f);
+    
+    phi_copies_clear();
+    
+    // 收集 PHI 节点（全函数扫描）
+    if (f->blocks) {
         for (Iter it = list_iter(f->blocks); !iter_end(it);) {
             Block *blk = iter_next(&it);
+            if (!blk || !blk->phis) continue;
+            
             for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
                 Instr *phi = iter_next(&jt);
+                if (!phi || !phi->args || !phi->labels) continue;
+                
                 for (int i = 0; i < phi->args->len && i < phi->labels->len; i++) {
                     ValueName *src = list_get(phi->args, i);
                     char *pred_label = list_get(phi->labels, i);
+                    if (!src || !pred_label) continue;
+                    
+                    // 查找对应的前驱块
                     for (Iter kt = list_iter(f->blocks); !iter_end(kt);) {
                         Block *pred = iter_next(&kt);
+                        if (!pred) continue;
+                        
                         char label_buf[32];
                         if (pred == f->entry) {
                             snprintf(label_buf, sizeof(label_buf), "%s_entry", f->name);
                         } else {
                             snprintf(label_buf, sizeof(label_buf), "block%u", pred->id);
                         }
+                        
                         if (strcmp(pred_label, label_buf) == 0) {
                             phi_copy_add(*src, phi->dest, pred);
                             break;
@@ -595,152 +754,85 @@ static void emit_function(C51Gen *gen, Func *f) {
                 }
             }
         }
-        
-        // 生成基本块代码
+    }
+    
+    // 输出函数头
+    emit_comment(gen, "=======================================");
+    emit_comment(gen, "Function: %s", f->name);
+    emit_comment(gen, "=======================================");
+    
+    c51_emit_directive(gen->buf, "PUBLIC");
+    c51_emit_directive(gen->buf, f->name);
+    c51_emit_label(gen->buf, f->name);
+    
+    char proc_label[64];
+    snprintf(proc_label, sizeof(proc_label), "%s PROC", f->name);
+    c51_emit_directive(gen->buf, proc_label);
+
+    if (!f->is_interrupt) {
+        c51_emit_directive(gen->buf, "USING\t0");
+    }
+    
+    // 生成基本块
+    if (f->blocks) {
         for (Iter it = list_iter(f->blocks); !iter_end(it);) {
             Block *blk = iter_next(&it);
+            if (!blk) continue;
             
+            // 块标签（入口块除外）
             if (blk != f->entry) {
                 char block_label[32];
                 snprintf(block_label, sizeof(block_label), "block%u", blk->id);
                 emit_label(gen, block_label);
             }
             
-            for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
-                Instr *phi = iter_next(&jt);
-                emit_comment(gen, "PHI: v%d = phi ...", phi->dest);
-            }
-            
-            for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-                Instr *inst = iter_next(&jt);
-                
-                if (inst->op == IROP_JMP || inst->op == IROP_BR ||
-                    inst->op == IROP_RET || inst->op == IROP_CALL) {
-                    PhiCopy *copy = phi_copies;
-                    while (copy) {
-                        if (copy->pred == blk) {
-                            emit_phi_copy(gen, copy->src, copy->dest);
-                        }
-                        copy = copy->next;
+            // 输出 PHI 注释（便于调试）
+            if (blk->phis) {
+                for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
+                    Instr *phi = iter_next(&jt);
+                    if (phi && phi->dest >= 0) {
+                        emit_comment(gen, "PHI: v%d", phi->dest);
                     }
                 }
-                
+            }
+            
+            // 收集普通指令和终结指令
+            Instr *terminator = NULL;
+            List *normal_instrs = make_list();
+            
+            if (blk->instrs) {
+                for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
+                    Instr *inst = iter_next(&jt);
+                    if (!inst) continue;
+                    
+                    if (is_terminator(inst)) {
+                        terminator = inst;
+                        break;  // 终结指令暂停，稍后处理
+                    }
+                    list_push(normal_instrs, inst);
+                }
+            }
+            
+            // 生成普通指令
+            for (Iter jt = list_iter(normal_instrs); !iter_end(jt);) {
+                Instr *inst = iter_next(&jt);
                 emit_instr(gen, inst);
             }
+            list_free(normal_instrs);
             
-            if (blk->instrs->len == 0 || !is_terminator(list_get(blk->instrs, blk->instrs->len - 1))) {
-                PhiCopy *copy = phi_copies;
-                while (copy) {
-                    if (copy->pred == blk) {
-                        emit_phi_copy(gen, copy->src, copy->dest);
-                    }
-                    copy = copy->next;
-                }
-            }
-        }
-        
-        phi_copies_clear();
-        
-        // RETI 返回（中断返回）
-        c51_emit(gen->buf, C51_RETI, c51_none(), c51_none(), NULL);
-        
-        char endp_label[64];
-        snprintf(endp_label, sizeof(endp_label), "%s ENDP", f->name);
-        c51_emit_directive(gen->buf, endp_label);
-        c51_emit_directive(gen->buf, "");
-        
-        free(gen->vreg_map);
-        gen->vreg_map = NULL;
-        return;
-    }
-    
-    scan_const_values(f);
-    linear_regalloc(gen, f);
-    
-    // 收集 PHI copy 信息
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
-            Instr *phi = iter_next(&jt);
-            for (int i = 0; i < phi->args->len && i < phi->labels->len; i++) {
-                ValueName *src = list_get(phi->args, i);
-                char *pred_label = list_get(phi->labels, i);
-                for (Iter kt = list_iter(f->blocks); !iter_end(kt);) {
-                    Block *pred = iter_next(&kt);
-                    char label_buf[32];
-                    if (pred == f->entry) {
-                        snprintf(label_buf, sizeof(label_buf), "%s_entry", f->name);
-                    } else {
-                        snprintf(label_buf, sizeof(label_buf), "block%u", pred->id);
-                    }
-                    if (strcmp(pred_label, label_buf) == 0) {
-                        phi_copy_add(*src, phi->dest, pred);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    
-    // 函数头
-    emit_comment(gen, "=======================================");
-    emit_comment(gen, "Function: %s", f->name);
-    emit_comment(gen, "=======================================");
-    c51_emit_directive(gen->buf, "PUBLIC");
-    c51_emit_directive(gen->buf, f->name);
-    
-    // 添加函数入口标签（用于符号表）
-    c51_emit_label(gen->buf, f->name);
-    
-    char proc_label[64];
-    snprintf(proc_label, sizeof(proc_label), "%s PROC", f->name);
-    c51_emit_directive(gen->buf, proc_label);
-    
-    // 生成基本块代码
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        
-        if (blk != f->entry) {
-            char block_label[32];
-            snprintf(block_label, sizeof(block_label), "block%u", blk->id);
-            emit_label(gen, block_label);
-        }
-        
-        for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
-            Instr *phi = iter_next(&jt);
-            emit_comment(gen, "PHI: v%d = phi ...", phi->dest);
-        }
-        
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
+            // 关键修复：在终结指令之前生成 PHI 拷贝！
+            emit_phi_copies_for_block(gen, blk);
             
-            if (inst->op == IROP_JMP || inst->op == IROP_BR ||
-                inst->op == IROP_RET || inst->op == IROP_CALL) {
-                PhiCopy *copy = phi_copies;
-                while (copy) {
-                    if (copy->pred == blk) {
-                        emit_phi_copy(gen, copy->src, copy->dest);
-                    }
-                    copy = copy->next;
-                }
-            }
-            
-            emit_instr(gen, inst);
-        }
-        
-        if (blk->instrs->len == 0 || !is_terminator(list_get(blk->instrs, blk->instrs->len - 1))) {
-            PhiCopy *copy = phi_copies;
-            while (copy) {
-                if (copy->pred == blk) {
-                    emit_phi_copy(gen, copy->src, copy->dest);
-                }
-                copy = copy->next;
+            // 生成终结指令（跳转/返回）
+            if (terminator) {
+                emit_instr(gen, terminator);
             }
         }
     }
     
     phi_copies_clear();
     
+    // 隐式返回（如果函数没有显式 RET）
     if (!func_has_ret(f)) {
         char exit_label[64];
         snprintf(exit_label, sizeof(exit_label), "%s_exit", f->name);
@@ -753,8 +845,12 @@ static void emit_function(C51Gen *gen, Func *f) {
     c51_emit_directive(gen->buf, endp_label);
     c51_emit_directive(gen->buf, "");
     
-    free(gen->vreg_map);
-    gen->vreg_map = NULL;
+    // 清理
+    if (gen->vreg_map) {
+        free(gen->vreg_map);
+        gen->vreg_map = NULL;
+    }
+    gen->vreg_map_size = 0;
 }
 
 /* ============================================================
@@ -900,11 +996,8 @@ static void emit_global_vars(C51Buffer *buf, SSAUnit *unit) {
         GlobalVar *gvar = iter_next(&it);
         int raw_attr = safe_get_attr(gvar->type->attr);
         if (is_register_type(raw_attr)) {
-            if (!has_sfr) {
-                c51_emit_comment(buf, "SFR Declarations (register keyword)");
-                has_sfr = true;
-            }
-            emit_sfr_decl(buf, gvar);
+            emit_sfr_decl(buf, gvar);  // 生成 P1 EQU 90H
+            continue;
         }
     }
     if (has_sfr) c51_emit_directive(buf, "");

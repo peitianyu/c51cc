@@ -191,7 +191,6 @@ void c51_emit_unary(C51Buffer *buf, C51Op op, C51Operand opd) {
 }
 
 void c51_emit_jump(C51Buffer *buf, C51Op op, const char *label) {
-    assert(op == C51_SJMP || op == C51_AJMP || op == C51_LJMP);
     C51Line *line = new_line(buf);
     line->op = op;
     line->dst.type = C51_OP_LABEL;
@@ -510,7 +509,18 @@ void c51_optimize_peephole(C51Buffer *buf) {
                 changed = true;
                 continue;
             }
-            
+
+            // 模式：CLR A; MOV A, Rx -> MOV A, Rx
+            if (line->op == C51_CLR && 
+                line->dst.type == C51_OP_REG && line->dst.reg == C51_REG_A &&
+                next->op == C51_MOV &&
+                next->dst.type == C51_OP_REG && next->dst.reg == C51_REG_A) {
+                // 删除 CLR A
+                buf->head = next;  // 或调整链表
+                free_line(line);
+                changed = true;
+            }
+                        
             // 模式6: SJMP .+2 (跳转到下一条) -> 删除
             if (line->op == C51_SJMP && line->src.type == C51_OP_REL) {
                 if (line->src.imm == 0) {
@@ -622,6 +632,19 @@ void c51_print_asm(C51Buffer *buf, FILE *fp) {
             fprintf(fp, "\n");
             continue;
         }
+
+        if (line->op == C51_SJMP || line->op == C51_AJMP) {
+            fprintf(fp, "    %s", c51_op_name(line->op));
+            // SJMP 只打印 dst（标签）或 src（相对），不能同时打印
+            if (line->dst.type == C51_OP_LABEL) {
+                fprintf(fp, " %s", line->dst.label);
+            } else if (line->src.type == C51_OP_REL) {
+                // 计算实际标签名或仅打印偏移
+                fprintf(fp, " %+d", line->src.imm);
+            }
+            fprintf(fp, "\n");
+            continue;
+        }
         
         // 普通指令
         fprintf(fp, "    %s", c51_op_name(line->op));
@@ -635,6 +658,8 @@ void c51_print_asm(C51Buffer *buf, FILE *fp) {
                 print_operand(fp, line->src);
             }
         }
+
+        
         
         // 行内注释
         if (line->comment) {
