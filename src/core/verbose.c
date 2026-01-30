@@ -1,4 +1,5 @@
 #include "cc.h"
+#include <ctype.h>
 
 /* 把 Ctype::attr 转成 "const volatile static …" 这种字符串 */
 static const char *ctype_attr_string(int attr)
@@ -96,14 +97,23 @@ static void ast_to_string_int(String *buf, Ast *ast)
     case AST_LITERAL:
         switch (ast->ctype->type) {
         case CTYPE_BOOL:
-            string_appendf(buf, "%s", ast->ival ? "true" : "false");
+            if (get_attr(ast->ctype->attr).ctype_register)
+                string_appendf(buf, "0x%02X", (unsigned char)ast->ival);
+            else
+                string_appendf(buf, "%s", ast->ival ? "true" : "false");
+            break;
         case CTYPE_CHAR:
             if (ast->ival == '\n')
                 string_appendf(buf, "'\n'");
             else if (ast->ival == '\\')
                 string_appendf(buf, "'\\\\'");
-            else
-                string_appendf(buf, "'%c'", ast->ival);
+            else {
+                unsigned char uc = (unsigned char)ast->ival;
+                if (isprint(uc))
+                    string_appendf(buf, "'%c'", uc);
+                else
+                    string_appendf(buf, "0x%02X", uc);
+            }
             break;
         case CTYPE_INT:
             string_appendf(buf, "%d", ast->ival);
