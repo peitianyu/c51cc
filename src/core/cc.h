@@ -288,6 +288,7 @@ extern char *make_label(void);
 extern List *read_toplevels(void);
 extern bool is_inttype(Ctype *ctype);
 extern bool is_flotype(Ctype *ctype);
+extern CtypeAttr get_attr(int in_attr);
 
 /* pp.c - 预处理器 */
 extern bool pp_preprocess_to_stdin(const char *filename);
@@ -309,13 +310,5 @@ static inline void errorf(char *file, int line, char *fmt, ...)
     va_end(args);
     exit(1);
 }
-
-static inline CtypeAttr get_attr(int in_attr) 
-{
-    union { CtypeAttr c_attr; int i_attr; }attr = {0};
-    attr.i_attr = in_attr;
-    return attr.c_attr;
-}
-
 
 #endif /* CC_H */

@@ -2195,3 +2195,9 @@ List *read_toplevels(void)
     return r;
 }
 
+CtypeAttr get_attr(int in_attr) 
+{
+    union { CtypeAttr c_attr; int i_attr; }attr = {0};
+    attr.i_attr = in_attr;
+    return attr.c_attr;
+}

@@ -90,7 +90,7 @@
     ✔ 代数简化 (Algebraic Simplification) - 基础框架 @done(26-01-27 16:50)
     ✔ 强度削弱 (Strength Reduction) - 基础框架 @done(26-01-27 16:50)
     ✔ PHI节点优化 - 基础框架 @done(26-01-27 16:50)
-    ☐ 需要处理ctypeattr类型在ssa中优化问题
+    ✔ 需要处理ctypeattr类型在ssa中优化问题 @done(26-01-30 09:46)
         ✔ const: 作为只读提示(可选)与检查 - SSA类型透传与折叠基础 @done(26-01-29 10:26)
         ✔ const: 全局只读load折叠 @done(26-01-29 10:33)
         ✔ volatile: load/store禁止删除、合并、重排 (DCE已接入) @done(26-01-29 10:05)
@@ -110,8 +110,7 @@
     ☐ Copy传播
     ☐ 控制流优化
     ☐ 循环优化 (LICM等)
-    ☐ Use-Def/Def-Use链构建
-    ☐ 支配树实现
+☐ 添加对于数组/指针/结构体的支持
 
 ✔ 创建预处理器模块 (pp.c) @done(26-01-28 09:26)
     ✔ #include - 文件包含 @done(26-01-28 09:26)
