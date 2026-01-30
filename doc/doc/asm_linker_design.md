@@ -213,6 +213,8 @@ ObjFile 示例（JSON）：
 - c51_link：输入源码路径后选择测试编号 2。
 - 示例：test/test_all.c 或 test/test_c51.c。
 - 完整样例：wsl -d test bash -lc "set -e; cd /mnt/d/ws/test/C51CC; printf '2\ntest/test_c51_full.c\n' | ./build.sh"
+- 多文件输入：依次输入多个源码路径，以空行结束。
+  - 示例：`printf '2\ntest/multi1_main.c\ntest/multi1_lib.c\n\n' | ./build.sh`
 
 ### 9.4 窥孔优化候选（补充）
 - 冗余搬运（已实现）：`mov A, rX` + `mov rY, A` → `mov rY, rX`；连续重复 `mov` 合并。

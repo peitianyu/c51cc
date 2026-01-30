@@ -24,6 +24,7 @@ static Dict *typedefenv = &EMPTY_DICT;
 static List *localvars = NULL;
 static List *labels = NULL;
 static bool in_cond_expr = false;  // 标记是否在?:的then分支中
+static Dict *parser_empty_dict = &EMPTY_DICT;
 
 static Ctype *ctype_void = &(Ctype){0, CTYPE_VOID, 0, NULL};
 static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
@@ -52,6 +53,27 @@ static bool is_type_keyword(const Token tok);
 static Ctype *read_decl_spec(void);
 static Ctype *read_array_dimensions(Ctype *basetype);
 static void read_func_ptr_params(void);
+
+void parser_reset(void)
+{
+    globalenv = make_dict(parser_empty_dict);
+    struct_defs = make_dict(parser_empty_dict);
+    union_defs = make_dict(parser_empty_dict);
+    enum_defs = make_dict(parser_empty_dict);
+    functionenv = make_dict(parser_empty_dict);
+    typedefenv = make_dict(parser_empty_dict);
+
+    localenv = NULL;
+    localvars = NULL;
+    labels = NULL;
+
+    ctypes = make_list();
+    strings = make_list();
+    flonums = make_list();
+
+    labelseq = 0;
+    in_cond_expr = false;
+}
 
 static Ast *ast_uop(int type, Ctype *ctype, Ast *operand)
 {

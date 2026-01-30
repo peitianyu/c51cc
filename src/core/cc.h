@@ -284,6 +284,7 @@ extern void set_current_filename(const char *filename);
 extern List *strings;
 extern List *flonums;
 extern List *ctypes;
+extern void parser_reset(void);
 extern char *make_label(void);
 extern List *read_toplevels(void);
 extern bool is_inttype(Ctype *ctype);

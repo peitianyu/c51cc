@@ -426,34 +426,49 @@ ObjFile *c51_link(List *objs)
 
 extern List *ctypes;
 extern List *strings;
+extern void parser_reset(void);
 extern List *read_toplevels(void);
 extern void set_current_filename(const char *filename);
 extern char *ast_to_string(Ast *ast);
 ObjFile *c51_gen_from_ssa(void *ssa);
 
 TEST(test, c51_link) {
-    char infile[256];
-    printf("file path for C51 link test: ");
-    if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
+    char line[256];
+    List *files = make_list();
+    printf("file path(s) for C51 link test (empty line to end): ");
+    while (fgets(line, sizeof line, stdin)) {
+        char *path = strtok(line, "\n");
+        if (!path || !*path) break;
+        list_push(files, c51_strdup(path));
+    }
+    if (files->len == 0)
         puts("open fail"), exit(1);
 
-    set_current_filename(infile);
+    List *objs = make_list();
+    for (Iter fit = list_iter(files); !iter_end(fit);) {
+        char *infile = iter_next(&fit);
+        if (!freopen(infile, "r", stdin))
+            puts("open fail"), exit(1);
+        set_current_filename(infile);
+        parser_reset();
 
-    SSABuild *b = ssa_build_create();
-    List *toplevels = read_toplevels();
+        SSABuild *b = ssa_build_create();
+        List *toplevels = read_toplevels();
 
-    printf("\n=== Parsing AST ===\n");
-    for (Iter i = list_iter(toplevels); !iter_end(i);) {
-        Ast *v = iter_next(&i);
-        printf("ast: %s\n", ast_to_string(v));
-        ssa_convert_ast(b, v);
+        printf("\n=== Parsing AST (%s) ===\n", infile);
+        for (Iter i = list_iter(toplevels); !iter_end(i);) {
+            Ast *v = iter_next(&i);
+            printf("ast: %s\n", ast_to_string(v));
+            ssa_convert_ast(b, v);
+        }
+
+        ObjFile *obj = c51_gen_from_ssa(b->unit);
+        ASSERT(obj);
+        list_push(objs, obj);
+        ssa_build_destroy(b);
+        parser_reset();
     }
 
-    ObjFile *obj = c51_gen_from_ssa(b->unit);
-    ASSERT(obj);
-
-    List *objs = make_list();
-    list_push(objs, obj);
     ObjFile *out = c51_link(objs);
     ASSERT(out);
 
@@ -464,10 +479,9 @@ TEST(test, c51_link) {
     ASSERT_EQ(c51_write_hex(stdout, out), 0);
 
     objfile_free(out);
+    list_free(files);
+    free(files);
     list_free(objs);
     free(objs);
-    ssa_build_destroy(b);
-    list_free(strings);
-    list_free(ctypes);
 }
 #endif
