@@ -84,7 +84,7 @@
 
 ## 5. ObjFile 与链接器
 ### 5.1 ObjFile（最小字段）
-- Section：kind/size/align/bytes 或 asm_lines
+- Section：kind/size/align/bytes/asm_instrs
 - Symbol：name/kind/section/value/size/flags
 - Reloc：section/offset/kind/symbol/addend
 
@@ -170,18 +170,60 @@ ObjFile 示例（JSON）：
 - reentrant/interrupt
 
 ## 9. 实现流程（步骤化）
-1) 定义 ObjFile 结构与序列化（JSON）。
-2) 建立 section/symbol/reloc 收集接口（供 ASM/汇编器使用）。
-3) 实现最小汇编器：解析 .section/.global/.extern/.label/.db/.dw/.ds/.org/.end。
-4) 完成 ASM 打印器：输出可被汇编器解析的伪指令与指令序列。
-5) 指令选择：先覆盖基本算术、load/store、分支。
-6) 寄存器分配：线性扫描 + spill 插入。
-7) 指令降级：常量装载、分支组合、调用序言/尾声。
-8) 窥孔优化：MOV 冗余、短跳转、无效栈操作。
-9) 链接器：段布局 + 重定位回填 + 输出 ASM/HEX。
-10) 扩展地址空间与更多重定位类型。
+1) 【已完成】定义 ObjFile 结构与基本接口。
+2) 【已完成】建立 section/symbol/reloc 收集接口（供 ASM/汇编器使用）。
+3) 【已完成】实现最小汇编器：解析 .section/.global/.extern/.label/.db/.dw/.ds/.org/.end。
+4) 【已完成】完成 ASM 打印器：输出可被汇编器解析的伪指令与指令序列。
+5) 【已完成（最小）】指令选择：先覆盖基本算术、load/store、分支（输出 C51 指令）。
+6) 【已完成（最小）】寄存器分配：基于使用计数的分配 + 简单直访 spill（未实现线性扫描）。
+7) 【已完成（最小）】指令降级：基础比较/逻辑/跳转降级为 C51 指令序列。
+8) 【已完成（最小）】窥孔优化：仅移除 mov rX,rX。
+9) 【已完成】链接器：段布局 + 重定位回填 + 输出 ASM/HEX。
+10) 【待办】扩展地址空间与更多重定位类型。
+
+### 9.1 测试约定
+- c51_gen/c51_link 的测试通过输入源码文件路径进行验证（参考 ssa_pass）。
+- 测试直接输出 ASM/HEX 到 stdout 便于前端查看。
+
+### 9.2 实现单（逐项推进）
+1) 真实机器码编码：为核心指令建立 8051 opcode/寻址模式表，并替换占位 `.db`。
+  - 测试：运行 c51_gen/c51_link，验证 ASM 与 HEX。
+2) 线性扫描寄存器分配：live interval + spill 到 DATA 栈，处理间接寻址约束。
+  - 测试：构造高寄存器压力样例并运行 c51_gen/c51_link。
+3) 调用约定完善：参数溢出到栈、callee/caller-save、返回值协议。
+  - 测试：函数多参数/嵌套调用样例。
+4) 有符号比较与位移降级：补齐 `LT/LE/GT/GE` 的符号语义与算术右移。
+  - 测试：符号/无符号对比样例。
+5) 地址空间访问：`MOV/MOVX/MOVC` 按类型属性选择。
+  - 测试：xdata/code 指针访问样例。
+6) 窥孔优化扩展：短跳转选择、冗余 load/store 清理。
+  - 测试：控制流与短跳转样例。
+7) 伪指令扩展：完善剩余伪指令与汇编器诊断。
+  - 测试：汇编器解析错误/边界输入。
+
+### 9.3 测试指令（当前约定）
+wsl -d test bash -lc "set -e; cd /mnt/d/ws/test/C51CC; printf '2\ntest/test_c51.c\n' | ./build.sh || true"
+- c51_gen：输入源码路径后选择测试编号 1。
+- c51_link：输入源码路径后选择测试编号 2。
+- 示例：test/test_all.c 或 test/test_c51.c。
 
 ## 10. 文件组织建议
-- c51_gen.c：指令选择/寄存器分配/降级/ASM 输出/ObjFile 构建
-- c51_link.c：段布局/符号解析/重定位/HEX 输出
-- c51_obj.h：ObjFile/Section/Symbol/Reloc 结构与公共接口
+- c51_gen.c：后端生成器
+  - 输入：SSA/后端 IR。
+  - 负责：指令选择、寄存器分配、指令降级、窥孔优化。
+  - 输出：ObjFile（段/符号/重定位/可选 asm_lines）。
+  - 不负责：段布局与重定位回填。
+
+- c51_asm.c：汇编器与 ASM 打印
+  - 汇编器：解析伪指令（.section/.global/.extern/.label/.db/.dw/.ds/.org/.end）并构建 ObjFile。
+  - 打印器：从 ObjFile 输出可回读的 ASM（含段、可见性、标签、数据）。
+  - 不负责：链接时布局与回填。
+
+- c51_link.c：链接器
+  - 输入：多个 ObjFile。
+  - 负责：段合并与布局、符号最终地址、重定位回填、HEX 输出。
+  - 依赖：c51_obj 的基础结构与收集接口。
+
+- c51_obj.h：唯一头文件接口
+  - 定义：ObjFile/Section/Symbol/Reloc 结构与枚举。
+  - 提供：最小创建/收集/输出接口声明（供 gen/asm/link 共享）。
