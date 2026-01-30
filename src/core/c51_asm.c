@@ -99,6 +99,20 @@ static const char *section_kind_str(SectionKind kind)
     }
 }
 
+static const char *default_section_name(SectionKind kind)
+{
+    switch (kind) {
+    case SEC_CODE:  return ".text";
+    case SEC_DATA:  return ".data";
+    case SEC_IDATA: return ".idata";
+    case SEC_XDATA: return ".xdata";
+    case SEC_BIT:   return ".bit";
+    case SEC_BDATA: return ".bdata";
+    case SEC_PDATA: return ".pdata";
+    default:        return ".text";
+    }
+}
+
 static SectionKind parse_section_kind(const char *s, bool *ok)
 {
     if (ok) *ok = true;
@@ -112,6 +126,30 @@ static SectionKind parse_section_kind(const char *s, bool *ok)
     if (!strcmp(s, "PDATA")) return SEC_PDATA;
     if (ok) *ok = false;
     return SEC_CODE;
+}
+
+static SectionKind parse_section_kind_relaxed(const char *s, bool *ok)
+{
+    if (!s) { if (ok) *ok = false; return SEC_CODE; }
+    char buf[32];
+    size_t n = strlen(s);
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    for (size_t i = 0; i < n; ++i)
+        buf[i] = (char)toupper((unsigned char)s[i]);
+    buf[n] = '\0';
+    return parse_section_kind(buf, ok);
+}
+
+static int ensure_section_by_kind(ObjFile *obj, SectionKind kind)
+{
+    int idx = 0;
+    for (Iter it = list_iter(obj->sections); !iter_end(it); ++idx) {
+        Section *sec = iter_next(&it);
+        if (sec && sec->kind == kind)
+            return idx;
+    }
+    const char *name = default_section_name(kind);
+    return objfile_add_section(obj, name, kind, 0, 1);
 }
 
 static Symbol *find_symbol(ObjFile *obj, const char *name)
@@ -320,6 +358,18 @@ ObjFile *c51_asm_from_text(const char *text, char **error, int *error_line)
                             cur_sec = objfile_add_section(obj, name, kind, 0, align);
                     }
                 }
+            } else if (!strcmp(dir, ".space")) {
+                if (!*args) {
+                    set_error(error, error_line, line_no, "space kind required");
+                } else {
+                    bool ok = true;
+                    SectionKind kind = parse_section_kind_relaxed(args, &ok);
+                    if (!ok) {
+                        set_error(error, error_line, line_no, "unknown space kind: %s", args);
+                    } else {
+                        cur_sec = ensure_section_by_kind(obj, kind);
+                    }
+                }
             } else if (!strcmp(dir, ".global")) {
                 if (!*args) {
                     set_error(error, error_line, line_no, "global needs symbols");
@@ -387,6 +437,29 @@ ObjFile *c51_asm_from_text(const char *text, char **error, int *error_line)
                         }
                     }
                 }
+            } else if (!strcmp(dir, ".interrupt")) {
+                if (!*args) {
+                    set_error(error, error_line, line_no, "interrupt id required");
+                } else {
+                    int irq = 0;
+                    if (!parse_int(args, &irq))
+                        set_error(error, error_line, line_no, "invalid interrupt id: %s", args);
+                    else if (irq < 0 || irq > 7)
+                        set_error(error, error_line, line_no, "interrupt id out of range: %d", irq);
+                }
+            } else if (!strcmp(dir, ".using")) {
+                if (!*args) {
+                    set_error(error, error_line, line_no, "using bank id required");
+                } else {
+                    int bank = 0;
+                    if (!parse_int(args, &bank))
+                        set_error(error, error_line, line_no, "invalid bank id: %s", args);
+                    else if (bank < 0 || bank > 3)
+                        set_error(error, error_line, line_no, "bank id out of range: %d", bank);
+                }
+            } else if (!strcmp(dir, ".reentrant")) {
+                if (*args)
+                    set_error(error, error_line, line_no, "reentrant takes no args");
             } else if (!strcmp(dir, ".end")) {
                 break;
             } else {

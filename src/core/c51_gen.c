@@ -4,6 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct MmioInfo MmioInfo;
+static void mmio_map_put(const char *name, int addr, bool is_bit);
+static MmioInfo *mmio_map_get(const char *name);
+static int parse_reg_rn(const char *s);
+
 static void *gen_alloc(size_t size)
 {
     void *p = calloc(1, size);
@@ -116,6 +121,17 @@ static bool is_signed_type(Ctype *type)
     return true;
 }
 
+static bool is_register_mmio(Ctype *type)
+{
+    if (!type) return false;
+    return get_attr(type->attr).ctype_register != 0;
+}
+
+static bool is_register_bit(Ctype *type)
+{
+    return is_register_mmio(type) && type->type == CTYPE_BOOL;
+}
+
 static Section *get_or_create_section(ObjFile *obj, const char *name, SectionKind kind)
 {
     int idx = 0;
@@ -141,6 +157,12 @@ static int section_index_from_ptr(ObjFile *obj, Section *sec)
 static void emit_global_data(ObjFile *obj, GlobalVar *g)
 {
     if (!g || !g->name) return;
+    if (is_register_mmio(g->type)) {
+        if (g->has_init) {
+            mmio_map_put(g->name, (int)g->init_value, is_register_bit(g->type));
+        }
+        return;
+    }
     if (g->is_extern) {
         objfile_add_symbol(obj, g->name, SYM_DATA, -1, 0, g->type ? g->type->size : 0, SYM_FLAG_EXTERN);
         return;
@@ -163,7 +185,12 @@ static void emit_global_data(ObjFile *obj, GlobalVar *g)
     int offset = sec->bytes_len;
     int size = g->type ? g->type->size : 1;
 
-    if (g->has_init) {
+    if (g->init_instr && g->init_instr->imm.blob.bytes && g->init_instr->imm.blob.len > 0) {
+        int copy_len = g->init_instr->imm.blob.len;
+        if (copy_len > size) copy_len = size;
+        section_append_bytes(sec, g->init_instr->imm.blob.bytes, copy_len);
+        if (size > copy_len) section_append_zeros(sec, size - copy_len);
+    } else if (g->has_init) {
         long v = g->init_value;
         if (size == 1) {
             unsigned char b = (unsigned char)(v & 0xFF);
@@ -431,8 +458,9 @@ static void peephole_section_asminstrs(Section *sec)
     if (!sec || !sec->asminstrs) return;
     List *out = make_list();
 
-    for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
-        AsmInstr *ins = iter_next(&it);
+    for (int i = 0; i < sec->asminstrs->len; ++i) {
+        AsmInstr *ins = list_get(sec->asminstrs, i);
+        AsmInstr *next = (i + 1 < sec->asminstrs->len) ? list_get(sec->asminstrs, i + 1) : NULL;
         if (!ins || !ins->op) {
             list_push(out, ins);
             continue;
@@ -444,6 +472,30 @@ static void peephole_section_asminstrs(Section *sec)
             if (is_reg_eq(dst, src)) {
                 free_asminstr(ins);
                 continue;
+            }
+            if (next && next->op && !strcmp(next->op, "mov") && next->args && next->args->len >= 2) {
+                char *ndst = list_get(next->args, 0);
+                char *nsrc = list_get(next->args, 1);
+                if (dst && src && ndst && nsrc) {
+                    if (!strcmp(dst, "A") && parse_reg_rn(src) >= 0 && !strcmp(nsrc, "A") && !strcmp(ndst, src)) {
+                        list_push(out, ins);
+                        free_asminstr(next);
+                        ++i;
+                        continue;
+                    }
+                    if (parse_reg_rn(dst) >= 0 && !strcmp(src, "A") && !strcmp(ndst, "A") && !strcmp(nsrc, dst)) {
+                        list_push(out, ins);
+                        free_asminstr(next);
+                        ++i;
+                        continue;
+                    }
+                    if (!strcmp(dst, "A") && parse_reg_rn(src) >= 0 && !strcmp(ndst, "A") && !strcmp(nsrc, src)) {
+                        list_push(out, ins);
+                        free_asminstr(next);
+                        ++i;
+                        continue;
+                    }
+                }
             }
         }
 
@@ -532,6 +584,69 @@ static bool parse_direct_symbol(const char *s, int *out, const char **label)
         return true;
     }
     if (label && s && is_ident(s)) {
+        *label = s;
+        if (out) *out = 0;
+        return true;
+    }
+    return false;
+}
+
+static bool parse_bit_symbol(const char *s, int *out, const char **label)
+{
+    if (!s || !*s) return false;
+    if (!strcmp(s, "A.0") || !strcmp(s, "ACC.0")) {
+        if (out) *out = 0xE0;
+        if (label) *label = NULL;
+        return true;
+    }
+    if (!strcmp(s, "A.1") || !strcmp(s, "ACC.1")) {
+        if (out) *out = 0xE1;
+        if (label) *label = NULL;
+        return true;
+    }
+    if (!strcmp(s, "A.2") || !strcmp(s, "ACC.2")) {
+        if (out) *out = 0xE2;
+        if (label) *label = NULL;
+        return true;
+    }
+    if (!strcmp(s, "A.3") || !strcmp(s, "ACC.3")) {
+        if (out) *out = 0xE3;
+        if (label) *label = NULL;
+        return true;
+    }
+    if (!strcmp(s, "A.4") || !strcmp(s, "ACC.4")) {
+        if (out) *out = 0xE4;
+        if (label) *label = NULL;
+        return true;
+    }
+    if (!strcmp(s, "A.5") || !strcmp(s, "ACC.5")) {
+        if (out) *out = 0xE5;
+        if (label) *label = NULL;
+        return true;
+    }
+    if (!strcmp(s, "A.6") || !strcmp(s, "ACC.6")) {
+        if (out) *out = 0xE6;
+        if (label) *label = NULL;
+        return true;
+    }
+    if (!strcmp(s, "A.7") || !strcmp(s, "ACC.7")) {
+        if (out) *out = 0xE7;
+        if (label) *label = NULL;
+        return true;
+    }
+    if (!strcmp(s, "B.0")) { if (out) *out = 0xF0; if (label) *label = NULL; return true; }
+    if (!strcmp(s, "B.1")) { if (out) *out = 0xF1; if (label) *label = NULL; return true; }
+    if (!strcmp(s, "B.2")) { if (out) *out = 0xF2; if (label) *label = NULL; return true; }
+    if (!strcmp(s, "B.3")) { if (out) *out = 0xF3; if (label) *label = NULL; return true; }
+    if (!strcmp(s, "B.4")) { if (out) *out = 0xF4; if (label) *label = NULL; return true; }
+    if (!strcmp(s, "B.5")) { if (out) *out = 0xF5; if (label) *label = NULL; return true; }
+    if (!strcmp(s, "B.6")) { if (out) *out = 0xF6; if (label) *label = NULL; return true; }
+    if (!strcmp(s, "B.7")) { if (out) *out = 0xF7; if (label) *label = NULL; return true; }
+    if (parse_int_val(s, out)) {
+        if (label) *label = NULL;
+        return true;
+    }
+    if (label && is_ident(s)) {
         *label = s;
         if (out) *out = 0;
         return true;
@@ -785,6 +900,27 @@ static void encode_section_bytes(ObjFile *obj, Section *sec)
             const char *src_label = NULL;
             bool dst_direct_ok = parse_direct_symbol(dst, &direct_dst, &dst_label);
             bool src_direct_ok = parse_direct_symbol(src, &direct_src, &src_label);
+
+            if (dst && !strcmp(dst, "C")) {
+                int bit = 0;
+                const char *bit_label = NULL;
+                if (parse_bit_symbol(src, &bit, &bit_label)) {
+                    emit_u8(sec, 0xA2);
+                    if (bit_label) emit_abs8(obj, sec, bit_label);
+                    else emit_u8(sec, (unsigned char)(bit & 0xFF));
+                    continue;
+                }
+            }
+            if (src && !strcmp(src, "C")) {
+                int bit = 0;
+                const char *bit_label = NULL;
+                if (parse_bit_symbol(dst, &bit, &bit_label)) {
+                    emit_u8(sec, 0x92);
+                    if (bit_label) emit_abs8(obj, sec, bit_label);
+                    else emit_u8(sec, (unsigned char)(bit & 0xFF));
+                    continue;
+                }
+            }
 
             if (dst && !strcmp(dst, "DPTR")) {
                 const char *imm_label = NULL;
@@ -1096,6 +1232,12 @@ typedef struct {
 } AddrInfo;
 
 static Dict *g_addr_map = NULL;
+static Dict *g_mmio_map = NULL;
+
+struct MmioInfo {
+    int addr;
+    bool is_bit;
+};
 
 static char *vreg_key(ValueName v)
 {
@@ -1104,11 +1246,33 @@ static char *vreg_key(ValueName v)
     return gen_strdup(buf);
 }
 
+static void mmio_map_put(const char *name, int addr, bool is_bit)
+{
+    if (!g_mmio_map || !name) return;
+    MmioInfo *info = gen_alloc(sizeof(MmioInfo));
+    info->addr = addr;
+    info->is_bit = is_bit;
+    dict_put(g_mmio_map, gen_strdup(name), info);
+}
+
+static MmioInfo *mmio_map_get(const char *name)
+{
+    if (!g_mmio_map || !name) return NULL;
+    return (MmioInfo *)dict_get(g_mmio_map, (char *)name);
+}
+
 static void addr_map_put(ValueName v, const char *label, Ctype *mem_type)
 {
     if (!g_addr_map || v <= 0 || !label) return;
     AddrInfo *info = gen_alloc(sizeof(AddrInfo));
-    info->label = label;
+    MmioInfo *mmio = mmio_map_get(label);
+    if (mmio) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "0x%02X", mmio->addr & 0xFF);
+        info->label = gen_strdup(buf);
+    } else {
+        info->label = label;
+    }
     info->mem_type = mem_type;
     dict_put(g_addr_map, vreg_key(v), info);
 }
@@ -1538,6 +1702,13 @@ static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         AddrInfo *info = addr_map_get(ptr);
         Ctype *mtype = ins->mem_type ? ins->mem_type : (info ? info->mem_type : NULL);
         int space = data_space_kind(mtype);
+        if (info && info->label && is_register_bit(mtype)) {
+            emit_ins2(sec, "mov", "C", info->label);
+            emit_ins2(sec, "mov", "A", "#0");
+            emit_ins1(sec, "rlc", "A");
+            emit_ins2(sec, "mov", vreg(ins->dest), "A");
+            break;
+        }
         if (info && info->label) {
             if (space == 6) {
                 char imm[128];
@@ -1577,6 +1748,11 @@ static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         Ctype *mtype = ins->mem_type ? ins->mem_type : (info ? info->mem_type : NULL);
         int space = data_space_kind(mtype);
         emit_ins2(sec, "mov", "A", vreg(val));
+        if (info && info->label && is_register_bit(mtype)) {
+            emit_ins2(sec, "mov", "C", "ACC.0");
+            emit_ins2(sec, "mov", info->label, "C");
+            break;
+        }
         if (info && info->label) {
             if (space == 4 || space == 5) {
                 char imm[128];
@@ -1722,12 +1898,92 @@ static void lower_section_asminstrs(Section *sec)
     sec->asminstrs = out;
 }
 
+static int instr_estimated_size(const AsmInstr *ins)
+{
+    if (!ins || !ins->op) return 0;
+    if (!strcmp(ins->op, ".label")) return 0;
+    if (!strcmp(ins->op, "sjmp") || !strcmp(ins->op, "jnz") || !strcmp(ins->op, "jz") ||
+        !strcmp(ins->op, "jc") || !strcmp(ins->op, "jnc")) return 2;
+    if (!strcmp(ins->op, "djnz") || !strcmp(ins->op, "cjne")) return 3;
+    if (!strcmp(ins->op, "lcall") || !strcmp(ins->op, "ljmp")) return 3;
+    if (!strcmp(ins->op, "ret") || !strcmp(ins->op, "reti") || !strcmp(ins->op, "nop")) return 1;
+    if (!strcmp(ins->op, "rrc") || !strcmp(ins->op, "rlc") || !strcmp(ins->op, "rr") ||
+        !strcmp(ins->op, "rl") || !strcmp(ins->op, "swap") || !strcmp(ins->op, "mul") ||
+        !strcmp(ins->op, "div")) return 1;
+    if (!strcmp(ins->op, "push") || !strcmp(ins->op, "pop")) return 2;
+    if (!strcmp(ins->op, "movx") || !strcmp(ins->op, "movc")) return 1;
+    if (!strcmp(ins->op, "add") || !strcmp(ins->op, "subb") || !strcmp(ins->op, "anl") ||
+        !strcmp(ins->op, "orl") || !strcmp(ins->op, "xrl") || !strcmp(ins->op, "clr") ||
+        !strcmp(ins->op, "cpl")) return 2;
+    if (!strcmp(ins->op, "mov")) return 3;
+    return 1;
+}
+
+static void fixup_short_jumps(Section *sec)
+{
+    if (!sec || !sec->asminstrs) return;
+    bool changed = true;
+
+    while (changed) {
+        changed = false;
+        Dict *label_offsets = make_dict(NULL);
+        int offset = 0;
+
+        for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+            AsmInstr *ins = iter_next(&it);
+            if (ins && ins->op && !strcmp(ins->op, ".label") && ins->args && ins->args->len > 0) {
+                char *name = list_get(ins->args, 0);
+                if (name) {
+                    int *p = gen_alloc(sizeof(int));
+                    *p = offset;
+                    dict_put(label_offsets, gen_strdup(name), p);
+                }
+            } else {
+                offset += instr_estimated_size(ins);
+            }
+        }
+
+        offset = 0;
+        for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+            AsmInstr *ins = iter_next(&it);
+            if (!ins || !ins->op) continue;
+            if (!strcmp(ins->op, ".label")) continue;
+            if (!strcmp(ins->op, "sjmp") && ins->args && ins->args->len == 1) {
+                char *label = list_get(ins->args, 0);
+                int *target = label ? (int *)dict_get(label_offsets, label) : NULL;
+                if (target) {
+                    int rel = *target - (offset + 2);
+                    if (rel < -128 || rel > 127) {
+                        free(ins->op);
+                        ins->op = gen_strdup("ljmp");
+                        changed = true;
+                    }
+                }
+            }
+            offset += instr_estimated_size(ins);
+        }
+
+        if (label_offsets) {
+            for (Iter it = list_iter(label_offsets->list); !iter_end(it);) {
+                DictEntry *e = iter_next(&it);
+                if (!e) continue;
+                free(e->key);
+                free(e->val);
+            }
+            dict_clear(label_offsets);
+            label_offsets = NULL;
+        }
+    }
+}
+
 ObjFile *c51_gen_from_ssa(void *ssa)
 {
     SSAUnit *unit = (SSAUnit *)ssa;
     if (!unit) return NULL;
 
     ObjFile *obj = objfile_new();
+
+    g_mmio_map = make_dict(NULL);
 
     for (Iter git = list_iter(unit->globals); !iter_end(git);) {
         GlobalVar *g = iter_next(&git);
@@ -1762,6 +2018,7 @@ ObjFile *c51_gen_from_ssa(void *ssa)
         regalloc_section_asminstrs(sec);
         lower_section_asminstrs(sec);
         peephole_section_asminstrs(sec);
+        fixup_short_jumps(sec);
         encode_section_bytes(obj, sec);
 
         if (g_addr_map) {
@@ -1774,6 +2031,17 @@ ObjFile *c51_gen_from_ssa(void *ssa)
             dict_clear(g_addr_map);
             g_addr_map = NULL;
         }
+    }
+
+    if (g_mmio_map) {
+        for (Iter it = list_iter(g_mmio_map->list); !iter_end(it);) {
+            DictEntry *e = iter_next(&it);
+            if (!e) continue;
+            free(e->key);
+            free(e->val);
+        }
+        dict_clear(g_mmio_map);
+        g_mmio_map = NULL;
     }
 
     return obj;

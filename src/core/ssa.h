@@ -51,6 +51,10 @@ typedef struct Instr {
     union { 
         int64_t ival; 
         double fval; 
+        struct {
+            unsigned char *bytes;
+            int len;
+        } blob; // 数组/结构/联合等初始化字节序列
     } imm;
 } Instr;
 
@@ -84,6 +88,7 @@ typedef struct GlobalVar {
     Ctype       *type;
     long         init_value;    // 初始值（仅支持整数）
     bool         has_init;      // 是否有初始值
+    Instr       *init_instr;    // 可选：初始化指令（数组/结构/联合等，数据在 imm.blob）
     bool         is_static;
     bool         is_extern;
 } GlobalVar;
@@ -115,7 +120,9 @@ void      ssa_convert_ast(SSABuild *b, Ast *ast);
 void      ssa_print(FILE *fp, SSAUnit *unit);
 
 // 全局变量添加（C51代码生成用）
-void      ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init, bool is_static, bool is_extern);
+void      ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init,
+                         Instr *init_instr,
+                         bool is_static, bool is_extern);
 
 /* ============================================================
  * 优化 Pass API (ssa_pass.c)

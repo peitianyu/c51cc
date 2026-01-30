@@ -12,6 +12,10 @@ int g_arr1[] = {1, 2, 3};
 // char g_arr2[] = "123";
 // char* g_arr2 = "abc";
 
+/* register 关键字用于映射 SFR/SBIT */
+register char P0 = 0x80;
+register bool P0_0 = 0x80;
+
 struct A{
     int a;
     int b;
@@ -54,8 +58,17 @@ int add(int a, int b)
     return a + b;
 }
 
+int test_sfr_ops()
+{
+    P0 = 0x5A;
+    P0_0 = 1;
+    if (P0_0)
+        return P0;
+    return 0;
+}
+
 int main() {
     
 
-    return test_basic_arith();
+    return test_sfr_ops();
 }

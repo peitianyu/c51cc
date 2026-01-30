@@ -25,6 +25,8 @@ static void* ssa_alloc(size_t size) {
     return p;
 }
 
+static Dict *g_local_agg_map = NULL;
+
 static char* ssa_strdup(const char *s) {
     if (!s) return NULL;
     size_t len = strlen(s) + 1;
@@ -36,6 +38,8 @@ static char* ssa_strdup(const char *s) {
 static ValueName ssa_new_value(SSABuild *b) {
     return ++b->next_value;  // 从1开始，0表示undef
 }
+
+static ValueName gen_expr(SSABuild *b, Ast *ast);
 
 static Instr* ssa_make_instr(SSABuild *b, IrOp op) {
     Instr *i = ssa_alloc(sizeof(Instr));
@@ -264,16 +268,144 @@ SSABuild* ssa_build_create(void) {
 }
 
 // 添加全局变量到SSA Unit
-void ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init, bool is_static, bool is_extern) {
+void ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init,
+                    Instr *init_instr,
+                    bool is_static, bool is_extern) {
     if (!b || !b->unit) return;
     GlobalVar *gvar = ssa_alloc(sizeof(GlobalVar));
     gvar->name = ssa_strdup(name);
     gvar->type = type;
     gvar->init_value = init_value;
     gvar->has_init = has_init;
+    gvar->init_instr = init_instr;
     gvar->is_static = is_static;
     gvar->is_extern = is_extern;
     list_push(b->unit->globals, gvar);
+}
+
+static void write_scalar_bytes(unsigned char *buf, int offset, int size, long val)
+{
+    for (int i = 0; i < size; ++i)
+        buf[offset + i] = (unsigned char)((val >> (8 * i)) & 0xFF);
+}
+
+static void fill_array_init_bytes(unsigned char *buf, int size, Ctype *elem, List *items)
+{
+    if (!buf || !elem || !items) return;
+    int offset = 0;
+    for (Iter it = list_iter(items); !iter_end(it) && offset < size; ) {
+        Ast *one = iter_next(&it);
+        if (!one) { offset += elem->size; continue; }
+        if (elem->type == CTYPE_ARRAY && one->type == AST_ARRAY_INIT) {
+            fill_array_init_bytes(buf + offset, elem->size, elem->ptr, one->arrayinit);
+        } else if (is_inttype(elem) && one->type == AST_LITERAL) {
+            write_scalar_bytes(buf, offset, elem->size, one->ival);
+        }
+        offset += elem->size;
+    }
+}
+
+static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items)
+{
+    if (!buf || !type || !items || type->type != CTYPE_STRUCT) return;
+    int idx = 0;
+    for (Iter it = list_iter(type->fields->list); !iter_end(it); ++idx) {
+        DictEntry *e = iter_next(&it);
+        if (!e) continue;
+        Ctype *field = dict_get(type->fields, e->key);
+        Ast *init = list_get(items, idx);
+        if (!field || !init) continue;
+
+        int off = field->offset;
+        if (field->bit_size > 0) {
+            if (init->type == AST_LITERAL) {
+                int bit = field->bit_offset;
+                int byte = off + (bit / 8);
+                int mask = 1 << (bit % 8);
+                if (init->ival) buf[byte] |= (unsigned char)mask;
+                else buf[byte] &= (unsigned char)(~mask);
+            }
+            continue;
+        }
+
+        if (field->type == CTYPE_ARRAY && init->type == AST_ARRAY_INIT) {
+            fill_array_init_bytes(buf + off, field->size, field->ptr, init->arrayinit);
+        } else if (field->type == CTYPE_ARRAY && init->type == AST_STRING && field->ptr->type == CTYPE_CHAR) {
+            int slen = (int)strlen(init->sval) + 1;
+            if (slen > field->size) slen = field->size;
+            memcpy(buf + off, init->sval, (size_t)(slen - 1));
+            buf[off + slen - 1] = '\0';
+        } else if (field->type == CTYPE_STRUCT && init->type == AST_STRUCT_INIT) {
+            fill_struct_init_bytes(buf + off, field, init->structinit);
+        } else if (is_inttype(field) && init->type == AST_LITERAL) {
+            write_scalar_bytes(buf, off, field->size, init->ival);
+        }
+
+        if (type->is_union)
+            break;
+    }
+}
+
+static const char *ensure_local_agg_label(SSABuild *b, const char *var, bool *is_new)
+{
+    if (is_new) *is_new = false;
+    if (!b || !var || !b->cur_func || !b->cur_func->name) return var;
+    if (!g_local_agg_map) g_local_agg_map = make_dict(NULL);
+
+    char key[256];
+    snprintf(key, sizeof(key), ".L_%s_%s", b->cur_func->name, var);
+    char *label = (char *)dict_get(g_local_agg_map, key);
+    if (!label) {
+        label = ssa_strdup(key);
+        dict_put(g_local_agg_map, ssa_strdup(key), label);
+        if (is_new) *is_new = true;
+    }
+    return label;
+}
+
+
+static Instr *build_global_init_instr(SSABuild *b, Ctype *type, Ast *init)
+{
+    if (!type || !init) return NULL;
+    if (type->type == CTYPE_ARRAY) {
+        int size = type->size;
+        if (size <= 0) return NULL;
+        unsigned char *buf = ssa_alloc((size_t)size);
+        if (init->type == AST_STRING && type->ptr->type == CTYPE_CHAR) {
+            int slen = (int)strlen(init->sval) + 1;
+            if (slen > size) slen = size;
+            memcpy(buf, init->sval, (size_t)(slen - 1));
+            buf[slen - 1] = '\0';
+        } else if (init->type == AST_ARRAY_INIT) {
+            fill_array_init_bytes(buf, size, type->ptr, init->arrayinit);
+        } else {
+            return NULL;
+        }
+        Instr *i = ssa_make_instr(b, IROP_CONST);
+        i->imm.blob.bytes = buf;
+        i->imm.blob.len = size;
+        return i;
+    }
+    if (type->type == CTYPE_STRUCT && init->type == AST_STRUCT_INIT) {
+        int size = type->size;
+        if (size <= 0) return NULL;
+        unsigned char *buf = ssa_alloc((size_t)size);
+        fill_struct_init_bytes(buf, type, init->structinit);
+        Instr *i = ssa_make_instr(b, IROP_CONST);
+        i->imm.blob.bytes = buf;
+        i->imm.blob.len = size;
+        return i;
+    }
+    if (is_inttype(type) && init->type == AST_LITERAL) {
+        int size = type->size;
+        unsigned char *buf = ssa_alloc((size_t)size);
+        write_scalar_bytes(buf, 0, size, init->ival);
+        Instr *i = ssa_make_instr(b, IROP_CONST);
+        i->imm.blob.bytes = buf;
+        i->imm.blob.len = size;
+        return i;
+    }
+    return NULL;
 }
 
 static void ssa_build_reset(SSABuild *b) {
@@ -836,12 +968,31 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
     case AST_DECL: {
         Ast *var = ast->declvar;
         if (var && var->type == AST_LVAR) {
-            if (ast->declinit) {
-                ValueName val = gen_expr(b, ast->declinit);
-                val = gen_type_cast(b, val, ast->declinit->ctype, var->ctype);
-                ssa_build_write(b, var->varname, val);
+            if (var->ctype && (var->ctype->type == CTYPE_STRUCT || var->ctype->type == CTYPE_ARRAY)) {
+                bool is_new = false;
+                Instr *init_instr = NULL;
+                long init_val = 0;
+                bool has_init = false;
+                if (ast->declinit) {
+                    if (ast->declinit->type == AST_LITERAL && is_inttype(ast->declinit->ctype)) {
+                        init_val = ast->declinit->ival;
+                        has_init = true;
+                    }
+                    init_instr = build_global_init_instr(b, var->ctype, ast->declinit);
+                    if (init_instr && init_instr->imm.blob.bytes && init_instr->imm.blob.len > 0)
+                        has_init = true;
+                }
+                const char *label = ensure_local_agg_label(b, var->varname, &is_new);
+                if (is_new)
+                    ssa_add_global(b, label, var->ctype, init_val, has_init, init_instr, true, false);
             } else {
-                ssa_build_write(b, var->varname, 0);
+                if (ast->declinit) {
+                    ValueName val = gen_expr(b, ast->declinit);
+                    val = gen_type_cast(b, val, ast->declinit->ctype, var->ctype);
+                    ssa_build_write(b, var->varname, val);
+                } else {
+                    ssa_build_write(b, var->varname, 0);
+                }
             }
         }
         break;
@@ -1044,14 +1195,22 @@ void ssa_convert_ast(SSABuild *b, Ast *ast) {
         if (var && var->type == AST_GVAR) {
             long init_val = 0;
             bool has_init = false;
-            if (ast->declinit && ast->declinit->type == AST_LITERAL &&
-                is_inttype(ast->declinit->ctype)) {
-                init_val = ast->declinit->ival;
-                has_init = true;
+            Instr *init_instr = NULL;
+            if (ast->declinit) {
+                if (ast->declinit->type == AST_LITERAL &&
+                    is_inttype(ast->declinit->ctype)) {
+                    init_val = ast->declinit->ival;
+                    has_init = true;
+                }
+                init_instr = build_global_init_instr(b, var->ctype, ast->declinit);
+                if (init_instr && init_instr->imm.blob.bytes && init_instr->imm.blob.len > 0) {
+                    has_init = true;
+                }
             }
             CtypeAttr attr = get_attr(var->ctype->attr);
             if (attr.ctype_extern && !has_init) break;
             ssa_add_global(b, var->varname, var->ctype, init_val, has_init,
+                           init_instr,
                            attr.ctype_static, attr.ctype_extern);
         }
         break;
