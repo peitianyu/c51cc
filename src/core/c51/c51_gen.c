@@ -52,6 +52,8 @@ ObjFile *c51_gen_from_ssa(void *ssa)
 
             for (Iter it = list_iter(b->instrs); !iter_end(it);) {
                 Instr *ins = iter_next(&it);
+                printf("// Emitting instruction: ");
+                ssa_print_instr(stdout, ins);
                 emit_instr(sec, ins, f, b);
             }
         }
@@ -135,6 +137,8 @@ TEST(test, c51_gen) {
         Ast *v = iter_next(&i);
         ssa_convert_ast(b, v);
     }
+
+    ssa_optimize(b->unit, OPT_O1);
 
     ObjFile *obj = c51_gen_from_ssa(b->unit);
     Section *code_sec = NULL;

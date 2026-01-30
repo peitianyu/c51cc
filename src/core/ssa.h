@@ -114,15 +114,13 @@ typedef struct SSABuild {
  * 仅暴露的4个API
  * ============================================================ */
 
-// 构建器生命周期
 SSABuild* ssa_build_create(void);
 void      ssa_build_destroy(SSABuild *b);
-
-// AST转换与输出
 void      ssa_convert_ast(SSABuild *b, Ast *ast);
+
+void      ssa_print_instr(FILE *fp, Instr *i);
 void      ssa_print(FILE *fp, SSAUnit *unit);
 
-// 全局变量添加（C51代码生成用）
 void      ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init,
                          Instr *init_instr,
                          bool is_static, bool is_extern);

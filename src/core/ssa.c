@@ -1346,7 +1346,7 @@ static void print_addrspace_suffix(FILE *fp, Ctype *type) {
     if (s) fprintf(fp, " @%s", s);
 }
 
-static void print_instr(FILE *fp, Instr *i) {
+void ssa_print_instr(FILE *fp, Instr *i) {
     if (i->op == IROP_NOP) return;
     
     if (i->dest > 0) {
@@ -1507,7 +1507,6 @@ static void print_instr(FILE *fp, Instr *i) {
 }
 
 static void ssa_print_func(FILE *fp, Func *f) {
-    // Bril风格函数签名: @name(param: type, ...): ret_type
     fprintf(fp, "@%s(", f->name);
     for (int i = 0; i < f->params->len; i++) {
         if (i > 0) fprintf(fp, ", ");
@@ -1522,14 +1521,14 @@ static void ssa_print_func(FILE *fp, Func *f) {
         
         // 先打印PHI
         for (int i = 0; i < blk->phis->len; i++) {
-            print_instr(fp, list_get(blk->phis, i));
+            ssa_print_instr(fp, list_get(blk->phis, i));
         }
         
         // 再打印普通指令
         for (int i = 0; i < blk->instrs->len; i++) {
             Instr *inst = list_get(blk->instrs, i);
             if (inst->op != IROP_PHI) // PHI已在上面打印
-                print_instr(fp, inst);
+                ssa_print_instr(fp, inst);
         }
     }
     fprintf(fp, "}\n");
