@@ -3,8 +3,9 @@
 
 int g_argc;
 char **g_argv;
-void main(int argc, char **argv) {
+int main(int argc, char **argv) {
     RUN_ALL_TESTS(argc, argv);
+    return 0;
 }
 #else 
 

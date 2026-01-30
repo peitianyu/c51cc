@@ -6,7 +6,7 @@
 #include <string.h>
 #include "cc.h"
 
-#define MAX_ARGS 6
+#define MAX_ARGS 16
 #define MAX_OP_PRIO 16
 #define MAX_ALIGN 16
 
