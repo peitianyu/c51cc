@@ -205,7 +205,7 @@ static int alloc_reg(bool prefer_r01, bool used[8])
         if (!used[0]) { used[0] = true; return 0; }
         if (!used[1]) { used[1] = true; return 1; }
     }
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 7; ++i) {
         if (!used[i]) { used[i] = true; return i; }
     }
     return -1;
@@ -228,7 +228,6 @@ static void regalloc_section_asminstrs(Section *sec)
     if (max_v < 0) return;
 
     int count = max_v + 1;
-    int *use_cnt = gen_alloc(sizeof(int) * count);
     bool *need_indirect = gen_alloc(sizeof(bool) * count);
 
     for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
@@ -240,8 +239,6 @@ static void regalloc_section_asminstrs(Section *sec)
             bool indir = false;
             int v = parse_vreg_id(arg, &indir);
             if (v < 0 || v >= count) continue;
-            if (is_mov_def(ins, idx, arg)) continue;
-            use_cnt[v]++;
             if (indir) need_indirect[v] = true;
         }
     }
@@ -249,16 +246,10 @@ static void regalloc_section_asminstrs(Section *sec)
     int *map = gen_alloc(sizeof(int) * count);
     int *spill = gen_alloc(sizeof(int) * count);
     for (int i = 0; i < count; ++i) { map[i] = -1; spill[i] = -1; }
-    bool used[8] = {0};
-    int spill_next = 0x30;
 
     for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
         AsmInstr *ins = iter_next(&it);
         if (!ins || !ins->args) continue;
-
-        int use_len = ins->args->len;
-        int *uses = use_len ? malloc(sizeof(int) * use_len) : NULL;
-        int use_n = 0;
 
         int idx = 0;
         for (Iter ait = list_iter(ins->args); !iter_end(ait); ++idx) {
@@ -266,18 +257,12 @@ static void regalloc_section_asminstrs(Section *sec)
             bool indir = false;
             int v = parse_vreg_id(arg, &indir);
             if (v < 0 || v >= count) continue;
-            if (!is_mov_def(ins, idx, arg))
-                uses[use_n++] = v;
 
             if (map[v] < 0 && spill[v] < 0) {
-                map[v] = alloc_reg(need_indirect[v], used);
-                if (map[v] < 0) {
-                    if (need_indirect[v]) {
-                        map[v] = 0;
-                        used[0] = true;
-                    } else {
-                        spill[v] = spill_next++;
-                    }
+                if (need_indirect[v]) {
+                    map[v] = (v % 2);
+                } else {
+                    spill[v] = 0x30 + v;
                 }
             }
 
@@ -285,28 +270,13 @@ static void regalloc_section_asminstrs(Section *sec)
             if (spill[v] >= 0 && !indir) {
                 snprintf(buf, sizeof(buf), "0x%02X", spill[v] & 0xFF);
             } else {
-                if (map[v] < 0) {
-                    map[v] = 0;
-                    used[0] = true;
-                }
+                if (map[v] < 0) map[v] = 0;
                 if (indir) snprintf(buf, sizeof(buf), "@r%d", map[v]);
                 else snprintf(buf, sizeof(buf), "r%d", map[v]);
             }
             list_set(ins->args, idx, gen_strdup(buf));
             free(arg);
         }
-
-        for (int i = 0; i < use_n; ++i) {
-            int v = uses[i];
-            if (v < 0 || v >= count) continue;
-            if (use_cnt[v] > 0) {
-                use_cnt[v]--;
-                if (use_cnt[v] == 0 && map[v] >= 0) {
-                    used[map[v]] = false;
-                }
-            }
-        }
-        if (uses) free(uses);
     }
 }
 
@@ -343,60 +313,476 @@ static void peephole_section_asminstrs(Section *sec)
     sec->asminstrs = out;
 }
 
-static void encode_section_bytes(Section *sec)
+static Symbol *find_symbol_by_name(ObjFile *obj, const char *name)
+{
+    for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
+        Symbol *sym = iter_next(&it);
+        if (sym && sym->name && name && !strcmp(sym->name, name))
+            return sym;
+    }
+    return NULL;
+}
+
+static void define_label_symbol(ObjFile *obj, const char *name, int section, int value)
+{
+    if (!obj || !name) return;
+    Symbol *sym = find_symbol_by_name(obj, name);
+    if (!sym) {
+        objfile_add_symbol(obj, name, SYM_LABEL, section, value, 0, SYM_FLAG_LOCAL);
+        return;
+    }
+    sym->section = section;
+    sym->value = value;
+    sym->flags &= ~SYM_FLAG_EXTERN;
+}
+
+static bool is_ident(const char *s)
+{
+    if (!s || !*s) return false;
+    if (!( (*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || *s == '_' ))
+        return false;
+    for (const char *p = s + 1; *p; ++p) {
+        if (!( (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_' ))
+            return false;
+    }
+    return true;
+}
+
+static bool parse_int_val(const char *s, int *out)
+{
+    if (!s || !*s) return false;
+    char *end = NULL;
+    long v = strtol(s, &end, 0);
+    if (end == s || (end && *end != '\0')) return false;
+    if (out) *out = (int)v;
+    return true;
+}
+
+static int parse_reg_rn(const char *s)
+{
+    if (!s || s[0] != 'r' || s[1] < '0' || s[1] > '7' || s[2] != '\0') return -1;
+    return s[1] - '0';
+}
+
+static int parse_indirect_rn(const char *s)
+{
+    if (!s || s[0] != '@' || s[1] != 'r' || s[2] < '0' || s[2] > '7' || s[3] != '\0') return -1;
+    return s[2] - '0';
+}
+
+static bool parse_immediate(const char *s, int *out)
+{
+    if (!s || s[0] != '#') return false;
+    return parse_int_val(s + 1, out);
+}
+
+static bool parse_direct(const char *s, int *out)
+{
+    if (!s || !*s) return false;
+    if (!strcmp(s, "B")) { if (out) *out = 0xF0; return true; }
+    if (!strcmp(s, "A")) { if (out) *out = 0xE0; return true; }
+    return parse_int_val(s, out);
+}
+
+static void emit_u8(Section *sec, unsigned char b)
+{
+    section_append_bytes(sec, &b, 1);
+}
+
+static void emit_u16(Section *sec, int v)
+{
+    unsigned char b[2] = {(unsigned char)(v & 0xFF), (unsigned char)((v >> 8) & 0xFF)};
+    section_append_bytes(sec, b, 2);
+}
+
+static void emit_rel8(ObjFile *obj, Section *sec, const char *label)
+{
+    int sec_index = section_index_from_ptr(obj, sec);
+    int offset = sec->bytes_len;
+    emit_u8(sec, 0);
+    if (label && is_ident(label))
+        objfile_add_reloc(obj, sec_index, offset, RELOC_REL8, label, 0);
+}
+
+static void emit_abs16(ObjFile *obj, Section *sec, const char *label)
+{
+    int sec_index = section_index_from_ptr(obj, sec);
+    int offset = sec->bytes_len;
+    emit_u16(sec, 0);
+    if (label && is_ident(label))
+        objfile_add_reloc(obj, sec_index, offset, RELOC_ABS16, label, 0);
+}
+
+static void encode_section_bytes(ObjFile *obj, Section *sec)
 {
     if (!sec || !sec->asminstrs) return;
+    int sec_index = section_index_from_ptr(obj, sec);
     for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
         AsmInstr *ins = iter_next(&it);
         if (!ins || !ins->op) continue;
 
-        unsigned char b = 0x00;
-        if (!strcmp(ins->op, "mov")) b = 0x01;
-        else if (!strcmp(ins->op, "add")) b = 0x02;
-        else if (!strcmp(ins->op, "subb")) b = 0x03;
-        else if (!strcmp(ins->op, "anl")) b = 0x04;
-        else if (!strcmp(ins->op, "orl")) b = 0x05;
-        else if (!strcmp(ins->op, "xrl")) b = 0x06;
-        else if (!strcmp(ins->op, "cpl")) b = 0x07;
-        else if (!strcmp(ins->op, "clr")) b = 0x08;
-        else if (!strcmp(ins->op, "mul")) b = 0x09;
-        else if (!strcmp(ins->op, "div")) b = 0x0A;
-        else if (!strcmp(ins->op, "cjne")) b = 0x0B;
-        else if (!strcmp(ins->op, "jnz")) b = 0x0C;
-        else if (!strcmp(ins->op, "jz")) b = 0x0D;
-        else if (!strcmp(ins->op, "sjmp")) b = 0x0E;
-        else if (!strcmp(ins->op, "lcall")) b = 0x0F;
-        else if (!strcmp(ins->op, "ret")) b = 0x10;
-        else if (!strcmp(ins->op, "jc")) b = 0x11;
-        else if (!strcmp(ins->op, "jnc")) b = 0x12;
-        else if (!strcmp(ins->op, "djnz")) b = 0x13;
-        else if (!strcmp(ins->op, "rrc")) b = 0x14;
-        else if (!strcmp(ins->op, "rlc")) b = 0x15;
-        else if (!strcmp(ins->op, "rl")) b = 0x16;
-        else if (!strcmp(ins->op, "rr")) b = 0x17;
-        else if (!strcmp(ins->op, "swap")) b = 0x18;
-        else if (!strcmp(ins->op, "setb")) b = 0x19;
-        else if (!strcmp(ins->op, "push")) b = 0x1A;
-        else if (!strcmp(ins->op, "pop")) b = 0x1B;
-        else if (!strcmp(ins->op, "reti")) b = 0x1C;
-        else if (!strcmp(ins->op, "ljmp")) b = 0x1D;
-        else if (!strcmp(ins->op, "ajmp")) b = 0x1E;
-        else if (!strcmp(ins->op, "acall")) b = 0x1F;
-        else if (!strcmp(ins->op, "addc")) b = 0x20;
-        else if (!strcmp(ins->op, "da")) b = 0x21;
-        else if (!strcmp(ins->op, "inc")) b = 0x22;
-        else if (!strcmp(ins->op, "dec")) b = 0x23;
-        else if (!strcmp(ins->op, "movc")) b = 0x24;
-        else if (!strcmp(ins->op, "movx")) b = 0x25;
-        else if (!strcmp(ins->op, "xch")) b = 0x26;
-        else if (!strcmp(ins->op, "xchd")) b = 0x27;
-        else if (!strcmp(ins->op, "jb")) b = 0x28;
-        else if (!strcmp(ins->op, "jnb")) b = 0x29;
-        else if (!strcmp(ins->op, "jbc")) b = 0x2A;
-        else if (!strcmp(ins->op, "nop")) b = 0x2B;
-        else if (!strcmp(ins->op, ".label")) continue;
+        if (!strcmp(ins->op, ".label")) {
+            char *name = (ins->args && ins->args->len > 0) ? list_get(ins->args, 0) : NULL;
+            if (name) define_label_symbol(obj, name, sec_index, sec->bytes_len);
+            continue;
+        }
 
-        section_append_bytes(sec, &b, 1);
+        if (!strcmp(ins->op, "nop")) {
+            emit_u8(sec, 0x00);
+            continue;
+        }
+        if (!strcmp(ins->op, "ret")) {
+            emit_u8(sec, 0x22);
+            continue;
+        }
+        if (!strcmp(ins->op, "reti")) {
+            emit_u8(sec, 0x32);
+            continue;
+        }
+        if (!strcmp(ins->op, "clr") && ins->args && ins->args->len == 1) {
+            char *a0 = list_get(ins->args, 0);
+            if (a0 && !strcmp(a0, "C")) {
+                emit_u8(sec, 0xC3);
+                continue;
+            }
+            if (a0 && !strcmp(a0, "A")) {
+                emit_u8(sec, 0xE4);
+                continue;
+            }
+        }
+        if (!strcmp(ins->op, "cpl") && ins->args && ins->args->len == 1) {
+            char *a0 = list_get(ins->args, 0);
+            if (a0 && !strcmp(a0, "A")) {
+                emit_u8(sec, 0xF4);
+                continue;
+            }
+        }
+        if (!strcmp(ins->op, "rrc") && (!ins->args || ins->args->len == 0 || (ins->args->len == 1 && !strcmp(list_get(ins->args, 0), "A")))) {
+            emit_u8(sec, 0x13);
+            continue;
+        }
+        if (!strcmp(ins->op, "rlc") && (!ins->args || ins->args->len == 0 || (ins->args->len == 1 && !strcmp(list_get(ins->args, 0), "A")))) {
+            emit_u8(sec, 0x33);
+            continue;
+        }
+        if (!strcmp(ins->op, "rl") && (!ins->args || ins->args->len == 0 || (ins->args->len == 1 && !strcmp(list_get(ins->args, 0), "A")))) {
+            emit_u8(sec, 0x23);
+            continue;
+        }
+        if (!strcmp(ins->op, "rr") && (!ins->args || ins->args->len == 0 || (ins->args->len == 1 && !strcmp(list_get(ins->args, 0), "A")))) {
+            emit_u8(sec, 0x03);
+            continue;
+        }
+        if (!strcmp(ins->op, "swap") && ins->args && ins->args->len == 1 && !strcmp(list_get(ins->args, 0), "A")) {
+            emit_u8(sec, 0xC4);
+            continue;
+        }
+        if (!strcmp(ins->op, "mul") && ins->args && ins->args->len == 1 && !strcmp(list_get(ins->args, 0), "AB")) {
+            emit_u8(sec, 0xA4);
+            continue;
+        }
+        if (!strcmp(ins->op, "div") && ins->args && ins->args->len == 1 && !strcmp(list_get(ins->args, 0), "AB")) {
+            emit_u8(sec, 0x84);
+            continue;
+        }
+
+        if (!strcmp(ins->op, "sjmp") && ins->args && ins->args->len == 1) {
+            emit_u8(sec, 0x80);
+            emit_rel8(obj, sec, list_get(ins->args, 0));
+            continue;
+        }
+        if (!strcmp(ins->op, "jnz") && ins->args && ins->args->len == 1) {
+            emit_u8(sec, 0x70);
+            emit_rel8(obj, sec, list_get(ins->args, 0));
+            continue;
+        }
+        if (!strcmp(ins->op, "jz") && ins->args && ins->args->len == 1) {
+            emit_u8(sec, 0x60);
+            emit_rel8(obj, sec, list_get(ins->args, 0));
+            continue;
+        }
+        if (!strcmp(ins->op, "jc") && ins->args && ins->args->len == 1) {
+            emit_u8(sec, 0x40);
+            emit_rel8(obj, sec, list_get(ins->args, 0));
+            continue;
+        }
+        if (!strcmp(ins->op, "jnc") && ins->args && ins->args->len == 1) {
+            emit_u8(sec, 0x50);
+            emit_rel8(obj, sec, list_get(ins->args, 0));
+            continue;
+        }
+        if (!strcmp(ins->op, "lcall") && ins->args && ins->args->len == 1) {
+            emit_u8(sec, 0x12);
+            emit_abs16(obj, sec, list_get(ins->args, 0));
+            continue;
+        }
+        if (!strcmp(ins->op, "ljmp") && ins->args && ins->args->len == 1) {
+            emit_u8(sec, 0x02);
+            emit_abs16(obj, sec, list_get(ins->args, 0));
+            continue;
+        }
+
+        if (!strcmp(ins->op, "djnz") && ins->args && ins->args->len == 2) {
+            char *a0 = list_get(ins->args, 0);
+            char *a1 = list_get(ins->args, 1);
+            int r = parse_reg_rn(a0);
+            if (r >= 0) {
+                emit_u8(sec, (unsigned char)(0xD8 + r));
+                emit_rel8(obj, sec, a1);
+                continue;
+            }
+            int direct = 0;
+            if (parse_direct(a0, &direct)) {
+                emit_u8(sec, 0xD5);
+                emit_u8(sec, (unsigned char)(direct & 0xFF));
+                emit_rel8(obj, sec, a1);
+                continue;
+            }
+        }
+
+        if (!strcmp(ins->op, "cjne") && ins->args && ins->args->len == 3) {
+            char *a0 = list_get(ins->args, 0);
+            char *a1 = list_get(ins->args, 1);
+            char *a2 = list_get(ins->args, 2);
+            int imm = 0;
+            if (a0 && !strcmp(a0, "A")) {
+                if (parse_immediate(a1, &imm)) {
+                    emit_u8(sec, 0xB4);
+                    emit_u8(sec, (unsigned char)(imm & 0xFF));
+                    emit_rel8(obj, sec, a2);
+                    continue;
+                }
+                int direct = 0;
+                int r = parse_reg_rn(a1);
+                if (r >= 0) direct = r;
+                else if (!parse_direct(a1, &direct)) direct = -1;
+                if (direct >= 0) {
+                    emit_u8(sec, 0xB5);
+                    emit_u8(sec, (unsigned char)(direct & 0xFF));
+                    emit_rel8(obj, sec, a2);
+                    continue;
+                }
+            }
+            int r = parse_reg_rn(a0);
+            if (r >= 0 && parse_immediate(a1, &imm)) {
+                emit_u8(sec, (unsigned char)(0xB8 + r));
+                emit_u8(sec, (unsigned char)(imm & 0xFF));
+                emit_rel8(obj, sec, a2);
+                continue;
+            }
+            int ir = parse_indirect_rn(a0);
+            if ((ir == 0 || ir == 1) && parse_immediate(a1, &imm)) {
+                emit_u8(sec, (unsigned char)(ir == 0 ? 0xB6 : 0xB7));
+                emit_u8(sec, (unsigned char)(imm & 0xFF));
+                emit_rel8(obj, sec, a2);
+                continue;
+            }
+        }
+
+        if (!strcmp(ins->op, "mov") && ins->args && ins->args->len == 2) {
+            char *dst = list_get(ins->args, 0);
+            char *src = list_get(ins->args, 1);
+            int imm = 0;
+            int rdst = parse_reg_rn(dst);
+            int rsrc = parse_reg_rn(src);
+            int idst = parse_indirect_rn(dst);
+            int isrc = parse_indirect_rn(src);
+            int direct_dst = 0;
+            int direct_src = 0;
+            bool dst_direct_ok = parse_direct(dst, &direct_dst);
+            bool src_direct_ok = parse_direct(src, &direct_src);
+
+            if (dst && !strcmp(dst, "A")) {
+                if (parse_immediate(src, &imm)) {
+                    emit_u8(sec, 0x74);
+                    emit_u8(sec, (unsigned char)(imm & 0xFF));
+                    continue;
+                }
+                if (rsrc >= 0) {
+                    emit_u8(sec, (unsigned char)(0xE8 + rsrc));
+                    continue;
+                }
+                if (isrc == 0 || isrc == 1) {
+                    emit_u8(sec, (unsigned char)(isrc == 0 ? 0xE6 : 0xE7));
+                    continue;
+                }
+                if (src_direct_ok) {
+                    emit_u8(sec, 0xE5);
+                    emit_u8(sec, (unsigned char)(direct_src & 0xFF));
+                    continue;
+                }
+            }
+            if (rdst >= 0) {
+                if (parse_immediate(src, &imm)) {
+                    emit_u8(sec, (unsigned char)(0x78 + rdst));
+                    emit_u8(sec, (unsigned char)(imm & 0xFF));
+                    continue;
+                }
+                if (src && !strcmp(src, "A")) {
+                    emit_u8(sec, (unsigned char)(0xF8 + rdst)); 
+                    continue;
+                }
+                if (src_direct_ok) {
+                    emit_u8(sec, (unsigned char)(0xA8 + rdst));
+                    emit_u8(sec, (unsigned char)(direct_src & 0xFF));
+                    continue;
+                }
+                if (rsrc >= 0) {
+                    emit_u8(sec, (unsigned char)(0xE8 + rsrc));
+                    emit_u8(sec, (unsigned char)(0xF8 + rdst));
+                    continue;
+                }
+                if (isrc == 0 || isrc == 1) {
+                    emit_u8(sec, (unsigned char)(isrc == 0 ? 0xE6 : 0xE7));
+                    emit_u8(sec, (unsigned char)(0xF8 + rdst));
+                    continue;
+                }
+            }
+            if (idst == 0 || idst == 1) {
+                if (src && !strcmp(src, "A")) {
+                    emit_u8(sec, (unsigned char)(idst == 0 ? 0xF6 : 0xF7));
+                    continue;
+                }
+                if (parse_immediate(src, &imm)) {
+                    emit_u8(sec, (unsigned char)(idst == 0 ? 0x76 : 0x77));
+                    emit_u8(sec, (unsigned char)(imm & 0xFF));
+                    continue;
+                }
+                if (src_direct_ok) {
+                    emit_u8(sec, (unsigned char)(idst == 0 ? 0xA6 : 0xA7));
+                    emit_u8(sec, (unsigned char)(direct_src & 0xFF));
+                    continue;
+                }
+                if (rsrc >= 0) {
+                    emit_u8(sec, (unsigned char)(0xE8 + rsrc));
+                    emit_u8(sec, (unsigned char)(idst == 0 ? 0xF6 : 0xF7));
+                    continue;
+                }
+            }
+            if (dst_direct_ok) {
+                if (parse_immediate(src, &imm)) {
+                    emit_u8(sec, 0x75);
+                    emit_u8(sec, (unsigned char)(direct_dst & 0xFF));
+                    emit_u8(sec, (unsigned char)(imm & 0xFF));
+                    continue;
+                }
+                if (src && !strcmp(src, "A")) {
+                    emit_u8(sec, 0xF5);
+                    emit_u8(sec, (unsigned char)(direct_dst & 0xFF));
+                    continue;
+                }
+                if (rsrc >= 0) {
+                    emit_u8(sec, (unsigned char)(0x88 + rsrc));
+                    emit_u8(sec, (unsigned char)(direct_dst & 0xFF));
+                    continue;
+                }
+                if (src_direct_ok) {
+                    emit_u8(sec, 0xE5);
+                    emit_u8(sec, (unsigned char)(direct_src & 0xFF));
+                    emit_u8(sec, 0xF5);
+                    emit_u8(sec, (unsigned char)(direct_dst & 0xFF));
+                    continue;
+                }
+                if (isrc == 0 || isrc == 1) {
+                    emit_u8(sec, (unsigned char)(isrc == 0 ? 0x86 : 0x87));
+                    emit_u8(sec, (unsigned char)(direct_dst & 0xFF));
+                    continue;
+                }
+            }
+        }
+
+        if (!strcmp(ins->op, "add") && ins->args && ins->args->len == 2) {
+            char *a0 = list_get(ins->args, 0);
+            char *a1 = list_get(ins->args, 1);
+            if (a0 && !strcmp(a0, "A")) {
+                int imm = 0;
+                int r = parse_reg_rn(a1);
+                int ir = parse_indirect_rn(a1);
+                int direct = 0;
+                if (parse_immediate(a1, &imm)) {
+                    emit_u8(sec, 0x24); emit_u8(sec, (unsigned char)(imm & 0xFF)); continue;
+                }
+                if (r >= 0) { emit_u8(sec, (unsigned char)(0x28 + r)); continue; }
+                if (ir == 0 || ir == 1) { emit_u8(sec, (unsigned char)(ir == 0 ? 0x26 : 0x27)); continue; }
+                if (parse_direct(a1, &direct)) { emit_u8(sec, 0x25); emit_u8(sec, (unsigned char)(direct & 0xFF)); continue; }
+            }
+        }
+        if (!strcmp(ins->op, "subb") && ins->args && ins->args->len == 2) {
+            char *a0 = list_get(ins->args, 0);
+            char *a1 = list_get(ins->args, 1);
+            if (a0 && !strcmp(a0, "A")) {
+                int imm = 0;
+                int r = parse_reg_rn(a1);
+                int ir = parse_indirect_rn(a1);
+                int direct = 0;
+                if (parse_immediate(a1, &imm)) { emit_u8(sec, 0x94); emit_u8(sec, (unsigned char)(imm & 0xFF)); continue; }
+                if (r >= 0) { emit_u8(sec, (unsigned char)(0x98 + r)); continue; }
+                if (ir == 0 || ir == 1) { emit_u8(sec, (unsigned char)(ir == 0 ? 0x96 : 0x97)); continue; }
+                if (parse_direct(a1, &direct)) { emit_u8(sec, 0x95); emit_u8(sec, (unsigned char)(direct & 0xFF)); continue; }
+            }
+        }
+        if (!strcmp(ins->op, "anl") && ins->args && ins->args->len == 2) {
+            char *a0 = list_get(ins->args, 0);
+            char *a1 = list_get(ins->args, 1);
+            if (a0 && !strcmp(a0, "A")) {
+                int imm = 0;
+                int r = parse_reg_rn(a1);
+                int ir = parse_indirect_rn(a1);
+                int direct = 0;
+                if (parse_immediate(a1, &imm)) { emit_u8(sec, 0x54); emit_u8(sec, (unsigned char)(imm & 0xFF)); continue; }
+                if (r >= 0) { emit_u8(sec, (unsigned char)(0x58 + r)); continue; }
+                if (ir == 0 || ir == 1) { emit_u8(sec, (unsigned char)(ir == 0 ? 0x56 : 0x57)); continue; }
+                if (parse_direct(a1, &direct)) { emit_u8(sec, 0x55); emit_u8(sec, (unsigned char)(direct & 0xFF)); continue; }
+            }
+        }
+        if (!strcmp(ins->op, "orl") && ins->args && ins->args->len == 2) {
+            char *a0 = list_get(ins->args, 0);
+            char *a1 = list_get(ins->args, 1);
+            if (a0 && !strcmp(a0, "A")) {
+                int imm = 0;
+                int r = parse_reg_rn(a1);
+                int ir = parse_indirect_rn(a1);
+                int direct = 0;
+                if (parse_immediate(a1, &imm)) { emit_u8(sec, 0x44); emit_u8(sec, (unsigned char)(imm & 0xFF)); continue; }
+                if (r >= 0) { emit_u8(sec, (unsigned char)(0x48 + r)); continue; }
+                if (ir == 0 || ir == 1) { emit_u8(sec, (unsigned char)(ir == 0 ? 0x46 : 0x47)); continue; }
+                if (parse_direct(a1, &direct)) { emit_u8(sec, 0x45); emit_u8(sec, (unsigned char)(direct & 0xFF)); continue; }
+            }
+        }
+        if (!strcmp(ins->op, "xrl") && ins->args && ins->args->len == 2) {
+            char *a0 = list_get(ins->args, 0);
+            char *a1 = list_get(ins->args, 1);
+            if (a0 && !strcmp(a0, "A")) {
+                int imm = 0;
+                int r = parse_reg_rn(a1);
+                int ir = parse_indirect_rn(a1);
+                int direct = 0;
+                if (parse_immediate(a1, &imm)) { emit_u8(sec, 0x64); emit_u8(sec, (unsigned char)(imm & 0xFF)); continue; }
+                if (r >= 0) { emit_u8(sec, (unsigned char)(0x68 + r)); continue; }
+                if (ir == 0 || ir == 1) { emit_u8(sec, (unsigned char)(ir == 0 ? 0x66 : 0x67)); continue; }
+                if (parse_direct(a1, &direct)) { emit_u8(sec, 0x65); emit_u8(sec, (unsigned char)(direct & 0xFF)); continue; }
+            }
+        }
+        if (!strcmp(ins->op, "inc") && ins->args && ins->args->len == 1) {
+            char *a0 = list_get(ins->args, 0);
+            int r = parse_reg_rn(a0);
+            int ir = parse_indirect_rn(a0);
+            int direct = 0;
+            if (a0 && !strcmp(a0, "A")) { emit_u8(sec, 0x04); continue; }
+            if (r >= 0) { emit_u8(sec, (unsigned char)(0x08 + r)); continue; }
+            if (ir == 0 || ir == 1) { emit_u8(sec, (unsigned char)(ir == 0 ? 0x06 : 0x07)); continue; }
+            if (parse_direct(a0, &direct)) { emit_u8(sec, 0x05); emit_u8(sec, (unsigned char)(direct & 0xFF)); continue; }
+        }
+        if (!strcmp(ins->op, "dec") && ins->args && ins->args->len == 1) {
+            char *a0 = list_get(ins->args, 0);
+            int r = parse_reg_rn(a0);
+            int ir = parse_indirect_rn(a0);
+            int direct = 0;
+            if (a0 && !strcmp(a0, "A")) { emit_u8(sec, 0x14); continue; }
+            if (r >= 0) { emit_u8(sec, (unsigned char)(0x18 + r)); continue; }
+            if (ir == 0 || ir == 1) { emit_u8(sec, (unsigned char)(ir == 0 ? 0x16 : 0x17)); continue; }
+            if (parse_direct(a0, &direct)) { emit_u8(sec, 0x15); emit_u8(sec, (unsigned char)(direct & 0xFF)); continue; }
+        }
     }
 }
 
@@ -432,7 +818,115 @@ static int param_index(Func *f, const char *name)
     return -1;
 }
 
-static void emit_instr(Section *sec, Instr *ins, Func *func)
+static Block *find_block_by_label(Func *f, const char *label)
+{
+    if (!f || !label) return NULL;
+    int id = -1;
+    if (strncmp(label, "block", 5) == 0)
+        id = atoi(label + 5);
+    if (id < 0) return NULL;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (b && (int)b->id == id) return b;
+    }
+    return NULL;
+}
+
+static const char *find_var_for_value(Block *blk, ValueName v)
+{
+    if (!blk || !blk->var_map || v == 0) return NULL;
+    for (Iter it = list_iter(blk->var_map->list); !iter_end(it);) {
+        DictEntry *e = iter_next(&it);
+        if (!e || !e->val) continue;
+        ValueName *val = (ValueName *)e->val;
+        if (*val == v) return e->key;
+    }
+    return NULL;
+}
+
+static bool value_defined_in_block(Block *blk, ValueName v)
+{
+    if (!blk || v == 0) return false;
+    for (Iter it = list_iter(blk->instrs); !iter_end(it);) {
+        Instr *ins = iter_next(&it);
+        if (ins && ins->dest == v && ins->op != IROP_NOP && ins->op != IROP_PHI)
+            return true;
+    }
+    return false;
+}
+
+static List *collect_block_defs(Block *blk)
+{
+    List *defs = make_list();
+    if (!blk) return defs;
+    for (Iter it = list_iter(blk->instrs); !iter_end(it);) {
+        Instr *ins = iter_next(&it);
+        if (!ins || ins->dest <= 0) continue;
+        if (ins->op == IROP_NOP || ins->op == IROP_PHI || ins->op == IROP_CONST) continue;
+        bool seen = false;
+        for (Iter jt = list_iter(defs); !iter_end(jt);) {
+            ValueName *p = iter_next(&jt);
+            if (p && *p == ins->dest) { seen = true; break; }
+        }
+        if (!seen) {
+            ValueName *p = gen_alloc(sizeof(ValueName));
+            *p = ins->dest;
+            list_push(defs, p);
+        }
+    }
+    return defs;
+}
+
+static void emit_phi_moves_for_edge(Section *sec, Func *func, Block *from, const char *to_label)
+{
+    if (!sec || !func || !from || !to_label) return;
+    Block *to = find_block_by_label(func, to_label);
+    if (!to || !to->phis) return;
+
+    char from_label[32];
+    snprintf(from_label, sizeof(from_label), "block%u", from->id);
+
+    List *fallbacks = collect_block_defs(from);
+    int fallback_idx = fallbacks->len - 1;
+
+    for (Iter pit = list_iter(to->phis); !iter_end(pit);) {
+        Instr *phi = iter_next(&pit);
+        if (!phi || phi->op != IROP_PHI || !phi->labels || !phi->args) continue;
+
+        ValueName src_val = 0;
+        const char *var = find_var_for_value(to, phi->dest);
+        if (var) {
+            ValueName *p = (ValueName *)dict_get(from->var_map, (char *)var);
+            if (p) src_val = *p;
+        }
+
+        if (src_val == 0) {
+            for (int i = 0; i < phi->labels->len && i < phi->args->len; ++i) {
+                char *lbl = list_get(phi->labels, i);
+                if (!lbl || strcmp(lbl, from_label) != 0) continue;
+                ValueName *src = list_get(phi->args, i);
+                if (!src) continue;
+                src_val = *src;
+                break;
+            }
+        }
+
+        if (src_val == 0 || !value_defined_in_block(from, src_val)) {
+            while (fallback_idx >= 0) {
+                ValueName *p = list_get(fallbacks, fallback_idx--);
+                if (p && *p != phi->dest) { src_val = *p; break; }
+            }
+        }
+
+        if (src_val == 0 || phi->dest == src_val) continue;
+        emit_ins2(sec, "mov", vreg(phi->dest), vreg(src_val));
+    }
+
+    list_free(fallbacks);
+    free(fallbacks);
+}
+
+static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
 {
     if (!ins) return;
     char buf[64];
@@ -468,20 +962,20 @@ static void emit_instr(Section *sec, Instr *ins, Func *func)
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     case IROP_MUL:
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
         emit_ins2(sec, "mov", "B", vreg(*(ValueName *)list_get(ins->args, 1)));
+        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
         emit_ins1(sec, "mul", "AB");
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     case IROP_DIV:
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
         emit_ins2(sec, "mov", "B", vreg(*(ValueName *)list_get(ins->args, 1)));
+        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
         emit_ins1(sec, "div", "AB");
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     case IROP_MOD:
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
         emit_ins2(sec, "mov", "B", vreg(*(ValueName *)list_get(ins->args, 1)));
+        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
         emit_ins1(sec, "div", "AB");
         emit_ins2(sec, "mov", vreg(ins->dest), "B");
         break;
@@ -504,12 +998,12 @@ static void emit_instr(Section *sec, Instr *ins, Func *func)
         char *l_loop = new_label("shl_loop");
         char *l_end = new_label("shl_end");
         emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "mov", "B", vreg(*(ValueName *)list_get(ins->args, 1)));
-        emit_ins3(sec, "cjne", "B", "#0", l_loop);
+        emit_ins2(sec, "mov", "r7", vreg(*(ValueName *)list_get(ins->args, 1)));
+        emit_ins3(sec, "cjne", "r7", "#0", l_loop);
         emit_ins1(sec, "sjmp", l_end);
         emit_label(sec, l_loop);
         emit_ins2(sec, "add", "A", "A");
-        emit_ins2(sec, "djnz", "B", l_loop);
+        emit_ins2(sec, "djnz", "r7", l_loop);
         emit_label(sec, l_end);
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         free(l_loop);
@@ -520,13 +1014,13 @@ static void emit_instr(Section *sec, Instr *ins, Func *func)
         char *l_loop = new_label("shr_loop");
         char *l_end = new_label("shr_end");
         emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "mov", "B", vreg(*(ValueName *)list_get(ins->args, 1)));
-        emit_ins3(sec, "cjne", "B", "#0", l_loop);
+        emit_ins2(sec, "mov", "r7", vreg(*(ValueName *)list_get(ins->args, 1)));
+        emit_ins3(sec, "cjne", "r7", "#0", l_loop);
         emit_ins1(sec, "sjmp", l_end);
         emit_label(sec, l_loop);
         emit_ins1(sec, "clr", "C");
         emit_ins1(sec, "rrc", "A");
-        emit_ins2(sec, "djnz", "B", l_loop);
+        emit_ins2(sec, "djnz", "r7", l_loop);
         emit_label(sec, l_end);
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         free(l_loop);
@@ -667,15 +1161,22 @@ static void emit_instr(Section *sec, Instr *ins, Func *func)
         break;
     case IROP_JMP: {
         char *label = list_get(ins->labels, 0);
+        emit_phi_moves_for_edge(sec, func, cur_block, label);
         emit_ins1(sec, "sjmp", map_block_label(func_name, label));
         break;
     }
     case IROP_BR: {
         char *t = list_get(ins->labels, 0);
         char *f = list_get(ins->labels, 1);
+        char *l_true = new_label("phi_true");
         emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins1(sec, "jnz", map_block_label(func_name, t));
+        emit_ins1(sec, "jnz", l_true);
+        emit_phi_moves_for_edge(sec, func, cur_block, f);
         emit_ins1(sec, "sjmp", map_block_label(func_name, f));
+        emit_label(sec, l_true);
+        emit_phi_moves_for_edge(sec, func, cur_block, t);
+        emit_ins1(sec, "sjmp", map_block_label(func_name, t));
+        free(l_true);
         break;
     }
     case IROP_CALL: {
@@ -716,6 +1217,42 @@ static void lower_section_asminstrs(Section *sec)
             list_push(out, ins);
             continue;
         }
+        if (!strcmp(ins->op, "mov") && ins->args && ins->args->len == 2) {
+            char *dst = list_get(ins->args, 0);
+            char *src = list_get(ins->args, 1);
+            if (dst && src && !strcmp(dst, src)) {
+                free_asminstr(ins);
+                continue;
+            }
+            if (parse_reg_rn(dst) >= 0 && parse_reg_rn(src) >= 0) {
+                AsmInstr *i1 = gen_instr_new("mov");
+                gen_instr_add_arg(i1, "A");
+                gen_instr_add_arg(i1, src);
+                list_push(out, i1);
+
+                AsmInstr *i2 = gen_instr_new("mov");
+                gen_instr_add_arg(i2, dst);
+                gen_instr_add_arg(i2, "A");
+                list_push(out, i2);
+
+                free_asminstr(ins);
+                continue;
+            }
+            if (parse_direct(dst, NULL) && parse_direct(src, NULL)) {
+                AsmInstr *i1 = gen_instr_new("mov");
+                gen_instr_add_arg(i1, "A");
+                gen_instr_add_arg(i1, src);
+                list_push(out, i1);
+
+                AsmInstr *i2 = gen_instr_new("mov");
+                gen_instr_add_arg(i2, dst);
+                gen_instr_add_arg(i2, "A");
+                list_push(out, i2);
+
+                free_asminstr(ins);
+                continue;
+            }
+        }
         list_push(out, ins);
     }
     free(sec->asminstrs);
@@ -754,14 +1291,14 @@ ObjFile *c51_gen_from_ssa(void *ssa)
 
             for (Iter it = list_iter(b->instrs); !iter_end(it);) {
                 Instr *ins = iter_next(&it);
-                emit_instr(sec, ins, f);
+                emit_instr(sec, ins, f, b);
             }
         }
 
-        lower_section_asminstrs(sec);
         regalloc_section_asminstrs(sec);
+        lower_section_asminstrs(sec);
         peephole_section_asminstrs(sec);
-        encode_section_bytes(sec);
+        encode_section_bytes(obj, sec);
     }
 
     return obj;

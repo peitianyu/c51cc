@@ -179,14 +179,13 @@ ObjFile 示例（JSON）：
 7) 【已完成（最小）】指令降级：基础比较/逻辑/跳转降级为 C51 指令序列。
 8) 【已完成（最小）】窥孔优化：仅移除 mov rX,rX。
 9) 【已完成】链接器：段布局 + 重定位回填 + 输出 ASM/HEX。
-10) 【待办】扩展地址空间与更多重定位类型。
 
 ### 9.1 测试约定
 - c51_gen/c51_link 的测试通过输入源码文件路径进行验证（参考 ssa_pass）。
 - 测试直接输出 ASM/HEX 到 stdout 便于前端查看。
 
 ### 9.2 实现单（逐项推进）
-1) 真实机器码编码：为核心指令建立 8051 opcode/寻址模式表，并替换占位 `.db`。
+1) 【已完成】真实机器码编码：为核心指令建立 8051 opcode/寻址模式表，并替换占位 `.db`。
   - 测试：运行 c51_gen/c51_link，验证 ASM 与 HEX。
 2) 线性扫描寄存器分配：live interval + spill 到 DATA 栈，处理间接寻址约束。
   - 测试：构造高寄存器压力样例并运行 c51_gen/c51_link。
@@ -202,7 +201,7 @@ ObjFile 示例（JSON）：
   - 测试：汇编器解析错误/边界输入。
 
 ### 9.3 测试指令（当前约定）
-wsl -d test bash -lc "set -e; cd /mnt/d/ws/test/C51CC; printf '2\ntest/test_c51.c\n' | ./build.sh || true"
+测试指令参考: wsl -d test bash -lc "set -e; cd /mnt/d/ws/test/C51CC; printf '2\ntest/test_c51.c\n' | ./build.sh" 
 - c51_gen：输入源码路径后选择测试编号 1。
 - c51_link：输入源码路径后选择测试编号 2。
 - 示例：test/test_all.c 或 test/test_c51.c。

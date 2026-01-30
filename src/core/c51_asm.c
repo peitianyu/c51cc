@@ -461,6 +461,17 @@ static void write_labels_at(FILE *fp, const ObjFile *obj, int sec_index, int off
     }
 }
 
+static bool is_func_symbol(const ObjFile *obj, const char *name)
+{
+    if (!obj || !name) return false;
+    for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
+        Symbol *sym = iter_next(&it);
+        if (sym && sym->name && sym->kind == SYM_FUNC && !strcmp(sym->name, name))
+            return true;
+    }
+    return false;
+}
+
 int c51_write_asm(FILE *fp, const ObjFile *obj)
 {
     if (!fp || !obj) return -1;
@@ -470,16 +481,23 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
         if (!sec) continue;
         fprintf(fp, ".section %s %s %d\n", sec->name, section_kind_str(sec->kind), sec->align ? sec->align : 1);
         int sec_index = section_index_from_ptr((ObjFile *)obj, sec);
-        if (sec->asminstrs && sec->asminstrs->len > 0) {
+        bool has_asminstrs = (sec->asminstrs && sec->asminstrs->len > 0);
+        bool printed_any = false;
+        if (has_asminstrs) {
             for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
                 AsmInstr *ins = iter_next(&ait);
                 if (!ins || !ins->op) continue;
                 if (!strcmp(ins->op, ".label")) {
                     char *name = ins->args && ins->args->len > 0 ? list_get(ins->args, 0) : NULL;
-                    if (name) fprintf(fp, ".label %s\n", name);
+                    if (name) {
+                        if (printed_any && is_func_symbol(obj, name))
+                            fprintf(fp, "\n");
+                        fprintf(fp, ".label %s\n", name);
+                        printed_any = true;
+                    }
                     continue;
                 }
-                fprintf(fp, "%s", ins->op);
+                fprintf(fp, "    %s", ins->op);
                 if (ins->args && ins->args->len > 0) {
                     fprintf(fp, " ");
                     int first = 1;
@@ -490,9 +508,10 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
                     }
                 }
                 fprintf(fp, "\n");
+                printed_any = true;
             }
         }
-        if (sec->bytes && sec->bytes_len > 0) {
+        if (!has_asminstrs && sec->bytes && sec->bytes_len > 0) {
             int i = 0;
             while (i < sec->bytes_len) {
                 write_labels_at(fp, obj, sec_index, i);
