@@ -139,6 +139,9 @@ ObjFile 示例（JSON）：
 - reentrant：只使用栈传参/局部变量，避免固定地址。
 - interrupt：固定入口序言/尾声，保存 A/PSW/DPTR/寄存器组。
 
+补充（实现）：
+- 调用点保存策略已优化为：仅保存“跨调用仍活跃”的 R0–R7，避免无差别 push/pop。
+
 ### 6.1 寄存器破坏与保存策略（整理）
 - 破坏条件：函数内生成的指令写入该寄存器即视为破坏。
 - 普通函数：仅在确实写入寄存器时生成保存/恢复。
@@ -209,6 +212,20 @@ ObjFile 示例（JSON）：
 - c51_gen：输入源码路径后选择测试编号 1。
 - c51_link：输入源码路径后选择测试编号 2。
 - 示例：test/test_all.c 或 test/test_c51.c。
+- 完整样例：wsl -d test bash -lc "set -e; cd /mnt/d/ws/test/C51CC; printf '2\ntest/test_c51_full.c\n' | ./build.sh"
+
+### 9.4 窥孔优化候选（补充）
+- 冗余搬运（已实现）：`mov A, rX` + `mov rY, A` → `mov rY, rX`；连续重复 `mov` 合并。
+- 立即数恒等（已实现）：`anl A, #255` / `orl A, #0` / `xrl A, #0` 等恒等变换删除。
+- 常量算术（已实现）：`add A, #0` / `subb A, #0` 删除；`add A, #1` → `inc A`。
+- 跳转反转（已实现）：`jz/jnz/jc/jnc L1; sjmp L2; L1:` → 反转跳转到 `L2`。
+- 跳转链折叠：`sjmp L1; L1: sjmp L2` → `sjmp L2`。
+- 无效跳转（已实现）：跳转目标为紧随其后的标签时删除。
+- 短跳优先：可达范围内用 `sjmp` 替代 `ljmp`。
+- `cjne`+分支简化（已实现）：`cjne A,#0,LT; sjmp LF; LT:` → `jz LF`（`LT` 紧随其后）。
+- `push/pop` 对消（已实现）：相邻 `push rX` 紧跟 `pop rX` 直接删除。
+- 死写清理：寄存器写入后未使用即被覆盖，删除前序写。
+- 比较序列缩短：仅用于零/非零判断时，减少 `clr C` + `subb` 组合。
 
 ## 10. 文件组织建议
 - c51_gen.c：后端生成器
