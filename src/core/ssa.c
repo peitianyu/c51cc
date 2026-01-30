@@ -485,6 +485,7 @@ static Func* ssa_build_function(SSABuild *b, const char *name, Ctype *ret) {
     f->name = name;
     f->ret_type = ret;
     f->params = make_list();
+    f->param_types = make_list();
     f->blocks = make_list();
     f->stack_offsets = make_dict(NULL);
     f->stack_size = 0;
@@ -504,6 +505,7 @@ static void ssa_build_param(SSABuild *b, const char *name, Ctype *type) {
     if (!b->cur_func || !b->cur_block) return;
     
     list_push(b->cur_func->params, ssa_strdup(name));
+    list_push(b->cur_func->param_types, type);
     
     ValueName val = ssa_new_value(b);
     ssa_build_write(b, name, val);
@@ -914,6 +916,35 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         ValueName val = gen_expr(b, ast->operand);
         IrOp op = (ast->type == '~') ? IROP_NOT : IROP_LNOT;
         return ssa_build_unop_t(b, op, val, ast->ctype);
+    }
+
+    case PUNCT_INC:
+    case PUNCT_DEC: {
+        IrOp op = (ast->type == PUNCT_INC) ? IROP_ADD : IROP_SUB;
+        ValueName one = ssa_build_const_t(b, 1, ast->ctype);
+
+        if (ast->operand && ast->operand->type == AST_LVAR) {
+            ValueName cur = ssa_build_read(b, ast->operand->varname);
+            ValueName val = ssa_build_binop_t(b, op, cur, one, ast->ctype);
+            ssa_build_write(b, ast->operand->varname, val);
+            return val;
+        }
+        if (ast->operand && ast->operand->type == AST_GVAR) {
+            ValueName addr = ssa_build_addr(b, ast->operand->varname, ast->operand->ctype);
+            ValueName cur = ssa_build_load(b, addr, ast->ctype, ast->ctype);
+            ValueName val = ssa_build_binop_t(b, op, cur, one, ast->ctype);
+            ssa_build_store(b, addr, val, ast->ctype);
+            return val;
+        }
+        if (ast->operand && ast->operand->type == AST_DEREF) {
+            ValueName ptr = gen_expr(b, ast->operand->operand);
+            ValueName cur = ssa_build_load(b, ptr, ast->ctype, ast->ctype);
+            ValueName val = ssa_build_binop_t(b, op, cur, one, ast->ctype);
+            ssa_build_store(b, ptr, val, ast->ctype);
+            return val;
+        }
+        ValueName cur = gen_expr(b, ast->operand);
+        return ssa_build_binop_t(b, op, cur, one, ast->ctype);
     }
     
     case '=': {

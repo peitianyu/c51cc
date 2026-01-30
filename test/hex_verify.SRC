@@ -1,0 +1,87 @@
+; .\hex_verify.SRC generated from: .\hex_verify.c
+; COMPILER INVOKED BY:
+;        C:\Keil_v5\C51\BIN\C51.exe .\hex_verify.c SRC
+
+$NOMOD51
+
+NAME	HEX_VERIFY
+
+P1	DATA	090H
+?PR?_delay?HEX_VERIFY                    SEGMENT CODE 
+?PR?main?HEX_VERIFY  SEGMENT CODE 
+	EXTRN	CODE (?C_STARTUP)
+	PUBLIC	main
+; sfr P1 = 0x90;
+; 
+; static void delay(unsigned int n)
+
+	RSEG  ?PR?_delay?HEX_VERIFY
+_delay:
+	USING	0
+			; SOURCE LINE # 3
+;---- Variable 'n?040' assigned to Register 'R6/R7' ----
+; {
+			; SOURCE LINE # 4
+?C0001:
+;     while (n--) {
+			; SOURCE LINE # 5
+	MOV  	A,R7
+	DEC  	R7
+	MOV  	R4,AR6
+	JNZ  	?C0007
+	DEC  	R6
+?C0007:
+	ORL  	A,R4
+	JNZ  	?C0001
+;         (void)n;
+			; SOURCE LINE # 6
+;     }
+			; SOURCE LINE # 7
+; }
+			; SOURCE LINE # 8
+	RET  	
+; END OF _delay
+
+; 
+; int main(void)
+
+	RSEG  ?PR?main?HEX_VERIFY
+main:
+	USING	0
+			; SOURCE LINE # 10
+; {
+			; SOURCE LINE # 11
+;     unsigned char v = 0x01;
+			; SOURCE LINE # 12
+;---- Variable 'v?141' assigned to Register 'R5' ----
+	MOV  	R5,#01H
+?C0004:
+;     while (1) {
+			; SOURCE LINE # 13
+;         P1 = v;
+			; SOURCE LINE # 14
+	MOV  	P1,R5
+;         delay(30000);
+			; SOURCE LINE # 15
+	MOV  	R7,#030H
+	MOV  	R6,#075H
+	LCALL	_delay
+;         v = (unsigned char)((v << 1) | (v >> 7));
+			; SOURCE LINE # 16
+	MOV  	A,R5
+	ADD  	A,ACC
+	MOV  	R7,A
+	MOV  	A,R5
+	SWAP 	A
+	RRC  	A
+	RRC  	A
+	RRC  	A
+	ANL  	A,#01H
+	ORL  	A,R7
+	MOV  	R5,A
+;     }
+			; SOURCE LINE # 17
+	SJMP 	?C0004
+; END OF main
+
+	END

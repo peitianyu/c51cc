@@ -419,10 +419,9 @@ ObjFile *c51_link(List *objs)
     return out;
 }
 
-
 #ifdef MINITEST_IMPLEMENTATION
-#include "minitest.h"
-#include "ssa.h"
+#include "../minitest.h"
+#include "../ssa.h"
 
 extern List *ctypes;
 extern List *strings;

@@ -72,6 +72,7 @@ typedef struct Func {
     const char  *name;
     Ctype       *ret_type;
     List        *params;    // char* 列表
+    List        *param_types; // Ctype* 列表
     List        *blocks;    // Block* 列表
     Block       *entry;
     Dict        *stack_offsets; // 局部变量栈偏移 (char* -> int*)
