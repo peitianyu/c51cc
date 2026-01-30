@@ -74,6 +74,8 @@ typedef struct Func {
     List        *params;    // char* 列表
     List        *blocks;    // Block* 列表
     Block       *entry;
+    Dict        *stack_offsets; // 局部变量栈偏移 (char* -> int*)
+    int          stack_size;
     bool        is_inline;
     bool        is_noreturn;
     // 中断函数信息

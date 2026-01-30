@@ -1229,9 +1229,12 @@ static bool value_defined_in_block(Block *blk, ValueName v)
 typedef struct {
     const char *label;
     Ctype *mem_type;
+    bool is_stack;
+    int stack_off;
 } AddrInfo;
 
 static Dict *g_addr_map = NULL;
+static Dict *g_const_map = NULL;
 static Dict *g_mmio_map = NULL;
 
 struct MmioInfo {
@@ -1274,6 +1277,8 @@ static void addr_map_put(ValueName v, const char *label, Ctype *mem_type)
         info->label = label;
     }
     info->mem_type = mem_type;
+    info->is_stack = false;
+    info->stack_off = 0;
     dict_put(g_addr_map, vreg_key(v), info);
 }
 
@@ -1285,11 +1290,50 @@ static AddrInfo *addr_map_get(ValueName v)
     return (AddrInfo *)dict_get(g_addr_map, buf);
 }
 
+static void addr_map_put_stack(ValueName v, int offset, Ctype *mem_type)
+{
+    if (!g_addr_map || v <= 0) return;
+    AddrInfo *info = gen_alloc(sizeof(AddrInfo));
+    info->label = NULL;
+    info->mem_type = mem_type;
+    info->is_stack = true;
+    info->stack_off = offset;
+    dict_put(g_addr_map, vreg_key(v), info);
+}
+
+static void const_map_put(ValueName v, int val)
+{
+    if (!g_const_map || v <= 0) return;
+    int *p = gen_alloc(sizeof(int));
+    *p = val;
+    dict_put(g_const_map, vreg_key(v), p);
+}
+
+static bool const_map_get(ValueName v, int *out)
+{
+    if (!g_const_map || v <= 0) return false;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "v%d", v);
+    int *p = (int *)dict_get(g_const_map, buf);
+    if (!p) return false;
+    if (out) *out = *p;
+    return true;
+}
+
 static int data_space_kind(Ctype *type)
 {
     if (!type) return 1;
     int d = get_attr(type->attr).ctype_data;
     return d ? d : 1;
+}
+
+static bool func_stack_offset(Func *f, const char *name, int *out)
+{
+    if (!f || !name || !f->stack_offsets) return false;
+    int *p = (int *)dict_get(f->stack_offsets, (char *)name);
+    if (!p) return false;
+    if (out) *out = *p;
+    return true;
 }
 
 static List *collect_block_defs(Block *blk)
@@ -1363,16 +1407,42 @@ static void emit_phi_moves_for_edge(Section *sec, Func *func, Block *from, const
     free(fallbacks);
 }
 
-static void emit_load_stack_param(Section *sec, int offset, const char *dst)
+static void emit_load_stack_param(Section *sec, int offset, const char *dst, bool use_fp)
 {
     if (!sec || !dst) return;
     char buf[16];
-    emit_ins2(sec, "mov", "A", "0x81");
+    emit_ins2(sec, "mov", "A", use_fp ? "0x2E" : "0x81");
     snprintf(buf, sizeof(buf), "#0x%02X", (unsigned char)(0 - offset));
     emit_ins2(sec, "add", "A", buf);
     emit_ins2(sec, "mov", "r0", "A");
     emit_ins2(sec, "mov", "A", "@r0");
     emit_ins2(sec, "mov", dst, "A");
+}
+
+static void emit_stack_addr(Section *sec, int offset)
+{
+    char buf[16];
+    emit_ins2(sec, "mov", "A", "0x2E");
+    snprintf(buf, sizeof(buf), "#%d", offset + 1);
+    emit_ins2(sec, "add", "A", buf);
+    emit_ins2(sec, "mov", "r0", "A");
+}
+
+static void emit_frame_prologue(Section *sec, int stack_size)
+{
+    if (!sec || stack_size <= 0) return;
+    char buf[16];
+    emit_ins2(sec, "mov", "0x2E", "0x81");
+    emit_ins2(sec, "mov", "A", "0x81");
+    snprintf(buf, sizeof(buf), "#%d", stack_size);
+    emit_ins2(sec, "add", "A", buf);
+    emit_ins2(sec, "mov", "0x81", "A");
+}
+
+static void emit_frame_epilogue(Section *sec, int stack_size)
+{
+    if (!sec || stack_size <= 0) return;
+    emit_ins2(sec, "mov", "0x81", "0x2E");
 }
 
 static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
@@ -1394,13 +1464,15 @@ static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                 emit_ins2(sec, "mov", vreg(ins->dest), regbuf);
             } else if (idx >= 8) {
                 int offset = 2 + (idx - 8);
-                emit_load_stack_param(sec, offset, vreg(ins->dest));
+                emit_load_stack_param(sec, offset, vreg(ins->dest), func && func->stack_size > 0);
             }
         }
         return;
     case IROP_CONST:
         snprintf(buf, sizeof(buf), "#%lld", (long long)ins->imm.ival);
         emit_ins2(sec, "mov", vreg(ins->dest), buf);
+        if (g_const_map)
+            const_map_put(ins->dest, (int)ins->imm.ival);
         break;
     case IROP_ADD:
         emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
@@ -1692,8 +1764,46 @@ static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         break;
     }
     case IROP_ADDR: {
-        if (ins->labels && ins->labels->len > 0)
-            addr_map_put(ins->dest, list_get(ins->labels, 0), ins->mem_type);
+        if (ins->labels && ins->labels->len > 0) {
+            const char *name = list_get(ins->labels, 0);
+            int off = 0;
+            if (func_stack_offset(func, name, &off)) {
+                char obuf[16];
+                emit_ins2(sec, "mov", "A", "0x2E");
+                snprintf(obuf, sizeof(obuf), "#%d", off + 1);
+                emit_ins2(sec, "add", "A", obuf);
+                emit_ins2(sec, "mov", vreg(ins->dest), "A");
+            } else {
+                addr_map_put(ins->dest, name, ins->mem_type);
+            }
+        }
+        return;
+    }
+    case IROP_OFFSET: {
+        ValueName base = *(ValueName *)list_get(ins->args, 0);
+        ValueName idx = *(ValueName *)list_get(ins->args, 1);
+        int elem = (int)ins->imm.ival;
+        int cidx = 0;
+        if (const_map_get(idx, &cidx)) {
+            int off = cidx * elem;
+            char obuf[16];
+            emit_ins2(sec, "mov", "A", vreg(base));
+            snprintf(obuf, sizeof(obuf), "#%d", off);
+            emit_ins2(sec, "add", "A", obuf);
+            emit_ins2(sec, "mov", vreg(ins->dest), "A");
+        } else {
+            emit_ins2(sec, "mov", "A", vreg(idx));
+            if (elem != 1) {
+                char ebuf[16];
+                snprintf(ebuf, sizeof(ebuf), "#%d", elem);
+                emit_ins2(sec, "mov", "B", ebuf);
+                emit_ins1(sec, "mul", "AB");
+            }
+            emit_ins2(sec, "mov", "r6", "A");
+            emit_ins2(sec, "mov", "A", vreg(base));
+            emit_ins2(sec, "add", "A", "r6");
+            emit_ins2(sec, "mov", vreg(ins->dest), "A");
+        }
         return;
     }
     case IROP_LOAD:
@@ -1702,6 +1812,12 @@ static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         AddrInfo *info = addr_map_get(ptr);
         Ctype *mtype = ins->mem_type ? ins->mem_type : (info ? info->mem_type : NULL);
         int space = data_space_kind(mtype);
+        if (info && info->is_stack) {
+            emit_stack_addr(sec, info->stack_off);
+            emit_ins2(sec, "mov", "A", "@r0");
+            emit_ins2(sec, "mov", vreg(ins->dest), "A");
+            break;
+        }
         if (info && info->label && is_register_bit(mtype)) {
             emit_ins2(sec, "mov", "C", info->label);
             emit_ins2(sec, "mov", "A", "#0");
@@ -1748,6 +1864,11 @@ static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         Ctype *mtype = ins->mem_type ? ins->mem_type : (info ? info->mem_type : NULL);
         int space = data_space_kind(mtype);
         emit_ins2(sec, "mov", "A", vreg(val));
+        if (info && info->is_stack) {
+            emit_stack_addr(sec, info->stack_off);
+            emit_ins2(sec, "mov", "@r0", "A");
+            break;
+        }
         if (info && info->label && is_register_bit(mtype)) {
             emit_ins2(sec, "mov", "C", "ACC.0");
             emit_ins2(sec, "mov", info->label, "C");
@@ -1837,6 +1958,8 @@ static void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     case IROP_RET:
         if (ins->args && ins->args->len > 0)
             emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
+        if (func && func->stack_size > 0)
+            emit_frame_epilogue(sec, func->stack_size);
         emit_ins0(sec, "ret");
         break;
     case IROP_PHI:
@@ -1995,12 +2118,15 @@ ObjFile *c51_gen_from_ssa(void *ssa)
         if (!f || !f->name) continue;
         regalloc_stub(f);
         g_addr_map = make_dict(NULL);
+        g_const_map = make_dict(NULL);
         char sec_name[128];
         snprintf(sec_name, sizeof(sec_name), ".text.%s", f->name);
         Section *sec = get_or_create_section(obj, sec_name, SEC_CODE);
 
         objfile_add_symbol(obj, (char *)f->name, SYM_FUNC, section_index_from_ptr(obj, sec), 0, 0, SYM_FLAG_GLOBAL);
         emit_label(sec, f->name);
+        if (f->stack_size > 0)
+            emit_frame_prologue(sec, f->stack_size);
 
         for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
             Block *b = iter_next(&bit);
@@ -2030,6 +2156,16 @@ ObjFile *c51_gen_from_ssa(void *ssa)
             }
             dict_clear(g_addr_map);
             g_addr_map = NULL;
+        }
+        if (g_const_map) {
+            for (Iter it = list_iter(g_const_map->list); !iter_end(it);) {
+                DictEntry *e = iter_next(&it);
+                if (!e) continue;
+                free(e->key);
+                free(e->val);
+            }
+            dict_clear(g_const_map);
+            g_const_map = NULL;
         }
     }
 

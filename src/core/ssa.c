@@ -25,7 +25,6 @@ static void* ssa_alloc(size_t size) {
     return p;
 }
 
-static Dict *g_local_agg_map = NULL;
 
 static char* ssa_strdup(const char *s) {
     if (!s) return NULL;
@@ -40,6 +39,13 @@ static ValueName ssa_new_value(SSABuild *b) {
 }
 
 static ValueName gen_expr(SSABuild *b, Ast *ast);
+static void emit_struct_init_runtime(SSABuild *b, ValueName base, Ctype *type, Ast *init);
+static void emit_array_init_runtime(SSABuild *b, ValueName base, Ctype *type, Ast *init);
+static ValueName ssa_build_const(SSABuild *b, int64_t val);
+static ValueName ssa_build_const_t(SSABuild *b, int64_t val, Ctype *type);
+static ValueName ssa_build_offset(SSABuild *b, ValueName ptr, ValueName idx, int elem_size);
+static void ssa_build_store(SSABuild *b, ValueName ptr, ValueName val, Ctype *mem_type);
+static ValueName gen_type_cast(SSABuild *b, ValueName val, Ctype *from, Ctype *to);
 
 static Instr* ssa_make_instr(SSABuild *b, IrOp op) {
     Instr *i = ssa_alloc(sizeof(Instr));
@@ -346,23 +352,6 @@ static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items)
     }
 }
 
-static const char *ensure_local_agg_label(SSABuild *b, const char *var, bool *is_new)
-{
-    if (is_new) *is_new = false;
-    if (!b || !var || !b->cur_func || !b->cur_func->name) return var;
-    if (!g_local_agg_map) g_local_agg_map = make_dict(NULL);
-
-    char key[256];
-    snprintf(key, sizeof(key), ".L_%s_%s", b->cur_func->name, var);
-    char *label = (char *)dict_get(g_local_agg_map, key);
-    if (!label) {
-        label = ssa_strdup(key);
-        dict_put(g_local_agg_map, ssa_strdup(key), label);
-        if (is_new) *is_new = true;
-    }
-    return label;
-}
-
 
 static Instr *build_global_init_instr(SSABuild *b, Ctype *type, Ast *init)
 {
@@ -408,6 +397,64 @@ static Instr *build_global_init_instr(SSABuild *b, Ctype *type, Ast *init)
     return NULL;
 }
 
+static void emit_array_init_runtime(SSABuild *b, ValueName base, Ctype *type, Ast *init)
+{
+    if (!b || !type || type->type != CTYPE_ARRAY || !init) return;
+    int elem_size = type->ptr->size;
+    if (init->type == AST_STRING && type->ptr->type == CTYPE_CHAR) {
+        int len = (int)strlen(init->sval) + 1;
+        if (type->len > 0 && len > type->len) len = type->len;
+        for (int i = 0; i < len; ++i) {
+            ValueName addr = ssa_build_offset(b, base, ssa_build_const(b, i * elem_size), 1);
+            ValueName val = ssa_build_const_t(b, (unsigned char)init->sval[i], type->ptr);
+            ssa_build_store(b, addr, val, type->ptr);
+        }
+        return;
+    }
+    if (init->type != AST_ARRAY_INIT) return;
+    int idx = 0;
+    for (Iter it = list_iter(init->arrayinit); !iter_end(it); ++idx) {
+        Ast *one = iter_next(&it);
+        if (type->len > 0 && idx >= type->len) break;
+        ValueName addr = ssa_build_offset(b, base, ssa_build_const(b, idx * elem_size), 1);
+        if (type->ptr->type == CTYPE_ARRAY) {
+            emit_array_init_runtime(b, addr, type->ptr, one);
+        } else if (type->ptr->type == CTYPE_STRUCT) {
+            emit_struct_init_runtime(b, addr, type->ptr, one);
+        } else if (one) {
+            ValueName val = gen_expr(b, one);
+            val = gen_type_cast(b, val, one->ctype, type->ptr);
+            ssa_build_store(b, addr, val, type->ptr);
+        }
+    }
+}
+
+static void emit_struct_init_runtime(SSABuild *b, ValueName base, Ctype *type, Ast *init)
+{
+    if (!b || !type || type->type != CTYPE_STRUCT || !init) return;
+    if (init->type != AST_STRUCT_INIT) return;
+    int idx = 0;
+    for (Iter it = list_iter(type->fields->list); !iter_end(it); ++idx) {
+        DictEntry *e = iter_next(&it);
+        if (!e) continue;
+        Ctype *field = dict_get(type->fields, e->key);
+        Ast *one = list_get(init->structinit, idx);
+        if (!field || !one) continue;
+        if (field->bit_size > 0) continue;
+        ValueName addr = ssa_build_offset(b, base, ssa_build_const(b, field->offset), 1);
+        if (field->type == CTYPE_ARRAY) {
+            emit_array_init_runtime(b, addr, field, one);
+        } else if (field->type == CTYPE_STRUCT) {
+            emit_struct_init_runtime(b, addr, field, one);
+        } else {
+            ValueName val = gen_expr(b, one);
+            val = gen_type_cast(b, val, one->ctype, field);
+            ssa_build_store(b, addr, val, field);
+        }
+        if (type->is_union) break;
+    }
+}
+
 static void ssa_build_reset(SSABuild *b) {
     if (!b) return;
     b->cur_func = NULL;
@@ -439,6 +486,8 @@ static Func* ssa_build_function(SSABuild *b, const char *name, Ctype *ret) {
     f->ret_type = ret;
     f->params = make_list();
     f->blocks = make_list();
+    f->stack_offsets = make_dict(NULL);
+    f->stack_size = 0;
     f->is_inline = false;
     f->is_noreturn = false;
     
@@ -969,22 +1018,13 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         Ast *var = ast->declvar;
         if (var && var->type == AST_LVAR) {
             if (var->ctype && (var->ctype->type == CTYPE_STRUCT || var->ctype->type == CTYPE_ARRAY)) {
-                bool is_new = false;
-                Instr *init_instr = NULL;
-                long init_val = 0;
-                bool has_init = false;
                 if (ast->declinit) {
-                    if (ast->declinit->type == AST_LITERAL && is_inttype(ast->declinit->ctype)) {
-                        init_val = ast->declinit->ival;
-                        has_init = true;
-                    }
-                    init_instr = build_global_init_instr(b, var->ctype, ast->declinit);
-                    if (init_instr && init_instr->imm.blob.bytes && init_instr->imm.blob.len > 0)
-                        has_init = true;
+                    ValueName base = ssa_build_addr(b, var->varname, var->ctype);
+                    if (var->ctype->type == CTYPE_STRUCT)
+                        emit_struct_init_runtime(b, base, var->ctype, ast->declinit);
+                    else
+                        emit_array_init_runtime(b, base, var->ctype, ast->declinit);
                 }
-                const char *label = ensure_local_agg_label(b, var->varname, &is_new);
-                if (is_new)
-                    ssa_add_global(b, label, var->ctype, init_val, has_init, init_instr, true, false);
             } else {
                 if (ast->declinit) {
                     ValueName val = gen_expr(b, ast->declinit);
@@ -1124,6 +1164,25 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
     }
 }
 
+static void assign_stack_offsets(Func *f, List *localvars)
+{
+    if (!f || !localvars) return;
+    int offset = 0;
+    for (Iter it = list_iter(localvars); !iter_end(it);) {
+        Ast *v = iter_next(&it);
+        if (!v || v->type != AST_LVAR || !v->ctype) continue;
+        if (v->ctype->type != CTYPE_STRUCT && v->ctype->type != CTYPE_ARRAY)
+            continue;
+        int size = v->ctype->size;
+        if (size <= 0) continue;
+        int *p = ssa_alloc(sizeof(int));
+        *p = offset;
+        dict_put(f->stack_offsets, ssa_strdup(v->varname), p);
+        offset += size;
+    }
+    f->stack_size = offset;
+}
+
 static void gen_func(SSABuild *b, Ast *ast) {
     if (!ast || ast->type != AST_FUNC_DEF) return;
     
@@ -1147,6 +1206,9 @@ static void gen_func(SSABuild *b, Ast *ast) {
             }
         }
     }
+
+    if (ast->localvars)
+        assign_stack_offsets(f, ast->localvars);
     
     if (ast->body) {
         gen_stmt(b, ast->body);
