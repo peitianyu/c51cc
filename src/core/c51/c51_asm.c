@@ -517,10 +517,15 @@ static void write_symbol_visibility(FILE *fp, const ObjFile *obj)
     for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
         Symbol *sym = iter_next(&it);
         if (!sym || !sym->name) continue;
-        if (sym->flags & SYM_FLAG_GLOBAL)
-            fprintf(fp, ".global %s\n", sym->name);
-        if (sym->flags & SYM_FLAG_EXTERN)
-            fprintf(fp, ".extern %s\n", sym->name);
+        // SFR: section == -2, 输出 .equ 定义
+        if (sym->section == -2) {
+            fprintf(fp, ".equ %s, 0x%02X\n", sym->name, sym->value & 0xFF);
+        } else {
+            if (sym->flags & SYM_FLAG_GLOBAL)
+                fprintf(fp, ".global %s\n", sym->name);
+            if (sym->flags & SYM_FLAG_EXTERN)
+                fprintf(fp, ".extern %s\n", sym->name);
+        }
     }
 }
 

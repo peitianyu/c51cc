@@ -47,12 +47,13 @@ static bool is_pure_instr(Instr *i) {
     case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT:
     case IROP_BITCAST: case IROP_INTTOPTR: case IROP_PTRTOINT:
     case IROP_SELECT: case IROP_PHI: case IROP_OFFSET:
+    case IROP_ADDR:
         return true;
     case IROP_LOAD:
         return !is_volatile_mem(i);
     case IROP_STORE: case IROP_CALL:
     case IROP_RET: case IROP_JMP: case IROP_BR:
-    case IROP_PARAM: case IROP_ADDR: case IROP_NOP:
+    case IROP_PARAM: case IROP_NOP:
     default:
         return false;
     }
@@ -63,6 +64,7 @@ static bool is_value_used(Func *f, ValueName val) {
         Block *blk = iter_next(&it);
         for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
             Instr *inst = iter_next(&jt);
+            if (!inst->args) continue;
             for (int i = 0; i < inst->args->len; i++) {
                 ValueName *arg = list_get(inst->args, i);
                 if (*arg == val) return true;
@@ -70,6 +72,7 @@ static bool is_value_used(Func *f, ValueName val) {
         }
         for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
             Instr *phi = iter_next(&jt);
+            if (!phi->args) continue;
             for (int i = 0; i < phi->args->len; i++) {
                 ValueName *arg = list_get(phi->args, i);
                 if (*arg == val) return true;
@@ -456,6 +459,52 @@ static bool pass_algebraic_simplify(Func *f, PassStats *stats) {
     return changed;
 }
 
+/* Pass 6: 比较链简化 (ne (eq x, 0), 0) -> x */
+static bool pass_simplify_compare_chain(Func *f, PassStats *stats) {
+    bool changed = false;
+    int simplified = 0;
+    
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
+            Instr *inst = iter_next(&jt);
+            
+            // 模式：ne (eq x, 0), 0 -> x
+            if (inst->op == IROP_NE && inst->args->len == 2) {
+                ValueName a = get_arg(inst, 0);
+                ValueName b = get_arg(inst, 1);
+                
+                // 检查 b 是否是 const 0
+                Instr *b_def = find_def_instr(f, b);
+                if (b_def && b_def->op == IROP_CONST && b_def->imm.ival == 0) {
+                    // 检查 a 是否是 eq x, 0
+                    Instr *a_def = find_def_instr(f, a);
+                    if (a_def && a_def->op == IROP_EQ && a_def->args->len == 2) {
+                        ValueName eq_a = get_arg(a_def, 0);
+                        ValueName eq_b = get_arg(a_def, 1);
+                        
+                        // 检查 eq 的第二个操作数是否是 const 0
+                        Instr *eq_b_def = find_def_instr(f, eq_b);
+                        if (eq_b_def && eq_b_def->op == IROP_CONST && eq_b_def->imm.ival == 0) {
+                            // 替换：ne (eq x, 0), 0 -> x
+                            list_clear(inst->args);
+                            ValueName *new_arg = pass_alloc(sizeof(ValueName));
+                            *new_arg = eq_a;
+                            list_push(inst->args, new_arg);
+                            inst->op = IROP_TRUNC;  // 使用 trunc 作为布尔转换
+                            simplified++;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if (stats) stats->values_folded += simplified;
+    return changed;
+}
+
 /* 优化 API */
 void ssa_optimize_func(Func *f, int level) {
     if (!f || level == OPT_O0) return;
@@ -470,6 +519,7 @@ void ssa_optimize_func(Func *f, int level) {
         iteration++;
         changed |= pass_const_fold(f, &stats);
         changed |= pass_const_global_load(f, &stats);
+        changed |= pass_simplify_compare_chain(f, &stats);
         changed |= pass_simplify_phis(f, &stats);
         changed |= pass_simple_dce(f, &stats);
         changed |= pass_algebraic_simplify(f, &stats);
