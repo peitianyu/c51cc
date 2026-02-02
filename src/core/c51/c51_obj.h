@@ -91,4 +91,6 @@ ObjFile *c51_asm_from_text(const char *text, char **error, int *error_line);
 int c51_write_asm(FILE *fp, const ObjFile *obj);
 int c51_write_hex(FILE *fp, const ObjFile *obj);
 
+void print_link_summary(const ObjFile *out);
+
 #endif /* C51CC_OBJ_H */

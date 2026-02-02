@@ -429,6 +429,39 @@ ObjFile *c51_link(List *objs)
     return out;
 }
 
+void print_link_summary(const ObjFile *out)
+{
+    if (!out) return;
+    fprintf(stderr, "\n==== Link Map ====\n");
+    /* 1. 段信息 */
+    for (Iter it = list_iter(out->sections); !iter_end(it);) {
+        Section *sec = iter_next(&it);
+        if (!sec) continue;
+        fprintf(stderr, "section %-6s  addr=0x%04X  size=%-4d  align=%d\n",
+                sec->name, 0, sec->bytes_len, sec->align);
+    }
+    /* 2. 符号信息 */
+    for (Iter it = list_iter(out->symbols); !iter_end(it);) {
+        Symbol *sym = iter_next(&it);
+        if (!sym || !sym->name) continue;
+        const char *sec = sym->section == -2 ? "abs" :
+                          sym->section == -1 ? "ext" :
+                          objfile_get_section(out, sym->section)->name;
+        fprintf(stderr, "symbol %-16s  sec=%-6s  value=0x%04X  size=%-3d\n",
+                sym->name, sec, sym->value, sym->size);
+    }
+    /* 3. 重定位信息 */
+    for (Iter it = list_iter(out->relocs); !iter_end(it);) {
+        Reloc *r = iter_next(&it);
+        if (!r) continue;
+        Section *sec = objfile_get_section(out, r->section);
+        fprintf(stderr, "reloc  off=0x%04X  kind=%d  sym=%-16s  addend=%d  → %s\n",
+                r->offset, r->kind, r->symbol, r->addend,
+                sec ? sec->name : "?");
+    }
+    fprintf(stderr, "==== End Link Map ====\n");
+}
+
 #ifdef MINITEST_IMPLEMENTATION
 #include "../minitest.h"
 #include "../ssa.h"
@@ -481,6 +514,9 @@ TEST(test, c51_link) {
     }
 
     ObjFile *out = c51_link(objs);
+    
+    print_link_summary(out);
+    
     ASSERT(out);
 
     printf("\n=== ASM Output (link) ===\n");
