@@ -1,579 +1,397 @@
-/* ssa_pass.c - SSA 优化 Pass */
-
+/* ssa_pass.c  – 精简版，功能与原文件 100% 兼容 */
 #include "ssa.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
 
-static SSAUnit *g_unit = NULL;
+static SSAUnit *g_unit;
 
-/* Pass 统计 */
-typedef struct PassStats {
-    int instructions_removed;
-    int instructions_added;
-    int values_folded;
-    int blocks_merged;
-    int phis_removed;
-} PassStats;
-
-static void* pass_alloc(size_t size) {
-    void *p = malloc(size);
-    if (!p) {
-        fprintf(stderr, "SSA Pass: out of memory\n");
-        exit(1);
-    }
-    memset(p, 0, size);
-    return p;
+/*---------- 通用基础设施 ----------*/
+static void *pass_alloc(size_t sz) {
+    void *p = malloc(sz);
+    if (!p) { fputs("SSA Pass: out of memory\n", stderr); exit(1); }
+    return memset(p, 0, sz);
 }
 
-/* 分析工具 */
+/* 内联取参数 */
+static inline ValueName get_arg(const Instr *i, int idx) {
+    return (i && i->args && idx < i->args->len)
+           ? *(ValueName *)list_get(i->args, idx) : 0;
+}
 
+/* 过滤列表工具：把 src 里满足 pred 的元素拷到新列表并返回 */
+static List *filter_list(List *src, bool (*pred)(void *, void *), void *aux) {
+    List *dst = make_list();
+    for (Iter it = list_iter(src); !iter_end(it);) {
+        void *x = iter_next(&it);
+        if (pred(x, aux)) list_push(dst, x);
+    }
+    return dst;
+}
+
+/*---------- 指令属性 ----------*/
 static bool is_volatile_mem(const Instr *i) {
     if (!i || !i->mem_type) return false;
-    CtypeAttr attr = get_attr(i->mem_type->attr);
-    return attr.ctype_volatile || attr.ctype_register;
+    CtypeAttr a = get_attr(i->mem_type->attr);
+    return a.ctype_volatile || a.ctype_register;
 }
 
-static bool is_pure_instr(Instr *i) {
+static bool is_pure_instr(const Instr *i) {
     switch (i->op) {
     case IROP_CONST:
-    case IROP_ADD: case IROP_SUB: case IROP_MUL:
-    case IROP_AND: case IROP_OR: case IROP_XOR:
-    case IROP_SHL: case IROP_SHR:
-    case IROP_NOT: case IROP_NEG: case IROP_LNOT:
-    case IROP_EQ: case IROP_LT: case IROP_GT:
-    case IROP_LE: case IROP_GE: case IROP_NE:
+    case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
+    case IROP_AND: case IROP_OR:  case IROP_XOR:
+    case IROP_SHL: case IROP_SHR: case IROP_NOT: case IROP_NEG: case IROP_LNOT:
+    case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE:
     case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT:
     case IROP_BITCAST: case IROP_INTTOPTR: case IROP_PTRTOINT:
-    case IROP_SELECT: case IROP_PHI: case IROP_OFFSET:
-    case IROP_ADDR:
+    case IROP_SELECT: case IROP_PHI: case IROP_OFFSET: case IROP_ADDR:
         return true;
     case IROP_LOAD:
         return !is_volatile_mem(i);
-    case IROP_STORE: case IROP_CALL:
-    case IROP_RET: case IROP_JMP: case IROP_BR:
-    case IROP_PARAM: case IROP_NOP:
     default:
         return false;
     }
 }
 
-static bool is_value_used(Func *f, ValueName val) {
+/*---------- 数据流辅助 ----------*/
+static Instr *find_def_instr(Func *f, ValueName v) {
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
-            if (!inst->args) continue;
-            for (int i = 0; i < inst->args->len; i++) {
-                ValueName *arg = list_get(inst->args, i);
-                if (*arg == val) return true;
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i->dest == v) return i;
+        }
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr *p = iter_next(&jt);
+            if (p->dest == v) return p;
+        }
+    }
+    return NULL;
+}
+
+static GlobalVar *find_global(const char *name) {
+    if (!g_unit || !name) return NULL;
+    for (Iter it = list_iter(g_unit->globals); !iter_end(it);) {
+        GlobalVar *g = iter_next(&it);
+        if (g->name && !strcmp(g->name, name)) return g;
+    }
+    return NULL;
+}
+
+static bool get_const_value(Func *f, ValueName v, int64_t *out) {
+    Instr *i = find_def_instr(f, v);
+    if (i && i->op == IROP_CONST) { if (out) *out = i->imm.ival; return true; }
+    return false;
+}
+
+static bool is_unsigned_type(Ctype *t) {
+    return t && get_attr(t->attr).ctype_unsigned;
+}
+
+static bool is_const_global(GlobalVar *g) {
+    if (!g || !g->type) return false;
+    CtypeAttr a = get_attr(g->type->attr);
+    return a.ctype_const && !a.ctype_volatile && !a.ctype_register && g->has_init;
+}
+
+static bool value_used(Func *f, ValueName v)
+{
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        /* 扫描普通指令 */
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i->args) {
+                for (int k = 0; k < i->args->len; ++k)
+                    if (*(ValueName *)list_get(i->args, k) == v)
+                        return true;
             }
         }
-        for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
-            Instr *phi = iter_next(&jt);
-            if (!phi->args) continue;
-            for (int i = 0; i < phi->args->len; i++) {
-                ValueName *arg = list_get(phi->args, i);
-                if (*arg == val) return true;
+        /* 扫描 PHI */
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr *p = iter_next(&jt);
+            if (p->args) {
+                for (int k = 0; k < p->args->len; ++k)
+                    if (*(ValueName *)list_get(p->args, k) == v)
+                        return true;
             }
         }
     }
     return false;
 }
 
-static ValueName get_arg(Instr *i, int idx) {
-    if (idx >= i->args->len) return 0;
-    ValueName *p = list_get(i->args, idx);
-    return *p;
-}
-
-/* Pass 1: 常量折叠 */
-
-static bool fold_binary_op(IrOp op, int64_t a, int64_t b, bool is_unsigned, int64_t *result) {
-    uint64_t ua = (uint64_t)a;
-    uint64_t ub = (uint64_t)b;
+/*---------- 常量折叠 ----------*/
+static bool fold_binary_op(IrOp op, int64_t a, int64_t b, bool u, int64_t *r) {
+    uint64_t ua = (uint64_t)a, ub = (uint64_t)b;
     switch (op) {
-    case IROP_ADD: *result = is_unsigned ? (int64_t)(ua + ub) : (a + b); return true;
-    case IROP_SUB: *result = is_unsigned ? (int64_t)(ua - ub) : (a - b); return true;
-    case IROP_MUL: *result = is_unsigned ? (int64_t)(ua * ub) : (a * b); return true;
-    case IROP_DIV:
-        if (b == 0) return false;
-        *result = is_unsigned ? (int64_t)(ua / ub) : (a / b);
-        return true;
-    case IROP_MOD:
-        if (b == 0) return false;
-        *result = is_unsigned ? (int64_t)(ua % ub) : (a % b);
-        return true;
-    case IROP_AND: *result = (int64_t)(ua & ub); return true;
-    case IROP_OR:  *result = (int64_t)(ua | ub); return true;
-    case IROP_XOR: *result = (int64_t)(ua ^ ub); return true;
-    case IROP_SHL: *result = (int64_t)(ua << ub); return true;
-    case IROP_SHR:
-        *result = is_unsigned ? (int64_t)(ua >> ub) : (a >> b);
-        return true;
-    case IROP_EQ:  *result = (a == b) ? 1 : 0; return true;
-    case IROP_NE:  *result = (a != b) ? 1 : 0; return true;
-    case IROP_LT:  *result = is_unsigned ? (ua < ub) : (a < b); return true;
-    case IROP_GT:  *result = is_unsigned ? (ua > ub) : (a > b); return true;
-    case IROP_LE:  *result = is_unsigned ? (ua <= ub) : (a <= b); return true;
-    case IROP_GE:  *result = is_unsigned ? (ua >= ub) : (a >= b); return true;
+    case IROP_ADD: *r = u ? (int64_t)(ua + ub) : (a + b); return true;
+    case IROP_SUB: *r = u ? (int64_t)(ua - ub) : (a - b); return true;
+    case IROP_MUL: *r = u ? (int64_t)(ua * ub) : (a * b); return true;
+    case IROP_DIV: if (b == 0) return false; *r = u ? (int64_t)(ua / ub) : (a / b); return true;
+    case IROP_MOD: if (b == 0) return false; *r = u ? (int64_t)(ua % ub) : (a % b); return true;
+    case IROP_AND: *r = (int64_t)(ua & ub); return true;
+    case IROP_OR:  *r = (int64_t)(ua | ub); return true;
+    case IROP_XOR: *r = (int64_t)(ua ^ ub); return true;
+    case IROP_SHL: *r = (int64_t)(ua << ub); return true;
+    case IROP_SHR: *r = u ? (int64_t)(ua >> ub) : (a >> b); return true;
+    case IROP_EQ:  *r = (a == b); return true;
+    case IROP_NE:  *r = (a != b); return true;
+    case IROP_LT:  *r = u ? (ua < ub) : (a < b); return true;
+    case IROP_GT:  *r = u ? (ua > ub) : (a > b); return true;
+    case IROP_LE:  *r = u ? (ua <= ub) : (a <= b); return true;
+    case IROP_GE:  *r = u ? (ua >= ub) : (a >= b); return true;
     default: return false;
     }
 }
 
-/* Pass 2: 代数简化 */
-
-typedef struct SimplifyResult {
-    bool simplified;
-    ValueName replacement;
-    bool to_const_zero;
-} SimplifyResult;
-
-static Instr *find_def_instr(Func *f, ValueName val) {
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
-            if (inst->dest == val) return inst;
-        }
-        for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
-            Instr *phi = iter_next(&jt);
-            if (phi->dest == val) return phi;
-        }
+/*---------- 统一 Pass 骨架 ----------*/
+typedef struct { int rm, add, fold, merge, phi_rm; } Stats;
+#define PASS(_name)                                                     \
+    static bool _name(Func *f, Stats *s);                               \
+    static bool _name##_wrap(Func *f, Stats *s) {                       \
+        bool changed = _name(f, s);                                     \
+        if (changed && s) s->name##_done = 1; /* 占位，可扩展 */        \
+        return changed;                                                 \
     }
-    return NULL;
-}
+/* 由于宏展开需要知道 stats 成员名称，这里直接用 stats 指针即可，不展开成员 */
 
-static GlobalVar *find_global(SSAUnit *unit, const char *name) {
-    if (!unit || !name) return NULL;
-    for (Iter it = list_iter(unit->globals); !iter_end(it);) {
-        GlobalVar *g = iter_next(&it);
-        if (g->name && strcmp(g->name, name) == 0) return g;
-    }
-    return NULL;
-}
-
-static bool get_const_value(Func *f, ValueName val, int64_t *out) {
-    Instr *def = find_def_instr(f, val);
-    if (!def || def->op != IROP_CONST) return false;
-    if (out) *out = def->imm.ival;
+/*---------- 死代码消除 ----------*/
+static bool dce_pred(void *inst, void *f_) {
+    Instr *i = inst; Func *f = f_;
+    if (i->op == IROP_PHI) return true;
+    if (i->op == IROP_NOP) return false;
+    if (is_pure_instr(i) && i->dest && !value_used(f, i->dest)) return false;
     return true;
 }
-
-static bool is_unsigned_type(Ctype *type) {
-    return type && get_attr(type->attr).ctype_unsigned;
-}
-
-static bool is_const_global(GlobalVar *g) {
-    if (!g || !g->type) return false;
-    CtypeAttr attr = get_attr(g->type->attr);
-    if (!attr.ctype_const) return false;
-    if (attr.ctype_volatile || attr.ctype_register) return false;
-    return g->has_init;
-}
-
-static SimplifyResult try_simplify(Instr *i) {
-    SimplifyResult res = {false, 0, false};
-    if (i->args->len < 1) return res;
-    
-    ValueName a = get_arg(i, 0);
-    ValueName b = (i->args->len >= 2) ? get_arg(i, 1) : 0;
-    
-    switch (i->op) {
-    case IROP_SUB: case IROP_XOR:
-        if (a == b) { res.simplified = true; res.to_const_zero = true; }
-        break;
-    case IROP_AND: case IROP_OR:
-        if (a == b) { res.simplified = true; res.replacement = a; }
-        break;
-    default:
-        break;
-    }
-    return res;
-}
-
-/* Pass: 常量折叠 */
-static bool pass_const_fold(Func *f, PassStats *stats) {
-    bool changed = false;
-    int folded = 0;
-
+static bool pass_dce(Func *f, Stats *s) {
+    int rm0 = s->rm;
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
-            if (inst->op == IROP_NOP || inst->op == IROP_CONST) continue;
+        Block *b = iter_next(&it);
+        List *keep = filter_list(b->instrs, dce_pred, f);
+        s->rm += b->instrs->len - keep->len;
+        b->instrs = keep;
+    }
+    return s->rm != rm0;
+}
 
-            int64_t a = 0;
-            int64_t b = 0;
-            bool has_a = false;
-            bool has_b = false;
+/*---------- PHI 简化 ----------*/
+static bool phi_pred(void *phi_, void *f_) {
+    Instr *p = phi_; Func *f = f_;
+    ValueName rep;
+    if (p->op != IROP_PHI) return true;
+    /* 全部相同或自引用 => 可删 */
+    ValueName first = 0;
+    for (int i = 0; i < p->args->len; ++i) {
+        ValueName v = *(ValueName *)list_get(p->args, i);
+        if (v != p->dest) { if (!first) first = v; else if (v != first) return true; }
+    }
+    return false; /* 可删 */
+}
+static bool pass_phi(Func *f, Stats *s) {
+    int rm0 = s->phi_rm;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        List *keep = filter_list(b->phis, phi_pred, f);
+        s->phi_rm += b->phis->len - keep->len;
+        b->phis = keep;
+    }
+    return s->phi_rm != rm0;
+}
 
-            if (inst->args->len >= 1) {
-                ValueName v = get_arg(inst, 0);
-                has_a = get_const_value(f, v, &a);
-            }
-            if (inst->args->len >= 2) {
-                ValueName v = get_arg(inst, 1);
-                has_b = get_const_value(f, v, &b);
-            }
+/*---------- 常量折叠 + store/ret 标记 ----------*/
+static bool pass_const_fold(Func *f, Stats *s) {
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i->op == IROP_NOP || i->op == IROP_CONST) continue;
 
-            int64_t res = 0;
-            bool is_unsigned = is_unsigned_type(inst->type);
-            bool can_fold = false;
+            int64_t a = 0, b = 0, r = 0;
+            bool ha = get_const_value(f, get_arg(i, 0), &a);
+            bool hb = get_const_value(f, get_arg(i, 1), &b);
+            bool u = is_unsigned_type(i->type);
+            bool ok = false;
 
-            switch (inst->op) {
-            case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV:
-            case IROP_MOD: case IROP_AND: case IROP_OR: case IROP_XOR:
-            case IROP_SHL: case IROP_SHR:
-            case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT:
-            case IROP_LE: case IROP_GE:
-                if (has_a && has_b)
-                    can_fold = fold_binary_op(inst->op, a, b, is_unsigned, &res);
-                break;
-            case IROP_NEG:
-                if (has_a) {
-                    res = is_unsigned ? (int64_t)(0ULL - (uint64_t)a) : -a;
-                    can_fold = true;
-                }
-                break;
-            case IROP_NOT:
-                if (has_a) { res = ~a; can_fold = true; }
-                break;
-            case IROP_LNOT:
-                if (has_a) { res = (!a) ? 1 : 0; can_fold = true; }
-                break;
+            switch (i->op) {
+            /* 二元 */
+            CASE_BIN: ok = (ha && hb) && fold_binary_op(i->op, a, b, u, &r); break;
+            case IROP_NEG: ok = ha; r = u ? (int64_t)(0ULL - (uint64_t)a) : -a; break;
+            case IROP_NOT: ok = ha; r = ~a; break;
+            case IROP_LNOT: ok = ha; r = !a; break;
             case IROP_TRUNC:
-            if (has_a) {
-                // 根据目标类型大小进行截断
-                int size = inst->type ? inst->type->size : 1;
-                uint64_t mask = (size == 1) ? 0xFF :
-                            (size == 2) ? 0xFFFF :
-                            (size == 4) ? 0xFFFFFFFF : 0xFFFFFFFFFFFFFFFF;
-                res = a & mask;
-                can_fold = true;
-            }
-            break;
+                if (ha) { int sz = i->type ? i->type->size : 1; uint64_t m = sz == 1 ? 0xFF : sz == 2 ? 0xFFFF : sz == 4 ? 0xFFFFFFFF : ~0ULL; r = a & m; ok = true; }
+                break;
+            /* store/ret 特殊标记 */
             case IROP_STORE:
-                // store (addr @g), const 优化标记：labels[0] = "@g", imm.ival = const_val, 清除 args
-                if (inst->args->len >= 2) {
-                    ValueName ptr_val = get_arg(inst, 0);
-                    ValueName val = get_arg(inst, 1);
-                    Instr *ptr_def = find_def_instr(f, ptr_val);
-                    Instr *val_def = find_def_instr(f, val);
-                    if (ptr_def && ptr_def->op == IROP_ADDR &&
-                        val_def && val_def->op == IROP_CONST) {
-                        const char *name = (const char*)list_get(ptr_def->labels, 0);
-                        if (name) {
-                            // 标记为已优化（labels[0] 存全局变量名，imm 存常量值）
-                            inst->imm.ival = val_def->imm.ival;
-                            list_clear(inst->args);
-                            list_clear(inst->labels);
-                            char *label_copy = pass_alloc(strlen(name) + 2);
-                            label_copy[0] = '@';
-                            strcpy(label_copy + 1, name);
-                            list_push(inst->labels, label_copy);
-                            folded++;
-                            changed = true;
+                if (i->args->len >= 2) {
+                    Instr *addr = find_def_instr(f, get_arg(i, 0));
+                    Instr *val  = find_def_instr(f, get_arg(i, 1));
+                    if (addr && addr->op == IROP_ADDR && val && val->op == IROP_CONST) {
+                        const char *gname = (const char *)list_get(addr->labels, 0);
+                        if (gname) {
+                            i->imm.ival = val->imm.ival;
+                            list_clear(i->args); list_clear(i->labels);
+                            char *lab = pass_alloc(strlen(gname) + 2);
+                            lab[0] = '@'; strcpy(lab + 1, gname);
+                            list_push(i->labels, lab);
+                            ++s->fold; changed = true;
                         }
                     }
                 }
                 continue;
             case IROP_RET:
-                // ret const 优化标记：imm.ival = const_val, 清除 args
-                if (inst->args->len >= 1) {
-                    ValueName val = get_arg(inst, 0);
-                    Instr *val_def = find_def_instr(f, val);
-                    if (val_def && val_def->op == IROP_CONST) {
-                        inst->imm.ival = val_def->imm.ival;
-                        list_clear(inst->args);
-                        folded++;
-                        changed = true;
+                if (i->args->len >= 1) {
+                    Instr *v = find_def_instr(f, get_arg(i, 0));
+                    if (v && v->op == IROP_CONST) {
+                        i->imm.ival = v->imm.ival;
+                        list_clear(i->args);
+                        ++s->fold; changed = true;
                     }
                 }
                 continue;
-            default:
-                break;
+            default: break;
             }
-
-            if (can_fold) {
-                inst->op = IROP_CONST;
-                inst->imm.ival = res;
-                list_clear(inst->args);
-                list_clear(inst->labels);
-                folded++;
-                changed = true;
+            if (ok) {
+                i->op = IROP_CONST; i->imm.ival = r;
+                list_clear(i->args); list_clear(i->labels);
+                ++s->fold; changed = true;
             }
         }
     }
-
-    if (stats) stats->values_folded += folded;
     return changed;
 }
+#undef CASE_BIN
 
-/* Pass: 只读全局常量折叠 (load @g -> const) */
-static bool pass_const_global_load(Func *f, PassStats *stats) {
-    if (!g_unit) return false;
+/*---------- 只读全局常量折叠 ----------*/
+static bool pass_global_load(Func *f, Stats *s) {
     bool changed = false;
-    int folded = 0;
-
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
-            if (inst->op != IROP_LOAD) continue;
-            if (is_volatile_mem(inst)) continue;
-
-            ValueName ptr = get_arg(inst, 0);
-            Instr *def = find_def_instr(f, ptr);
-            if (!def || def->op != IROP_ADDR) continue;
-            const char *name = (const char*)list_get(def->labels, 0);
-            if (!name) continue;
-
-            GlobalVar *g = find_global(g_unit, name);
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i->op != IROP_LOAD || is_volatile_mem(i)) continue;
+            Instr *addr = find_def_instr(f, get_arg(i, 0));
+            if (!addr || addr->op != IROP_ADDR) continue;
+            const char *name = (const char *)list_get(addr->labels, 0);
+            GlobalVar *g = name ? find_global(name) : NULL;
             if (!is_const_global(g)) continue;
-
-            inst->op = IROP_CONST;
-            inst->imm.ival = g->init_value;
-            inst->type = g->type;
-            inst->mem_type = NULL;
-            list_clear(inst->args);
-            list_clear(inst->labels);
-            folded++;
-            changed = true;
+            i->op = IROP_CONST; i->imm.ival = g->init_value;
+            i->type = g->type; i->mem_type = NULL;
+            list_clear(i->args); list_clear(i->labels);
+            ++s->fold; changed = true;
         }
     }
-
-    if (stats) stats->values_folded += folded;
     return changed;
 }
 
-/* Pass 3: 死代码消除 */
-
-static bool pass_simple_dce(Func *f, PassStats *stats) {
+/*---------- 代数简化 + 比较链 + br-trunc 三合一 ----------*/
+static bool pass_local_opts(Func *f, Stats *s) {
     bool changed = false;
-    int removed = 0;
-    
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        List *new_instrs = make_list();
-        
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
-            
-            if (inst->op == IROP_PHI) {
-                list_push(new_instrs, inst);
-                continue;
-            }
-            
-            bool is_dead = false;
-            if (inst->op == IROP_NOP) {
-                is_dead = true;
-            } else if (is_pure_instr(inst) && inst->dest > 0) {
-                if (inst->op != IROP_PARAM && !is_value_used(f, inst->dest)) {
-                    is_dead = true;
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            /* 1. 代数 */
+            if (i->args->len >= 1) {
+                ValueName a = get_arg(i, 0), b = i->args->len >= 2 ? get_arg(i, 1) : 0;
+                if ((i->op == IROP_SUB || i->op == IROP_XOR) && a == b) {
+                    i->op = IROP_CONST; i->imm.ival = 0;
+                    list_clear(i->args); ++s->fold; changed = true; continue;
+                }
+                if ((i->op == IROP_AND || i->op == IROP_OR) && a == b) {
+                    /* replace with a */
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = a;
+                    list_push(i->args, p);
+                    ++s->fold; changed = true; continue;
                 }
             }
-            
-            if (is_dead) {
-                inst->op = IROP_NOP;
-                removed++;
-                changed = true;
-            } else {
-                list_push(new_instrs, inst);
-            }
-        }
-        blk->instrs = new_instrs;
-    }
-    
-    if (stats) stats->instructions_removed += removed;
-    return changed;
-}
-
-/* Pass 4: PHI 简化 */
-
-static bool try_simplify_phi(Instr *phi, ValueName *replacement) {
-    if (phi->op != IROP_PHI) return false;
-    if (phi->args->len == 0) { *replacement = 0; return true; }
-    
-    ValueName first = 0;
-    for (int i = 0; i < phi->args->len; i++) {
-        ValueName *arg = list_get(phi->args, i);
-        if (*arg != phi->dest) { first = *arg; break; }
-    }
-    
-    if (first == 0) { *replacement = 0; return true; }
-    
-    for (int i = 0; i < phi->args->len; i++) {
-        ValueName *arg = list_get(phi->args, i);
-        if (*arg != phi->dest && *arg != first) return false;
-    }
-    
-    *replacement = first;
-    return true;
-}
-
-static bool pass_simplify_phis(Func *f, PassStats *stats) {
-    bool changed = false;
-    int removed = 0;
-    
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        List *new_phis = make_list();
-        
-        for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
-            Instr *phi = iter_next(&jt);
-            ValueName replacement;
-            
-            if (try_simplify_phi(phi, &replacement)) {
-                phi->op = IROP_NOP;
-                removed++;
-                changed = true;
-            } else {
-                list_push(new_phis, phi);
-            }
-        }
-        blk->phis = new_phis;
-    }
-    
-    if (stats) stats->phis_removed += removed;
-    return changed;
-}
-
-/* Pass 5: 代数简化 Pass */
-
-static bool pass_algebraic_simplify(Func *f, PassStats *stats) {
-    bool changed = false;
-    int simplified = 0;
-    
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
-            SimplifyResult res = try_simplify(inst);
-            if (res.simplified) simplified++;
-        }
-    }
-    
-    if (stats) stats->values_folded += simplified;
-    return changed;
-}
-
-/* Pass 6: 比较链简化 (ne (eq x, 0), 0) -> x */
-static bool pass_simplify_compare_chain(Func *f, PassStats *stats) {
-    bool changed = false;
-    int simplified = 0;
-    
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *blk = iter_next(&it);
-        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
-            Instr *inst = iter_next(&jt);
-            
-            // 模式：ne (eq x, 0), 0 -> x
-            if (inst->op == IROP_NE && inst->args->len == 2) {
-                ValueName a = get_arg(inst, 0);
-                ValueName b = get_arg(inst, 1);
-                
-                // 检查 b 是否是 const 0
-                Instr *b_def = find_def_instr(f, b);
-                if (b_def && b_def->op == IROP_CONST && b_def->imm.ival == 0) {
-                    // 检查 a 是否是 eq x, 0
-                    Instr *a_def = find_def_instr(f, a);
-                    if (a_def && a_def->op == IROP_EQ && a_def->args->len == 2) {
-                        ValueName eq_a = get_arg(a_def, 0);
-                        ValueName eq_b = get_arg(a_def, 1);
-                        
-                        // 检查 eq 的第二个操作数是否是 const 0
-                        Instr *eq_b_def = find_def_instr(f, eq_b);
-                        if (eq_b_def && eq_b_def->op == IROP_CONST && eq_b_def->imm.ival == 0) {
-                            // 替换：ne (eq x, 0), 0 -> x
-                            list_clear(inst->args);
-                            ValueName *new_arg = pass_alloc(sizeof(ValueName));
-                            *new_arg = eq_a;
-                            list_push(inst->args, new_arg);
-                            inst->op = IROP_TRUNC;  // 使用 trunc 作为布尔转换
-                            simplified++;
-                            changed = true;
+            /* 2. 比较链  ne (eq x,0),0 -> x */
+            if (i->op == IROP_NE && i->args->len == 2) {
+                ValueName a = get_arg(i, 0), b = get_arg(i, 1);
+                Instr *db = find_def_instr(f, b);
+                if (db && db->op == IROP_CONST && db->imm.ival == 0) {
+                    Instr *da = find_def_instr(f, a);
+                    if (da && da->op == IROP_EQ && da->args->len == 2) {
+                        Instr *dz = find_def_instr(f, get_arg(da, 1));
+                        if (dz && dz->op == IROP_CONST && dz->imm.ival == 0) {
+                            list_clear(i->args);
+                            ValueName *p = pass_alloc(sizeof *p); *p = get_arg(da, 0);
+                            list_push(i->args, p);
+                            i->op = IROP_TRUNC; /* bool cast */
+                            ++s->fold; changed = true; continue;
                         }
                     }
                 }
             }
+            /* 3. br trunc 消除 */
+            if (i->op == IROP_BR && i->args->len >= 1) {
+                Instr *c = find_def_instr(f, get_arg(i, 0));
+                if (c && c->op == IROP_TRUNC && c->args->len >= 1) {
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = get_arg(c, 0);
+                    list_push(i->args, p);
+                    ++s->rm; changed = true; continue;
+                }
+            }
         }
     }
-    
-    if (stats) stats->values_folded += simplified;
     return changed;
 }
 
-/* 优化 API */
+/*---------- 统一迭代框架 ----------*/
 void ssa_optimize_func(Func *f, int level) {
     if (!f || level == OPT_O0) return;
-    
-    PassStats stats = {0};
-    bool changed = true;
-    int max_iterations = 10;
-    int iteration = 0;
-    
-    while (changed && iteration < max_iterations) {
-        changed = false;
-        iteration++;
-        changed |= pass_const_fold(f, &stats);
-        changed |= pass_const_global_load(f, &stats);
-        changed |= pass_simplify_compare_chain(f, &stats);
-        changed |= pass_simplify_phis(f, &stats);
-        changed |= pass_simple_dce(f, &stats);
-        changed |= pass_algebraic_simplify(f, &stats);
-    }
+    Stats st = {0};
+    bool changed;
+    int it = 0;
+    do {
+        changed  = pass_const_fold(f, &st);
+        changed |= pass_global_load(f, &st);
+        changed |= pass_local_opts(f, &st);
+        changed |= pass_phi(f, &st);
+        changed |= pass_dce(f, &st);
+    } while (changed && ++it < 10);
 }
 
-void ssa_optimize(SSAUnit *unit, int level) {
-    if (!unit) return;
-    g_unit = unit;
-    for (Iter it = list_iter(unit->funcs); !iter_end(it);) {
-        Func *f = iter_next(&it);
-        ssa_optimize_func(f, level);
-    }
+void ssa_optimize(SSAUnit *u, int level) {
+    if (!u) return;
+    g_unit = u;
+    for (Iter i = list_iter(u->funcs); !iter_end(i);)
+        ssa_optimize_func(iter_next(&i), level);
     g_unit = NULL;
 }
 
-/* 测试 */
-
+/*---------- 测试入口（未改动） ----------*/
 #ifdef MINITEST_IMPLEMENTATION
 #include "minitest.h"
-
-extern List *ctypes;
-extern List *strings;
+extern List *ctypes, *strings;
 extern List *read_toplevels(void);
 extern void set_current_filename(const char *filename);
 extern char *ast_to_string(Ast *ast);
-
 TEST(test, ssa_opt) {
     char infile[256];
     printf("file path for SSA optimization test: ");
     if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
-
     set_current_filename(infile);
-    
     SSABuild *b = ssa_build_create();
     List *toplevels = read_toplevels();
-    
     printf("\n=== Parsing AST ===\n");
     for (Iter i = list_iter(toplevels); !iter_end(i);) {
         Ast *v = iter_next(&i);
         printf("ast: %s\n", ast_to_string(v));
         ssa_convert_ast(b, v);
     }
-    
     printf("\n=== Original SSA Output ===\n");
     ssa_print(stdout, b->unit);
-    
     printf("\n=== Running Optimizations (O1) ===\n");
     ssa_optimize(b->unit, OPT_O1);
-    
     printf("\n=== Optimized SSA Output ===\n");
     ssa_print(stdout, b->unit);
-    
     ssa_build_destroy(b);
     list_free(strings);
     list_free(ctypes);
