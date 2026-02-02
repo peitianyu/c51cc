@@ -25,7 +25,6 @@ static void* ssa_alloc(size_t size) {
     return p;
 }
 
-
 static char* ssa_strdup(const char *s) {
     if (!s) return NULL;
     size_t len = strlen(s) + 1;
@@ -46,6 +45,9 @@ static ValueName ssa_build_const_t(SSABuild *b, int64_t val, Ctype *type);
 static ValueName ssa_build_offset(SSABuild *b, ValueName ptr, ValueName idx, int elem_size);
 static void ssa_build_store(SSABuild *b, ValueName ptr, ValueName val, Ctype *mem_type);
 static ValueName gen_type_cast(SSABuild *b, ValueName val, Ctype *from, Ctype *to);
+static bool is_const(List *consts, ValueName val);
+static int64_t get_const_val(List *consts, ValueName val);
+
 
 static Instr* ssa_make_instr(SSABuild *b, IrOp op) {
     Instr *i = ssa_alloc(sizeof(Instr));
@@ -1346,7 +1348,53 @@ static void print_addrspace_suffix(FILE *fp, Ctype *type) {
     if (s) fprintf(fp, " @%s", s);
 }
 
-void ssa_print_instr(FILE *fp, Instr *i) {
+static void print_arg(FILE *fp, ValueName val, List *consts) {
+    if (consts && is_const(consts, val)) {
+        fprintf(fp, "const %ld", get_const_val(consts, val));
+    } else {
+        fprintf(fp, "v%d", val);
+    }
+}
+
+typedef struct {
+    ValueName val;
+    int64_t const_val;
+} ConstEntry;
+
+static List* collect_consts(Func *f) {
+    List *consts = make_list();
+    for (int j = 0; j < f->blocks->len; j++) {
+        Block *blk = list_get(f->blocks, j);
+        for (int i = 0; i < blk->instrs->len; i++) {
+            Instr *inst = list_get(blk->instrs, i);
+            if (inst->op == IROP_CONST && inst->dest > 0) {
+                ConstEntry *e = ssa_alloc(sizeof(ConstEntry));
+                e->val = inst->dest;
+                e->const_val = inst->imm.ival;
+                list_push(consts, e);
+            }
+        }
+    }
+    return consts;
+}
+
+static int64_t get_const_val(List *consts, ValueName val) {
+    for (int i = 0; i < consts->len; i++) {
+        ConstEntry *e = list_get(consts, i);
+        if (e->val == val) return e->const_val;
+    }
+    return 0;
+}
+
+static bool is_const(List *consts, ValueName val) {
+    for (int i = 0; i < consts->len; i++) {
+        ConstEntry *e = list_get(consts, i);
+        if (e->val == val) return true;
+    }
+    return false;
+}
+
+void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
     if (i->op == IROP_NOP) return;
     
     if (i->dest > 0) {
@@ -1361,7 +1409,7 @@ void ssa_print_instr(FILE *fp, Instr *i) {
         break;
     case IROP_CONST:
         fprintf(fp, "const %ld", i->imm.ival);
-        i->type = ctype_int;  // 常量默认int类型
+        i->type = ctype_int;  // TODO: 常量默认int类型
         break;
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD: {
         const char *op_str = (i->op == IROP_ADD) ? "add" :
@@ -1441,6 +1489,15 @@ void ssa_print_instr(FILE *fp, Instr *i) {
         break;
     }
     case IROP_STORE: {
+        // 检查是否是优化后的格式：labels[0] 以 '@' 开头
+        if (i->labels->len > 0) {
+            char *label = (char*)list_get(i->labels, 0);
+            if (label && label[0] == '@') {
+                fprintf(fp, "store %s, const %ld", label, i->imm.ival);
+                print_addrspace_suffix(fp, i->mem_type);
+                break;
+            }
+        }
         ValueName *p = list_get(i->args, 0);
         ValueName *v = list_get(i->args, 1);
         fprintf(fp, "store v%d, v%d", *p, *v);
@@ -1493,8 +1550,11 @@ void ssa_print_instr(FILE *fp, Instr *i) {
         break;
     }
     case IROP_RET: {
-        fprintf(fp, "ret");
-        if (i->args->len > 0) {
+        // 检查是否是优化后的格式：无参数但有 imm 值
+        if (i->args->len == 0) {
+            fprintf(fp, "ret const %ld", i->imm.ival);
+        } else {
+            fprintf(fp, "ret");
             ValueName *v = list_get(i->args, 0);
             fprintf(fp, " v%d", *v);
         }
@@ -1514,21 +1574,21 @@ static void ssa_print_func(FILE *fp, Func *f) {
     }
     fprintf(fp, "): %s {\n", get_type_str(f->ret_type));
     
+    // 收集所有常量定义
+    List *consts = collect_consts(f);
+    
     for (int j = 0; j < f->blocks->len; j++) {
         Block *blk = list_get(f->blocks, j);
-        // Bril风格块标签: .bN:
         fprintf(fp, "\n  .b%d:\n", blk->id);
         
-        // 先打印PHI
         for (int i = 0; i < blk->phis->len; i++) {
-            ssa_print_instr(fp, list_get(blk->phis, i));
+            ssa_print_instr(fp, list_get(blk->phis, i), consts);
         }
         
-        // 再打印普通指令
         for (int i = 0; i < blk->instrs->len; i++) {
             Instr *inst = list_get(blk->instrs, i);
             if (inst->op != IROP_PHI) // PHI已在上面打印
-                ssa_print_instr(fp, inst);
+                ssa_print_instr(fp, inst, consts);
         }
     }
     fprintf(fp, "}\n");

@@ -240,6 +240,55 @@ static bool pass_const_fold(Func *f, PassStats *stats) {
             case IROP_LNOT:
                 if (has_a) { res = (!a) ? 1 : 0; can_fold = true; }
                 break;
+            case IROP_TRUNC:
+            if (has_a) {
+                // 根据目标类型大小进行截断
+                int size = inst->type ? inst->type->size : 1;
+                uint64_t mask = (size == 1) ? 0xFF :
+                            (size == 2) ? 0xFFFF :
+                            (size == 4) ? 0xFFFFFFFF : 0xFFFFFFFFFFFFFFFF;
+                res = a & mask;
+                can_fold = true;
+            }
+            break;
+            case IROP_STORE:
+                // store (addr @g), const 优化标记：labels[0] = "@g", imm.ival = const_val, 清除 args
+                if (inst->args->len >= 2) {
+                    ValueName ptr_val = get_arg(inst, 0);
+                    ValueName val = get_arg(inst, 1);
+                    Instr *ptr_def = find_def_instr(f, ptr_val);
+                    Instr *val_def = find_def_instr(f, val);
+                    if (ptr_def && ptr_def->op == IROP_ADDR &&
+                        val_def && val_def->op == IROP_CONST) {
+                        const char *name = (const char*)list_get(ptr_def->labels, 0);
+                        if (name) {
+                            // 标记为已优化（labels[0] 存全局变量名，imm 存常量值）
+                            inst->imm.ival = val_def->imm.ival;
+                            list_clear(inst->args);
+                            list_clear(inst->labels);
+                            char *label_copy = pass_alloc(strlen(name) + 2);
+                            label_copy[0] = '@';
+                            strcpy(label_copy + 1, name);
+                            list_push(inst->labels, label_copy);
+                            folded++;
+                            changed = true;
+                        }
+                    }
+                }
+                continue;
+            case IROP_RET:
+                // ret const 优化标记：imm.ival = const_val, 清除 args
+                if (inst->args->len >= 1) {
+                    ValueName val = get_arg(inst, 0);
+                    Instr *val_def = find_def_instr(f, val);
+                    if (val_def && val_def->op == IROP_CONST) {
+                        inst->imm.ival = val_def->imm.ival;
+                        list_clear(inst->args);
+                        folded++;
+                        changed = true;
+                    }
+                }
+                continue;
             default:
                 break;
             }
@@ -408,7 +457,6 @@ static bool pass_algebraic_simplify(Func *f, PassStats *stats) {
 }
 
 /* 优化 API */
-
 void ssa_optimize_func(Func *f, int level) {
     if (!f || level == OPT_O0) return;
     
