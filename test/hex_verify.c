@@ -5,11 +5,11 @@ int main(void)
     P1 = 0;
     if(P1 == 0)
     {
-        P1 = 0xFF;
+        P1 = 0b00001111;
     }
     else
     {
-        P1 = 0x00;
+        P1 = 0b10101010;
     }
     return 0;
 }

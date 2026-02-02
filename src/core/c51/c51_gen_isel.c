@@ -809,17 +809,12 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         break;
     }
     case IROP_BR: {
-        char *t = list_get(ins->labels, 0);
-        char *f = list_get(ins->labels, 1);
-        char *l_true = new_label("phi_true");
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins1(sec, "jnz", l_true);
-        emit_phi_moves_for_edge(sec, func, cur_block, f);
-        emit_ins1(sec, "sjmp", map_block_label(func_name, f));
-        emit_label(sec, l_true);
+        char *t = list_get(ins->labels, 0);  // true 块
+        char *f = list_get(ins->labels, 1);  // false 块
+        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));  // 加载条件值
+        emit_ins1(sec, "jnz", map_block_label(func_name, f));  // 0 时跳 false
         emit_phi_moves_for_edge(sec, func, cur_block, t);
-        emit_ins1(sec, "sjmp", map_block_label(func_name, t));
-        free(l_true);
+        emit_ins1(sec, "sjmp", map_block_label(func_name, t));  // 跳 true
         break;
     }
     case IROP_CALL: {
