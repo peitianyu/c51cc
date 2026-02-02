@@ -798,6 +798,23 @@ static IrOp ast_to_irop(int ast_op) {
     }
 }
 
+static inline IrOp compound_assign_to_irop(int ast_op)
+{
+    switch (ast_op) {
+    case PUNCT_SHL_ASSIGN: return IROP_SHL;
+    case PUNCT_SHR_ASSIGN: return IROP_SHR;
+    case PUNCT_AND_ASSIGN: return IROP_AND;
+    case PUNCT_OR_ASSIGN:  return IROP_OR;
+    case PUNCT_XOR_ASSIGN: return IROP_XOR;
+    case PUNCT_ADD_ASSIGN: return IROP_ADD;
+    case PUNCT_SUB_ASSIGN: return IROP_SUB;
+    case PUNCT_MUL_ASSIGN: return IROP_MUL;
+    case PUNCT_DIV_ASSIGN: return IROP_DIV;
+    case PUNCT_MOD_ASSIGN: return IROP_MOD;
+    default: return IROP_NOP;
+    }
+}
+
 /* 类型转换辅助：根据源类型和目标类型选择正确的IROP */
 static ValueName gen_type_cast(SSABuild *b, ValueName val, Ctype *from, Ctype *to) {
     if (!from || !to) return val;
@@ -966,10 +983,133 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             // *ptr = val
             ValueName ptr = gen_expr(b, ast->left->operand);
             ValueName val = gen_expr(b, ast->right);
+            val = gen_type_cast(b, val, ast->right->ctype, ast->left->ctype);
             ssa_build_store(b, ptr, val, ast->left->ctype);
+            return val;
+        } else if (ast->left && ast->left->type == AST_STRUCT_REF) {
+            Ast *ref = ast->left;
+            ValueName base;
+            Ctype *struct_type;
+
+            if (ref->struc->type == AST_LVAR) {
+                base = ssa_build_addr(b, ref->struc->varname, ref->struc->ctype);
+                struct_type = ref->struc->ctype;
+            } else if (ref->struc->type == AST_DEREF) {
+                base = gen_expr(b, ref->struc->operand);
+                struct_type = ref->struc->ctype;
+            } else {
+                base = gen_expr(b, ref->struc);
+                struct_type = ref->struc->ctype;
+            }
+
+            Ctype *field = dict_get(struct_type->fields, ref->field);
+            if (!field) return 0;
+
+            ValueName val = gen_expr(b, ast->right);
+            val = gen_type_cast(b, val, ast->right->ctype, field);
+
+            if (field->bit_size > 0) {
+                int container_bits = 8;
+                if (field->bit_offset + field->bit_size > 16) container_bits = 32;
+                else if (field->bit_offset + field->bit_size > 8) container_bits = 16;
+                Ctype *container_type = (container_bits == 32) ? ctype_long :
+                                       (container_bits == 16) ? ctype_int : ctype_char;
+
+                gen_bitfield_write(b, base, field->offset, field->bit_offset, field->bit_size,
+                    val, container_type);
+                return val;
+            }
+
+            ValueName field_addr = ssa_build_offset(b, base,
+                ssa_build_const(b, field->offset), 1);
+            ssa_build_store(b, field_addr, val, field);
             return val;
         }
         return gen_expr(b, ast->right);
+    }
+
+    case PUNCT_SHL_ASSIGN:
+    case PUNCT_SHR_ASSIGN:
+    case PUNCT_AND_ASSIGN:
+    case PUNCT_OR_ASSIGN:
+    case PUNCT_XOR_ASSIGN:
+    case PUNCT_ADD_ASSIGN:
+    case PUNCT_SUB_ASSIGN:
+    case PUNCT_MUL_ASSIGN:
+    case PUNCT_DIV_ASSIGN:
+    case PUNCT_MOD_ASSIGN: {
+        IrOp op = compound_assign_to_irop(ast->type);
+        if (op == IROP_NOP) return 0;
+
+        if (ast->left && ast->left->type == AST_LVAR) {
+            ValueName cur = ssa_build_read(b, ast->left->varname);
+            ValueName rhs = gen_expr(b, ast->right);
+            rhs = gen_type_cast(b, rhs, ast->right->ctype, ast->left->ctype);
+            ValueName val = ssa_build_binop_t(b, op, cur, rhs, ast->left->ctype);
+            ssa_build_write(b, ast->left->varname, val);
+            return val;
+        } else if (ast->left && ast->left->type == AST_GVAR) {
+            ValueName addr = ssa_build_addr(b, ast->left->varname, ast->left->ctype);
+            ValueName cur = ssa_build_load(b, addr, ast->left->ctype, ast->left->ctype);
+            ValueName rhs = gen_expr(b, ast->right);
+            rhs = gen_type_cast(b, rhs, ast->right->ctype, ast->left->ctype);
+            ValueName val = ssa_build_binop_t(b, op, cur, rhs, ast->left->ctype);
+            ssa_build_store(b, addr, val, ast->left->ctype);
+            return val;
+        } else if (ast->left && ast->left->type == AST_DEREF) {
+            ValueName ptr = gen_expr(b, ast->left->operand);
+            ValueName cur = ssa_build_load(b, ptr, ast->left->ctype, ast->left->ctype);
+            ValueName rhs = gen_expr(b, ast->right);
+            rhs = gen_type_cast(b, rhs, ast->right->ctype, ast->left->ctype);
+            ValueName val = ssa_build_binop_t(b, op, cur, rhs, ast->left->ctype);
+            ssa_build_store(b, ptr, val, ast->left->ctype);
+            return val;
+        } else if (ast->left && ast->left->type == AST_STRUCT_REF) {
+            Ast *ref = ast->left;
+            ValueName base;
+            Ctype *struct_type;
+
+            if (ref->struc->type == AST_LVAR) {
+                base = ssa_build_addr(b, ref->struc->varname, ref->struc->ctype);
+                struct_type = ref->struc->ctype;
+            } else if (ref->struc->type == AST_DEREF) {
+                base = gen_expr(b, ref->struc->operand);
+                struct_type = ref->struc->ctype;
+            } else {
+                base = gen_expr(b, ref->struc);
+                struct_type = ref->struc->ctype;
+            }
+
+            Ctype *field = dict_get(struct_type->fields, ref->field);
+            if (!field) return 0;
+
+            ValueName rhs = gen_expr(b, ast->right);
+            rhs = gen_type_cast(b, rhs, ast->right->ctype, field);
+
+            if (field->bit_size > 0) {
+                int container_bits = 8;
+                if (field->bit_offset + field->bit_size > 16) container_bits = 32;
+                else if (field->bit_offset + field->bit_size > 8) container_bits = 16;
+                Ctype *container_type = (container_bits == 32) ? ctype_long :
+                                       (container_bits == 16) ? ctype_int : ctype_char;
+
+                ValueName cur = gen_bitfield_read(b, base, field->offset,
+                    field->bit_offset, field->bit_size,
+                    !get_attr(field->attr).ctype_unsigned, field);
+                ValueName val = ssa_build_binop_t(b, op, cur, rhs, field);
+                gen_bitfield_write(b, base, field->offset, field->bit_offset, field->bit_size,
+                    val, container_type);
+                return val;
+            }
+
+            ValueName field_addr = ssa_build_offset(b, base,
+                ssa_build_const(b, field->offset), 1);
+            ValueName cur = ssa_build_load(b, field_addr, field, field);
+            ValueName val = ssa_build_binop_t(b, op, cur, rhs, field);
+            ssa_build_store(b, field_addr, val, field);
+            return val;
+        }
+        return 0;
     }
     
     case AST_TERNARY: {
@@ -1015,6 +1155,10 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         if (ast->struc->type == AST_LVAR) {
             // s.field -> (&s)->field
             base = ssa_build_addr(b, ast->struc->varname, ast->struc->ctype);
+            struct_type = ast->struc->ctype;
+        } else if (ast->struc->type == AST_DEREF) {
+            // p->field 在 parser 中会被改写成 (*p).field，此处要取 p 的地址值而不是加载整个 struct
+            base = gen_expr(b, ast->struc->operand);
             struct_type = ast->struc->ctype;
         } else {
             base = gen_expr(b, ast->struc);

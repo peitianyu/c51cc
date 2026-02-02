@@ -321,12 +321,28 @@ static Token read_token_int(void)
             skip_block_comment();
             return read_token_int();
         }
+        if (c == '=') {
+            tok = make_punct(PUNCT_DIV_ASSIGN);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
         ungetc_with_pos(c);
         tok = make_punct('/');
         update_token_info(start_line, start_col, &tok);
         return tok;
     }
-    case '*':
+    case '*': {
+        c = getc_with_pos();
+        if (c == '=') {
+            tok = make_punct(PUNCT_MUL_ASSIGN);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        ungetc_with_pos(c);
+        tok = make_punct('*');
+        update_token_info(start_line, start_col, &tok);
+        return tok;
+    }
     case '(':
     case ')':
     case ',':
@@ -337,12 +353,37 @@ static Token read_token_int(void)
     case '}':
     case '?':
     case ':':
-    case '%':
-    case '~':
-    case '^':
         tok = make_punct(c);
         update_token_info(start_line, start_col, &tok);
         return tok;
+    case '%': {
+        c = getc_with_pos();
+        if (c == '=') {
+            tok = make_punct(PUNCT_MOD_ASSIGN);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        ungetc_with_pos(c);
+        tok = make_punct('%');
+        update_token_info(start_line, start_col, &tok);
+        return tok;
+    }
+    case '~':
+        tok = make_punct('~');
+        update_token_info(start_line, start_col, &tok);
+        return tok;
+    case '^': {
+        c = getc_with_pos();
+        if (c == '=') {
+            tok = make_punct(PUNCT_XOR_ASSIGN);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        ungetc_with_pos(c);
+        tok = make_punct('^');
+        update_token_info(start_line, start_col, &tok);
+        return tok;
+    }
     case '-':
         c = getc_with_pos();
         if (c == '-') {
@@ -355,6 +396,11 @@ static Token read_token_int(void)
             update_token_info(start_line, start_col, &tok);
             return tok;
         }
+        if (c == '=') {
+            tok = make_punct(PUNCT_SUB_ASSIGN);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
         ungetc_with_pos(c);
         tok = make_punct('-');
         update_token_info(start_line, start_col, &tok);
@@ -363,10 +409,23 @@ static Token read_token_int(void)
         tok = read_rep('=', '=', PUNCT_EQ);
         update_token_info(start_line, start_col, &tok);
         return tok;
-    case '+':
-        tok = read_rep('+', '+', PUNCT_INC);
+    case '+': {
+        c = getc_with_pos();
+        if (c == '+') {
+            tok = make_punct(PUNCT_INC);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        if (c == '=') {
+            tok = make_punct(PUNCT_ADD_ASSIGN);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        ungetc_with_pos(c);
+        tok = make_punct('+');
         update_token_info(start_line, start_col, &tok);
         return tok;
+    }
     case '.':
         c = getc_with_pos();
         if(c != '.') {
@@ -391,14 +450,40 @@ static Token read_token_int(void)
             update_token_info(start_line, start_col, &tok);
             return tok;
         }
-    case '&':
-        tok = read_rep('&', '&', PUNCT_LOGAND);
+    case '&': {
+        c = getc_with_pos();
+        if (c == '&') {
+            tok = make_punct(PUNCT_LOGAND);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        if (c == '=') {
+            tok = make_punct(PUNCT_AND_ASSIGN);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        ungetc_with_pos(c);
+        tok = make_punct('&');
         update_token_info(start_line, start_col, &tok);
         return tok;
-    case '|':
-        tok = read_rep('|', '|', PUNCT_LOGOR);
+    }
+    case '|': {
+        c = getc_with_pos();
+        if (c == '|') {
+            tok = make_punct(PUNCT_LOGOR);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        if (c == '=') {
+            tok = make_punct(PUNCT_OR_ASSIGN);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        ungetc_with_pos(c);
+        tok = make_punct('|');
         update_token_info(start_line, start_col, &tok);
         return tok;
+    }
     case '<':
         c = getc_with_pos();
         if(c == '=') {
@@ -406,6 +491,13 @@ static Token read_token_int(void)
             update_token_info(start_line, start_col, &tok);
             return tok;
         } else if (c == '<') {
+            int d = getc_with_pos();
+            if (d == '=') {
+                tok = make_punct(PUNCT_SHL_ASSIGN);
+                update_token_info(start_line, start_col, &tok);
+                return tok;
+            }
+            ungetc_with_pos(d);
             tok = make_punct(PUNCT_LSHIFT);
             update_token_info(start_line, start_col, &tok);
             return tok;
@@ -422,6 +514,13 @@ static Token read_token_int(void)
             update_token_info(start_line, start_col, &tok);
             return tok;
         } else if (c == '>') {
+            int d = getc_with_pos();
+            if (d == '=') {
+                tok = make_punct(PUNCT_SHR_ASSIGN);
+                update_token_info(start_line, start_col, &tok);
+                return tok;
+            }
+            ungetc_with_pos(d);
             tok = make_punct(PUNCT_RSHIFT);
             update_token_info(start_line, start_col, &tok);
             return tok;

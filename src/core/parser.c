@@ -42,7 +42,7 @@ static Ctype *make_ptr_type(Ctype *ctype);
 static Ctype *make_array_type(Ctype *ctype, int size);
 static Ast *read_compound_stmt(void);
 static Ast *read_decl_or_stmt(void);
-static Ctype *result_type(char op, Ctype *a, Ctype *b);
+static Ctype *result_type(int op, Ctype *a, Ctype *b);
 static Ctype *convert_array(Ctype *ctype);
 static Ast *read_stmt(void);
 static Ctype *read_decl_int(Token *name);
@@ -539,7 +539,44 @@ static bool is_ident(const Token tok, char *s)
 
 static bool is_right_assoc(const Token tok)
 {
-    return get_punct(tok) == '=';
+    int p = get_punct(tok);
+    return p == '=' || p == PUNCT_SHL_ASSIGN || p == PUNCT_SHR_ASSIGN ||
+           p == PUNCT_AND_ASSIGN || p == PUNCT_OR_ASSIGN  || p == PUNCT_XOR_ASSIGN ||
+           p == PUNCT_ADD_ASSIGN || p == PUNCT_SUB_ASSIGN || p == PUNCT_MUL_ASSIGN ||
+           p == PUNCT_DIV_ASSIGN || p == PUNCT_MOD_ASSIGN;
+}
+
+static bool is_assign_punct(int p)
+{
+    return p == '=' || p == PUNCT_SHL_ASSIGN || p == PUNCT_SHR_ASSIGN ||
+           p == PUNCT_AND_ASSIGN || p == PUNCT_OR_ASSIGN  || p == PUNCT_XOR_ASSIGN ||
+           p == PUNCT_ADD_ASSIGN || p == PUNCT_SUB_ASSIGN || p == PUNCT_MUL_ASSIGN ||
+           p == PUNCT_DIV_ASSIGN || p == PUNCT_MOD_ASSIGN;
+}
+
+static bool is_compound_assign_punct(int p)
+{
+    return p == PUNCT_SHL_ASSIGN || p == PUNCT_SHR_ASSIGN ||
+           p == PUNCT_AND_ASSIGN || p == PUNCT_OR_ASSIGN  || p == PUNCT_XOR_ASSIGN ||
+           p == PUNCT_ADD_ASSIGN || p == PUNCT_SUB_ASSIGN || p == PUNCT_MUL_ASSIGN ||
+           p == PUNCT_DIV_ASSIGN || p == PUNCT_MOD_ASSIGN;
+}
+
+static int compound_base_op(int p)
+{
+    switch (p) {
+    case PUNCT_SHL_ASSIGN: return PUNCT_LSHIFT;
+    case PUNCT_SHR_ASSIGN: return PUNCT_RSHIFT;
+    case PUNCT_AND_ASSIGN: return '&';
+    case PUNCT_OR_ASSIGN:  return '|';
+    case PUNCT_XOR_ASSIGN: return '^';
+    case PUNCT_ADD_ASSIGN: return '+';
+    case PUNCT_SUB_ASSIGN: return '-';
+    case PUNCT_MUL_ASSIGN: return '*';
+    case PUNCT_DIV_ASSIGN: return '/';
+    case PUNCT_MOD_ASSIGN: return '%';
+    default: return p;
+    }
 }
 
 static int eval_intexpr(Ast *ast)
@@ -638,6 +675,16 @@ static int priority(const Token tok)
     case '?':
         return 13;
     case '=':
+    case PUNCT_SHL_ASSIGN:
+    case PUNCT_SHR_ASSIGN:
+    case PUNCT_AND_ASSIGN:
+    case PUNCT_OR_ASSIGN:
+    case PUNCT_XOR_ASSIGN:
+    case PUNCT_ADD_ASSIGN:
+    case PUNCT_SUB_ASSIGN:
+    case PUNCT_MUL_ASSIGN:
+    case PUNCT_DIV_ASSIGN:
+    case PUNCT_MOD_ASSIGN:
         return 14;
     default:
         return -1;
@@ -834,7 +881,7 @@ static void init_arith_table(void)
     #undef T
 }
 
-static Ctype *result_type_int(jmp_buf *jmp, char op, Ctype *a, Ctype *b)
+static Ctype *result_type_int(jmp_buf *jmp, int op, Ctype *a, Ctype *b)
 {
     static int arith_table_inited = 0;
     if (!arith_table_inited) {
@@ -878,8 +925,25 @@ static Ctype *convert_array(Ctype *ctype)
     return make_ptr_type(ctype->ptr);
 }
 
-static Ctype *result_type(char op, Ctype *a, Ctype *b)
+static Ctype *result_type(int op, Ctype *a, Ctype *b)
 {
+    if (is_compound_assign_punct(op)) {
+        // 复合赋值：先用底层二元运算检查合法性，结果类型按C语义取左值类型
+        int base_op = compound_base_op(op);
+        // 特殊：shift-assign 只允许整数
+        if ((base_op == PUNCT_LSHIFT || base_op == PUNCT_RSHIFT) &&
+            (!is_inttype(a) || !is_inttype(b))) {
+            error("invalid operand to shift");
+        }
+        jmp_buf jmpbuf;
+        if (setjmp(jmpbuf) == 0) {
+            (void)result_type_int(&jmpbuf, base_op, convert_array(a), convert_array(b));
+            return a;
+        }
+        error("incompatible operands in compound assignment");
+        return NULL; /* non-reachable */
+    }
+
     // 特殊处理：函数指针赋值
     if (op == '=') {
         // 允许将函数名赋值给函数指针
@@ -894,7 +958,7 @@ static Ctype *result_type(char op, Ctype *a, Ctype *b)
     jmp_buf jmpbuf;
     if (setjmp(jmpbuf) == 0)
         return result_type_int(&jmpbuf, op, convert_array(a), convert_array(b));
-    error("incompatible operands: %c: <%s> and <%s>", op, ctype_to_string(a),
+    error("incompatible operands: %d: <%s> and <%s>", op, ctype_to_string(a),
           ctype_to_string(b));
     return NULL; /* non-reachable */
 }
@@ -1061,13 +1125,14 @@ static Ast *read_expr_int(int prec)
             ast = ast_uop(get_punct(tok), ast->ctype, ast);
             continue;
         }
-        if (is_punct(tok, '='))
+        if (is_assign_punct(get_punct(tok)))
             ensure_lvalue(ast);
         
         Ast *rest = read_expr_int(prec2 + (is_right_assoc(tok) ? 1 : 0));
         if (!rest)
             error("second operand missing");
-        if (is_punct(tok, PUNCT_LSHIFT) || is_punct(tok, PUNCT_RSHIFT)) {
+        if (is_punct(tok, PUNCT_LSHIFT) || is_punct(tok, PUNCT_RSHIFT) ||
+            is_punct(tok, PUNCT_SHL_ASSIGN) || is_punct(tok, PUNCT_SHR_ASSIGN)) {
             if (!is_inttype(ast->ctype) || !is_inttype(rest->ctype))
                 error("invalid operand to shift");
         }

@@ -347,10 +347,35 @@ char *token_to_string(const Token tok)
     case TTYPE_IDENT:
         return get_ident(tok);
     case TTYPE_PUNCT:
-        if (is_punct(tok, PUNCT_EQ))
-            string_appendf(&s, "==");
-        else
-            string_appendf(&s, "%c", get_punct(tok));
+        switch (get_punct(tok)) {
+        case PUNCT_EQ:        string_appendf(&s, "=="); break;
+        case PUNCT_GE:        string_appendf(&s, ">="); break;
+        case PUNCT_LE:        string_appendf(&s, "<="); break;
+        case PUNCT_NE:        string_appendf(&s, "!="); break;
+        case PUNCT_ELLIPSIS:  string_appendf(&s, "..."); break;
+        case PUNCT_INC:       string_appendf(&s, "++"); break;
+        case PUNCT_DEC:       string_appendf(&s, "--"); break;
+        case PUNCT_LOGAND:    string_appendf(&s, "&&"); break;
+        case PUNCT_LOGOR:     string_appendf(&s, "||"); break;
+        case PUNCT_ARROW:     string_appendf(&s, "->"); break;
+        case PUNCT_LSHIFT:    string_appendf(&s, "<<"); break;
+        case PUNCT_RSHIFT:    string_appendf(&s, ">>"); break;
+        case PUNCT_SHL_ASSIGN:string_appendf(&s, "<<="); break;
+        case PUNCT_SHR_ASSIGN:string_appendf(&s, ">>="); break;
+        case PUNCT_AND_ASSIGN:string_appendf(&s, "&="); break;
+        case PUNCT_OR_ASSIGN: string_appendf(&s, "|="); break;
+        case PUNCT_XOR_ASSIGN:string_appendf(&s, "^="); break;
+        case PUNCT_ADD_ASSIGN:string_appendf(&s, "+="); break;
+        case PUNCT_SUB_ASSIGN:string_appendf(&s, "-="); break;
+        case PUNCT_MUL_ASSIGN:string_appendf(&s, "*="); break;
+        case PUNCT_DIV_ASSIGN:string_appendf(&s, "/="); break;
+        case PUNCT_MOD_ASSIGN:string_appendf(&s, "%%="); break;
+        default:
+            if (get_punct(tok) < 256)
+                string_appendf(&s, "%c", get_punct(tok));
+            else
+                string_appendf(&s, "(punct:%d)", get_punct(tok));
+        }
         return get_cstring(s);
     case TTYPE_CHAR:
         string_append(&s, get_char(tok));

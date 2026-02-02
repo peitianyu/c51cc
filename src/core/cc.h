@@ -70,6 +70,18 @@ enum {
     PUNCT_ARROW,
     PUNCT_LSHIFT,
     PUNCT_RSHIFT,
+
+    /* compound assignment operators */
+    PUNCT_SHL_ASSIGN,  /* <<= */
+    PUNCT_SHR_ASSIGN,  /* >>= */
+    PUNCT_AND_ASSIGN,  /* &= */
+    PUNCT_OR_ASSIGN,   /* |= */
+    PUNCT_XOR_ASSIGN,  /* ^= */
+    PUNCT_ADD_ASSIGN,  /* += */
+    PUNCT_SUB_ASSIGN,  /* -= */
+    PUNCT_MUL_ASSIGN,  /* *= */
+    PUNCT_DIV_ASSIGN,  /* /= */
+    PUNCT_MOD_ASSIGN,  /* %= */
 };
 
 enum {
