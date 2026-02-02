@@ -244,11 +244,15 @@ static int apply_relocs(ObjFile *out)
             return -1;
         }
         Symbol *sym = find_symbol_by_name(out, rel->symbol);
-        if (!sym || sym->section < 0) {
+        /* section=-1: undefined/external symbol
+         * section=-2: absolute address symbol (SFR register like P1=0x90)
+         */
+        if (!sym || sym->section == -1) {
             fprintf(stderr, "c51_link: undefined symbol: %s\n", rel->symbol ? rel->symbol : "<null>");
             return -1;
         }
-        int sym_addr = sym->value + rel->addend;
+        /* section=-2 是绝对地址符号（SFR），直接使用 value */
+        int sym_addr = (sym->section == -2) ? (sym->value + rel->addend) : (sym->value + rel->addend);
         int offset = rel->offset;
         if (offset < 0 || offset >= sec->bytes_len) {
             fprintf(stderr, "c51_link: reloc offset out of range\n");
@@ -389,8 +393,14 @@ ObjFile *c51_link(List *objs)
         for (Iter sit = list_iter(obj->symbols); !iter_end(sit);) {
             Symbol *sym = iter_next(&sit);
             if (!sym) continue;
-            if (sym->section < 0) {
+            if (sym->section == -1) {
+                /* 未定义/外部符号 */
                 objfile_add_symbol(out, sym->name, sym->kind, -1, 0, sym->size, sym->flags);
+                continue;
+            }
+            if (sym->section == -2) {
+                /* 绝对地址符号（SFR 寄存器，如 P1=0x90）*/
+                objfile_add_symbol(out, sym->name, sym->kind, -2, sym->value, sym->size, sym->flags);
                 continue;
             }
             SectionMap *m = find_map(maps, obj, sym->section);
@@ -460,6 +470,8 @@ TEST(test, c51_link) {
             printf("ast: %s\n", ast_to_string(v));
             ssa_convert_ast(b, v);
         }
+
+        ssa_optimize(b->unit, OPT_O1);
 
         ObjFile *obj = c51_gen_from_ssa(b->unit);
         ASSERT(obj);

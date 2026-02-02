@@ -284,8 +284,7 @@ void peephole_section_asminstrs(Section *sec)
                 (parse_reg_rn(a0) >= 0 && reg_eq(a1, "A") &&
                  reg_eq(ndst, "A") && reg_eq(nsrc, a0)) ||
                 (reg_eq(a0, "A") && parse_reg_rn(a1) >= 0 &&
-                 reg_eq(ndst, "A") && reg_eq(nsrc, a1))) {
-                list_push(out, cur); free_asminstr(nxt); ++i; continue;
+                 reg_eq(ndst, "A") && reg_eq(nsrc, a1))) {++i; continue;
             }
         }
 
@@ -308,3 +307,4 @@ void peephole_section_asminstrs(Section *sec)
     free(sec->asminstrs);
     sec->asminstrs = out;
 }
+
