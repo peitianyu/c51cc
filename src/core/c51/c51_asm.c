@@ -300,14 +300,16 @@ ObjFile *c51_asm_from_text(const char *text, char **error, int *error_line)
         }
 
         size_t len = strlen(work);
-        if (work[len - 1] == ':') {
+        if (len > 0 && work[len - 1] == ':') {
             work[len - 1] = '\0';
             char *label = trim(work);
             if (cur_sec < 0)
                 set_error(error, error_line, line_no, "label without section");
             else {
                 Section *sec = objfile_get_section(obj, cur_sec);
-                define_symbol(obj, label, cur_sec, sec->bytes_len);
+                AsmInstr *ins = asm_instr_new(".label");
+                asm_instr_add_arg(ins, label);
+                list_push(sec->asminstrs, ins);
             }
             if (next) { line = next + 1; continue; }
             break;

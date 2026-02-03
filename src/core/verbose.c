@@ -94,6 +94,9 @@ static void ast_to_string_int(String *buf, Ast *ast)
         return;
     }
     switch (ast->type) {
+    case AST_ASM:
+        string_appendf(buf, "(asm \"%s\")", quote_cstring(ast->asm_text ? ast->asm_text : ""));
+        break;
     case AST_LITERAL:
         switch (ast->ctype->type) {
         case CTYPE_BOOL:

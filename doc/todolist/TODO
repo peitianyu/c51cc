@@ -64,7 +64,7 @@
         ☐ section
         ☐ alias
         ☐ aligned
-    ☐ asm指令嵌入支持
+✔ asm指令嵌入支持 @done(26-02-03 11:44)
 ☐ 添加typeof语句
 ☐ 添加typestr语句
 ☐ 添加defer语句
@@ -132,7 +132,7 @@
     ☐ #pragma - 编译器指令
         ✔ #pragma once - include guard @done(26-02-03 11:10)
         ✔ #pragma message("...") - 编译期输出提示信息 @done(26-02-03 11:10)
-        ☐ #pragma asm / #pragma endasm - 内联汇编块（或与 asm 语句对齐）
+        ✘ #pragma asm / #pragma endasm - 内联汇编块（或与 asm 语句对齐） @cancelled(26-02-03 11:41)
     ✔ 宏展开递归保护 - 防止无限递归 @done(26-02-03 10:41)
     ☐ comptime表达式支持 
 ✔ 处理由于预处理导致的行号/文件名变化 @done(26-01-29 17:36)

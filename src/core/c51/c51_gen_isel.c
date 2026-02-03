@@ -1,4 +1,105 @@
 #include "c51_gen.h"
+#include <ctype.h>
+
+static void trim_ws_inplace(char *s)
+{
+    if (!s) return;
+    char *p = s;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) s[--n] = '\0';
+}
+
+static void strip_comment_inplace(char *s)
+{
+    if (!s) return;
+    /* 仅支持 ; 和 // 注释（不要把 # 视作注释，因为立即数会用到 #） */
+    char *sc = strchr(s, ';');
+    if (sc) *sc = '\0';
+
+    char *p = s;
+    while (p && *p) {
+        if (p[0] == '/' && p[1] == '/') {
+            *p = '\0';
+            break;
+        }
+        p++;
+    }
+}
+
+static void emit_inline_asm_text(Section *sec, const char *text)
+{
+    if (!sec || !text) return;
+
+    const char *p = text;
+    char linebuf[1024];
+
+    while (*p) {
+        size_t n = 0;
+        while (*p && *p != '\n' && n + 1 < sizeof(linebuf)) {
+            if (*p != '\r') linebuf[n++] = *p;
+            p++;
+        }
+        if (*p == '\n') p++;
+        linebuf[n] = '\0';
+
+        strip_comment_inplace(linebuf);
+        trim_ws_inplace(linebuf);
+        if (linebuf[0] == '\0') continue;
+
+        /* label: */
+        size_t l = strlen(linebuf);
+        if (l > 1 && linebuf[l - 1] == ':') {
+            linebuf[l - 1] = '\0';
+            trim_ws_inplace(linebuf);
+            if (linebuf[0] != '\0') emit_label(sec, linebuf);
+            continue;
+        }
+
+        /* 仅支持最小内联 asm：普通指令、以及 .label <name> */
+        if (linebuf[0] == '.') {
+            if (!strncmp(linebuf, ".label", 6) && isspace((unsigned char)linebuf[6])) {
+                char *name = linebuf + 6;
+                trim_ws_inplace(name);
+                if (name[0] != '\0') emit_label(sec, name);
+                continue;
+            }
+            fprintf(stderr, "inline asm: unsupported directive: %s\n", linebuf);
+            exit(1);
+        }
+
+        /* op [arg0[, arg1[, arg2]]] */
+        char *sp = linebuf;
+        char *op = sp;
+        while (*sp && !isspace((unsigned char)*sp)) sp++;
+        if (*sp) *sp++ = '\0';
+        trim_ws_inplace(op);
+        trim_ws_inplace(sp);
+
+        char *args[3] = {0};
+        int argc = 0;
+        while (sp && *sp && argc < 3) {
+            char *comma = strchr(sp, ',');
+            if (comma) *comma = '\0';
+            trim_ws_inplace(sp);
+            if (*sp) args[argc++] = sp;
+            if (!comma) break;
+            sp = comma + 1;
+            trim_ws_inplace(sp);
+        }
+
+        if (argc == 0) emit_ins0(sec, op);
+        else if (argc == 1) emit_ins1(sec, op, args[0]);
+        else if (argc == 2) emit_ins2(sec, op, args[0], args[1]);
+        else if (argc == 3) emit_ins3(sec, op, args[0], args[1], args[2]);
+        else {
+            fprintf(stderr, "inline asm: too many operands: %s\n", linebuf);
+            exit(1);
+        }
+    }
+}
 
 /* === Instruction selection === */
 void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
@@ -13,6 +114,11 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     switch (ins->op) {
     case IROP_NOP:
         return;
+    case IROP_ASM: {
+        const char *t = (ins->labels && ins->labels->len > 0) ? (char *)list_get(ins->labels, 0) : NULL;
+        emit_inline_asm_text(sec, t);
+        return;
+    }
     case IROP_PARAM:
         if (ins->labels && ins->labels->len > 0) {
             char *pname = list_get(ins->labels, 0);

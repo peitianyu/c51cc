@@ -1,5 +1,7 @@
 #include "c51_gen.h"
 
+extern ObjFile *c51_link(List *objs);
+
 /* === Entry point === */
 ObjFile *c51_gen_from_ssa(void *ssa)
 {
@@ -113,6 +115,50 @@ ObjFile *c51_gen_from_ssa(void *ssa)
         }
         dict_clear(g_mmio_map);
         g_mmio_map = NULL;
+    }
+
+    /* 顶层 asm 块：汇编后与当前 ObjFile 合并（走 linker 的 section/symbol/reloc 合并逻辑） */
+    if (unit->asm_blocks && unit->asm_blocks->len > 0) {
+        List *objs = make_list();
+        list_push(objs, obj);
+
+        for (Iter it = list_iter(unit->asm_blocks); !iter_end(it);) {
+            char *text = iter_next(&it);
+            if (!text || !*text) continue;
+
+            char *err = NULL;
+            int err_line = 0;
+            ObjFile *aobj = c51_asm_from_text(text, &err, &err_line);
+            if (!aobj) {
+                fprintf(stderr, "asm block assemble failed at line %d: %s\n", err_line, err ? err : "(null)");
+                if (err) free(err);
+                exit(1);
+            }
+            if (err) free(err);
+
+            for (Iter sit = list_iter(aobj->sections); !iter_end(sit);) {
+                Section *sec = iter_next(&sit);
+                if (!sec) continue;
+                encode_section_bytes(aobj, sec);
+            }
+
+            list_push(objs, aobj);
+        }
+
+        ObjFile *out = c51_link(objs);
+
+        /* 输入 objs 的生命周期到此结束 */
+        for (Iter oit = list_iter(objs); !iter_end(oit);) {
+            ObjFile *in = iter_next(&oit);
+            if (in) objfile_free(in);
+        }
+
+        /* list_free 会 free(elem)，这里已经 objfile_free 过了，先清空 elem 避免 double free */
+        for (ListNode *n = objs->head; n; n = n->next) n->elem = NULL;
+        list_free(objs);
+        free(objs);
+
+        return out;
     }
 
     return obj;

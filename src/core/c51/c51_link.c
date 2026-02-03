@@ -495,8 +495,9 @@ TEST(test, c51_link) {
     List *objs = make_list();
     for (Iter fit = list_iter(files); !iter_end(fit);) {
         char *infile = iter_next(&fit);
-        if (!freopen(infile, "r", stdin))
-            puts("open fail"), exit(1);
+        if (!pp_preprocess_to_stdin(infile))
+            puts("preprocess fail"), exit(1);
+
         set_current_filename(infile);
         parser_reset();
 

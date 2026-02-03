@@ -200,6 +200,15 @@ static Token read_string(void)
             case 'n':
                 c = '\n';
                 break;
+            case 'r':
+                c = '\r';
+                break;
+            case 't':
+                c = '\t';
+                break;
+            case '\\':
+                c = '\\';
+                break;
             default:
                 error("Unknown quote: %c", c);
             }

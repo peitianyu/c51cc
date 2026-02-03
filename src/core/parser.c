@@ -45,6 +45,7 @@ static Ast *read_decl_or_stmt(void);
 static Ctype *result_type(int op, Ctype *a, Ctype *b);
 static Ctype *convert_array(Ctype *ctype);
 static Ast *read_stmt(void);
+static void expect(char punct);
 static Ctype *read_decl_int(Token *name);
 static int read_decl_ctype_attr(Token tok, int *attr_out);
 static bool have_redefine_var(char* var_name);
@@ -351,6 +352,31 @@ static Ast *ast_goto(char* label)
     r->type = AST_GOTO;
     r->label = label;
     return r;
+}
+
+static Ast *ast_asm(char *text)
+{
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_ASM;
+    r->asm_text = text;
+    return r;
+}
+
+static Ast *read_asm_stmt(void)
+{
+    expect('(');
+    Token tok = peek_token();
+    if (get_ttype(tok) != TTYPE_STRING)
+        error("String literal expected in __asm__, but got %s", token_to_string(tok));
+
+    String s = make_string();
+    while (get_ttype(peek_token()) == TTYPE_STRING) {
+        tok = read_token();
+        string_appendf(&s, "%s", get_strtok(tok));
+    }
+    expect(')');
+    expect(';');
+    return ast_asm(get_cstring(s));
 }
 
 static Ast *ast_label(char* label)
@@ -2008,6 +2034,11 @@ static Ast *read_stmt(void)
     if (is_ident(tok, "goto"))   { read_token(); return read_goto_stmt(); }
     if (is_punct(tok, '{'))      { read_token(); return read_compound_stmt(); }
 
+    if (is_ident(tok, "__asm__") || is_ident(tok, "__asm")) {
+        read_token();
+        return read_asm_stmt();
+    }
+
     Ast *r = read_expr();
     if(r->type != AST_LABEL) expect(';');
     return r;
@@ -2279,6 +2310,18 @@ List *read_toplevels(void)
 {
     List *r = make_list();
     while (1) {
+        Token tok = peek_token();
+        if (get_ttype(tok) == TTYPE_NULL)
+            return r;
+
+        /* 顶层 asm：__asm__("..."); */
+        if (is_ident(tok, "__asm__") || is_ident(tok, "__asm")) {
+            read_token();
+            Ast *a = read_asm_stmt();
+            list_push(r, a);
+            continue;
+        }
+
         Ast *ast = read_decl_or_func_def();
         if (!ast)
             return r;

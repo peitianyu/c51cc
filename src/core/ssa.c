@@ -272,6 +272,7 @@ SSABuild* ssa_build_create(void) {
     b->unit = ssa_alloc(sizeof(SSAUnit));
     b->unit->funcs = make_list();
     b->unit->globals = make_list();
+    b->unit->asm_blocks = make_list();
     return b;
 }
 
@@ -1191,6 +1192,12 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
     if (!ast || !b->cur_block) return;
     
     switch (ast->type) {
+    case AST_ASM: {
+        Instr *i = ssa_make_instr(b, IROP_ASM);
+        ssa_add_label(i, ast->asm_text ? ast->asm_text : "");
+        ssa_emit(b, i);
+        break;
+    }
     case AST_DECL: {
         Ast *var = ast->declvar;
         if (var && var->type == AST_LVAR) {
@@ -1444,6 +1451,12 @@ void ssa_convert_ast(SSABuild *b, Ast *ast) {
     switch (ast->type) {
     case AST_FUNC_DEF: gen_func(b, ast); break;
     case AST_INTERRUPT_DEF: gen_interrupt_func(b, ast); break;
+    case AST_ASM: {
+        if (!b || !b->unit) break;
+        if (!b->unit->asm_blocks) b->unit->asm_blocks = make_list();
+        list_push(b->unit->asm_blocks, ssa_strdup(ast->asm_text ? ast->asm_text : ""));
+        break;
+    }
     case AST_DECL: {
         // 处理全局变量声明
         Ast *var = ast->declvar;
@@ -1637,6 +1650,11 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
     }
     case IROP_SELECT: {
         ValueName *c = list_get(i->args, 0);
+    case IROP_ASM: {
+        const char *t = (i->labels && i->labels->len > 0) ? (char *)list_get(i->labels, 0) : "";
+        fprintf(fp, "asm \"%s\"", t ? t : "");
+        break;
+    }
         ValueName *t = list_get(i->args, 1);
         ValueName *f = list_get(i->args, 2);
         fprintf(fp, "select v%d, v%d, v%d", *c, *t, *f);

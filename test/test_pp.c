@@ -573,7 +573,7 @@ int test_error_warning_directives() {
 }
 
 int test_pragma_once_message() {
-    struct OnceStruct s;
+    struct OnceStruct s;   
     s.a = ONCE_MACRO;
     return s.a;
 }

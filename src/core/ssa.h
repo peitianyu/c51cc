@@ -37,6 +37,9 @@ typedef enum IrOp {
     IROP_STORE,         // *ptr = val
     // 控制流
     IROP_JMP, IROP_BR, IROP_CALL, IROP_RET, IROP_PHI,
+
+    // 内联汇编（来自 __asm__("..."); 语句）
+    IROP_ASM,
 } IrOp;
 
 typedef int ValueName;
@@ -99,6 +102,9 @@ typedef struct GlobalVar {
 typedef struct SSAUnit {
     List    *funcs;         // Func* 列表
     List    *globals;       // GlobalVar* 列表（C51全局变量）
+
+    /* 顶层 asm 块（来自文件作用域的 __asm__("...");） */
+    List    *asm_blocks;    // char* 列表（raw asm text）
 } SSAUnit;
 
 typedef struct SSABuild {

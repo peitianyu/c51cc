@@ -58,6 +58,7 @@ enum {
     AST_TYPE_DEF,
     AST_CAST,
     AST_INTERRUPT_DEF,  /* 中断函数定义 */
+    AST_ASM,            /* 顶层/语句 asm 块（由 __asm__/__asm__ 语法产生） */
     PUNCT_EQ,
     PUNCT_GE,        // >=
     PUNCT_LE,        // <=
@@ -250,6 +251,9 @@ typedef struct __Ast {
         struct {
             struct __Ast *cast_expr;   
         };
+
+        /* asm block (as raw text) */
+        char *asm_text;
     };
 } Ast;
 

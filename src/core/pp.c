@@ -1835,7 +1835,7 @@ char *pp_read_line(PPContext *ctx)
         free(ctx->last_line);
         ctx->last_line = NULL;
     }
-    
+
     while (ctx->input) {
         char *line = read_logical_line(ctx, ctx->input);
         if (!line) {
