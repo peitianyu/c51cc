@@ -1,8 +1,10 @@
-/* 最小 asm 测试：只使用 __asm__("...") */
-
 static int foo(void)
 {
-    __asm__( "nop\n"
+    __asm__("push r7\n"
+             "mov A, #0\n"
+             "pop r7\n"
+             "ret\n"
+            "nop\n"
              "nop\n"
              "nop\n");
     return 0;
