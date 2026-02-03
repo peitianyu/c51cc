@@ -76,6 +76,73 @@ static inline bool is_ident_char(char c);
 static inline char *string_steal(String *s);
 static bool list_contains_cstr(List *list, const char *s);
 
+static void string_rtrim_ws(String *s)
+{
+    while (s->len > 0) {
+        char c = s->body[s->len - 1];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v')
+            s->body[--s->len] = '\0';
+        else
+            break;
+    }
+}
+
+static const char *skip_space2(const char *p)
+{
+    while (*p && isspace((unsigned char)*p)) p++;
+    return p;
+}
+
+static bool body_param_index(Macro *m, const char *name, int *out_idx)
+{
+    if (out_idx) *out_idx = -1;
+    if (!m || !m->params) return false;
+    int idx = 0;
+    for (Iter it = list_iter(m->params); !iter_end(it); idx++) {
+        char *param = iter_next(&it);
+        if (param && strcmp(param, name) == 0) {
+            if (out_idx) *out_idx = idx;
+            return true;
+        }
+    }
+    return false;
+}
+
+static char *pp_stringify_text(const char *arg)
+{
+    /* 规范化空白并转义，返回带引号的 C 字符串字面量 */
+    const char *p = arg ? arg : "";
+    /* trim */
+    while (*p && isspace((unsigned char)*p)) p++;
+    const char *end = p + strlen(p);
+    while (end > p && isspace((unsigned char)*(end - 1))) end--;
+
+    String out = make_string();
+    string_append(&out, '"');
+
+    bool in_ws = false;
+    for (const char *q = p; q < end; q++) {
+        unsigned char c = (unsigned char)*q;
+        if (isspace(c)) {
+            in_ws = true;
+            continue;
+        }
+        if (in_ws) {
+            string_append(&out, ' ');
+            in_ws = false;
+        }
+        if (c == '\\' || c == '"') {
+            string_append(&out, '\\');
+            string_append(&out, (char)c);
+        } else {
+            string_append(&out, (char)c);
+        }
+    }
+
+    string_append(&out, '"');
+    return string_steal(&out);
+}
+
 /* 创建宏定义 - name 会被 dict entry 引用，Macro 内部不单独存储 name */
 static Macro *macro_create(const char *name, MacroType type, const char *body)
 {
@@ -946,8 +1013,16 @@ static char *substitute_macro_params(PPContext *ctx, Macro *m, List *args, List 
     }
     String out = make_string();
     const char *p = m->body;
+    bool paste_next = false;
 
     while (*p) {
+        if (!paste_next && isspace((unsigned char)*p)) {
+            /* 普通空白直接拷贝；粘贴模式下由 token 自己控制 */
+            string_append(&out, *p);
+            p++;
+            continue;
+        }
+
         if (*p == '"') {
             string_append(&out, *p++);
             while (*p) {
@@ -977,35 +1052,97 @@ static char *substitute_macro_params(PPContext *ctx, Macro *m, List *args, List 
             continue;
         }
 
+        /* token pasting */
+        if (p[0] == '#' && p[1] == '#') {
+            paste_next = true;
+            p += 2;
+            /* 粘贴前去掉已输出的尾随空白 */
+            string_rtrim_ws(&out);
+            continue;
+        }
+
+        /* stringification: #param */
+        if (p[0] == '#') {
+            const char *q = skip_space2(p + 1);
+            if (is_ident_start(*q)) {
+                int nlen = 0;
+                char *ident = pp_get_ident(q, &nlen);
+                if (ident) {
+                    int idx = -1;
+                    if (body_param_index(m, ident, &idx)) {
+                        char *raw = (char *)list_get(args, idx);
+                        char *strlit = pp_stringify_text(raw);
+                        if (paste_next) {
+                            /* 粘贴时不引入多余空白 */
+                            string_rtrim_ws(&out);
+                        }
+                        string_appendf(&out, "%s", strlit);
+                        free(strlit);
+                        free(ident);
+                        p = q + nlen;
+                        paste_next = false;
+                        continue;
+                    }
+                    /* 非参数：退化为普通输出 */
+                    free(ident);
+                }
+            }
+            /* 普通 '#' */
+            if (paste_next) string_rtrim_ws(&out);
+            string_append(&out, *p++);
+            paste_next = false;
+            continue;
+        }
+
         if (is_ident_start(*p)) {
             int len = 0;
             char *ident = pp_get_ident(p, &len);
             if (ident) {
-                bool replaced = false;
-                int idx = 0;
-                for (Iter it = list_iter(m->params); !iter_end(it); idx++) {
-                    char *param = iter_next(&it);
-                    if (param && strcmp(param, ident) == 0) {
-                        char *arg = (char *)list_get(args, idx);
-                        if (!arg) arg = "";
+                int idx = -1;
+                bool is_param = body_param_index(m, ident, &idx);
+
+                /* 判断当前 token 是否参与 ##（左侧：后面跟 ##；右侧：paste_next） */
+                const char *after_ident = p + len;
+                const char *peek = skip_space2(after_ident);
+                bool next_is_paste = (peek[0] == '#' && peek[1] == '#');
+                bool is_paste_operand = paste_next || next_is_paste;
+
+                if (is_param) {
+                    char *arg = (char *)list_get(args, idx);
+                    if (!arg) arg = "";
+                    if (is_paste_operand) {
+                        /* ## 操作数：使用未展开的原始参数文本（trim） */
+                        const char *as = arg;
+                        while (*as && isspace((unsigned char)*as)) as++;
+                        const char *ae = as + strlen(as);
+                        while (ae > as && isspace((unsigned char)*(ae - 1))) ae--;
+                        if (paste_next) string_rtrim_ws(&out);
+                        string_appendf(&out, "%.*s", (int)(ae - as), as);
+                    } else {
                         char *expanded_arg = expand_macro_text(ctx, arg, expanding, depth + 1);
+                        if (paste_next) string_rtrim_ws(&out);
                         string_appendf(&out, "%s", expanded_arg);
                         free(expanded_arg);
-                        replaced = true;
-                        break;
                     }
-                }
-                if (!replaced) {
+                } else {
+                    if (paste_next) string_rtrim_ws(&out);
                     string_appendf(&out, "%s", ident);
                 }
                 free(ident);
                 p += len;
+                paste_next = false;
                 continue;
             }
         }
 
+        if (paste_next) {
+            /* 粘贴模式：忽略前导空白 */
+            while (*p && isspace((unsigned char)*p)) p++;
+            string_rtrim_ws(&out);
+        }
         string_append(&out, *p);
         p++;
+        paste_next = false;
     }
 
     return string_steal(&out);

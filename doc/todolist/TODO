@@ -124,8 +124,8 @@
     ✔ 函数式宏参数展开 - 当前只解析不展开参数 @done(26-02-03 10:17)
     ✔ 添加多行测试宏特性 @done(26-02-03 10:21)
     ✔ #if/#elif - 常量表达式条件编译 @done(26-02-03 10:25)
-    ☐ ## 运算符 - 标记粘贴（token pasting）
-    ☐ # 运算符 - 字符串化（stringification）
+    ✔ ## 运算符 - 标记粘贴（token pasting） @done(26-02-03 10:28)
+    ✔ # 运算符 - 字符串化（stringification） @done(26-02-03 10:28)
     ☐ 变参宏 - __VA_ARGS__ 支持
     ☐ 预定义宏 - __FILE__, __LINE__, __DATE__, __TIME__, __FUNCTION__
     ☐ #error/#warning - 错误/警告指令

@@ -435,6 +435,31 @@ int test_if_elif_expr() {
 }
 
 /*=============================*
+ * 二十二、# 与 ## 运算符测试
+ *=============================*/
+
+#define STR(x) #x
+#define CAT(a, b) a##b
+#define DECL_TMP(name) int CAT(tmp_, name) = 7;
+
+/* ## 结果应被再次扫描并展开 */
+#define HELLO 123
+#define MAKE_HELLO() HE##LLO
+
+int test_hash_ops() {
+    /* # 字符串化：不应把 LEVEL 展开为 2 */
+    char *s1 = STR(LEVEL);
+    (void)s1;
+
+    /* # 字符串化：应规范化空白 */
+    char *s2 = STR( a +   b );
+    (void)s2;
+
+    DECL_TMP(foo)
+    return CAT(tmp_, foo) + MAKE_HELLO();
+}
+
+/*=============================*
  * 十六、综合测试函数
  *=============================*/
 
@@ -461,6 +486,7 @@ int test_all_pp_features() {
     result = result + test_do_while_0_macro();
     result = result + test_multiline_macro();
     result = result + test_if_elif_expr();
+    result = result + test_hash_ops();
     
     return result;
 }
