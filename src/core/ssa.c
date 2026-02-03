@@ -941,8 +941,12 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         }
         // 注意：args内存未释放，简化处理
         Instr *i = ssa_make_instr(b, IROP_CALL);
-        i->dest = ssa_new_value(b);
         i->type = ast->ctype;
+        if (ast->ctype && ast->ctype->type != CTYPE_VOID) {
+            i->dest = ssa_new_value(b);
+        } else {
+            i->dest = 0;
+        }
         ssa_add_label(i, ast->fname);
         for (Iter it = list_iter(args); !iter_end(it);) {
             ValueName *p = iter_next(&it);
@@ -1446,10 +1450,8 @@ static void assign_stack_offsets(Func *f, List *localvars)
 
 static void gen_func(SSABuild *b, Ast *ast) {
     if (!ast || ast->type != AST_FUNC_DEF) return;
-    
-    Ctype *ret = (ast->ctype && ast->ctype->type == CTYPE_PTR)
-                 ? ast->ctype->ptr : NULL;
-    
+
+    Ctype *ret = ast->ctype;
     Func *f = ssa_build_function(b, ast->fname, ret);
     if (ast->ctype) {
         CtypeAttr attr = get_attr(ast->ctype->attr);
@@ -1493,8 +1495,7 @@ static void gen_interrupt_func(SSABuild *b, Ast *ast) {
     char isr_name[32];
     snprintf(isr_name, sizeof(isr_name), "ISR_%d", ast->interrupt_id);
     
-    Ctype *ret = (ast->ctype && ast->ctype->type == CTYPE_PTR)
-                 ? ast->ctype->ptr : NULL;
+    Ctype *ret = ast->ctype;
     
     // 创建函数并标记为中断
     Func *f = ssa_build_function(b, ssa_strdup(isr_name), ret);
@@ -1632,6 +1633,10 @@ static bool suppress_const_print(Func *f, ValueName v) {
                     if (label && label[0] == '@') continue;
                 }
                 if (i->op == IROP_RET) continue;
+                if (i->labels && i->labels->len > 0) {
+                    char *tag = (char *)list_get(i->labels, 0);
+                    if (tag && strcmp(tag, "imm") == 0) continue;
+                }
                 return false; /* 还有其他用途，不能隐藏 */
             }
         }

@@ -40,6 +40,28 @@ static bool block_has_ret(Block *b) {
     return false;
 }
 
+static void replace_phi_pred_label(Block *blk, int old_id, int new_id) {
+    if (!blk || !blk->phis) return;
+    char old_lbl[32];
+    char new_lbl[32];
+    snprintf(old_lbl, sizeof(old_lbl), "block%d", old_id);
+    snprintf(new_lbl, sizeof(new_lbl), "block%d", new_id);
+
+    for (Iter it = list_iter(blk->phis); !iter_end(it);) {
+        Instr *phi = iter_next(&it);
+        if (!phi || !phi->labels) continue;
+        for (int k = 0; k < phi->labels->len; ++k) {
+            char *lbl = (char *)list_get(phi->labels, k);
+            if (!lbl) continue;
+            if (strcmp(lbl, old_lbl) == 0) {
+                char *rep = pass_alloc(strlen(new_lbl) + 1);
+                strcpy(rep, new_lbl);
+                list_set(phi->labels, k, rep);
+            }
+        }
+    }
+}
+
 static void list_remove_last(List *list, void **out) {
     if (out) *out = NULL;
     if (!list || !list->tail) return;
@@ -129,6 +151,39 @@ static Block *find_block_by_id(Func *f, int id) {
         if (b && (int)b->id == id) return b;
     }
     return NULL;
+}
+
+/*---------- 重新构建前驱列表 ----------*/
+static void rebuild_preds(Func *f) {
+    if (!f || !f->blocks) return;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        if (!b->preds) b->preds = make_list();
+        else list_clear_shallow(b->preds);
+    }
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs || b->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        if (!term || !term->labels) continue;
+
+        if (term->op == IROP_JMP && term->labels->len >= 1) {
+            int tid = -1;
+            sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+            Block *t = find_block_by_id(f, tid);
+            if (t) list_unique_push(t->preds, b, block_ptr_eq);
+        } else if (term->op == IROP_BR && term->labels->len >= 2) {
+            int t1 = -1, t2 = -1;
+            sscanf((char *)list_get(term->labels, 0), "block%d", &t1);
+            sscanf((char *)list_get(term->labels, 1), "block%d", &t2);
+            Block *b1 = find_block_by_id(f, t1);
+            Block *b2 = find_block_by_id(f, t2);
+            if (b1) list_unique_push(b1->preds, b, block_ptr_eq);
+            if (b2) list_unique_push(b2->preds, b, block_ptr_eq);
+        }
+    }
 }
 
 static GlobalVar *find_global(const char *name) {
@@ -924,16 +979,20 @@ static bool pass_binop_const_inline(Func *f, Stats *s) {
         Block *b = iter_next(&it);
         for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
             Instr *i = iter_next(&jt);
+            bool is_cmp = false;
             if (!i || !i->args || i->args->len < 2) continue;
-            if (i->type && i->type->size >= 2) continue;
             switch (i->op) {
             case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
             case IROP_AND: case IROP_OR:  case IROP_XOR:
             case IROP_SHL: case IROP_SHR:
                 break;
+            case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE:
+                is_cmp = true;
+                break;
             default:
                 continue;
             }
+            bool keep_args = is_cmp || (i->type && i->type->size >= 2);
 
             ValueName lhs = get_arg(i, 0);
             ValueName rhs = get_arg(i, 1);
@@ -953,15 +1012,17 @@ static bool pass_binop_const_inline(Func *f, Stats *s) {
             if (!def || def->op != IROP_CONST) continue;
 
             i->imm.ival = def->imm.ival;
-            list_clear(i->args);
-            ValueName *p = pass_alloc(sizeof *p); *p = lhs;
-            list_push(i->args, p);
-
             if (!i->labels) i->labels = make_list();
             list_clear(i->labels);
             char *tag = pass_alloc(4);
             strcpy(tag, "imm");
             list_push(i->labels, tag);
+
+            if (!keep_args) {
+                list_clear(i->args);
+                ValueName *p = pass_alloc(sizeof *p); *p = lhs;
+                list_push(i->args, p);
+            }
 
             changed = true;
             s->fold++;
@@ -987,6 +1048,7 @@ static bool pass_block_merge(Func *f, Stats *s) {
         Block *t = find_block_by_id(f, tid);
         if (!t || t == b) continue;
         if (t->phis && t->phis->len > 0) continue;
+        if (!t->instrs || t->instrs->len != 1) continue;
         if (t->preds && t->preds->len != 1) continue;
 
         /* 移除b的终结jmp */
@@ -1009,6 +1071,7 @@ static bool pass_block_merge(Func *f, Stats *s) {
                     if (sblk) {
                         sblk->preds = preds_remove(sblk->preds, t);
                         list_unique_push(sblk->preds, b, block_ptr_eq);
+                        replace_phi_pred_label(sblk, t->id, b->id);
                     }
                 } else if (tterm->op == IROP_BR && tterm->labels->len >= 2) {
                     int s1 = -1, s2 = -1;
@@ -1019,10 +1082,12 @@ static bool pass_block_merge(Func *f, Stats *s) {
                     if (sblk1) {
                         sblk1->preds = preds_remove(sblk1->preds, t);
                         list_unique_push(sblk1->preds, b, block_ptr_eq);
+                        replace_phi_pred_label(sblk1, t->id, b->id);
                     }
                     if (sblk2) {
                         sblk2->preds = preds_remove(sblk2->preds, t);
                         list_unique_push(sblk2->preds, b, block_ptr_eq);
+                        replace_phi_pred_label(sblk2, t->id, b->id);
                     }
                 }
             }
@@ -1131,6 +1196,25 @@ static bool pass_const_branch(Func *f, Stats *s) {
             }
         }
 
+        /* 额外标记：如果可达块的PHI引用了某前驱块，也视为可达 */
+        for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+            Block *b = iter_next(&it);
+            if (!b || (int)b->id > max_id || !seen[b->id]) continue;
+            if (!b->phis) continue;
+            for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+                Instr *phi = iter_next(&jt);
+                if (!phi || !phi->labels) continue;
+                for (int k = 0; k < phi->labels->len; ++k) {
+                    char *lbl = (char *)list_get(phi->labels, k);
+                    if (!lbl) continue;
+                    int pid = -1;
+                    if (sscanf(lbl, "block%d", &pid) == 1 && pid >= 0 && pid <= max_id) {
+                        seen[pid] = true;
+                    }
+                }
+            }
+        }
+
         for (Iter it = list_iter(f->blocks); !iter_end(it);) {
             Block *b = iter_next(&it);
             if (!b) continue;
@@ -1171,7 +1255,7 @@ static bool pass_jump_threading(Func *f, Stats *s) {
         Block *t = find_block_by_id(f, tid);
         if (!t || t == b) continue;
         if (t->phis && t->phis->len > 0) continue;
-        if (!t->instrs || t->instrs->len == 0) continue;
+        if (!t->instrs || t->instrs->len != 1) continue;
 
         Instr *tterm = (Instr *)list_get(t->instrs, t->instrs->len - 1);
         if (!tterm || tterm->op != IROP_JMP || !tterm->labels || tterm->labels->len < 1) continue;
@@ -1194,7 +1278,10 @@ static bool pass_jump_threading(Func *f, Stats *s) {
         /* 更新 preds */
         if (t->preds) t->preds = preds_remove(t->preds, b);
         Block *sblk = find_block_by_id(f, sid);
-        if (sblk) list_unique_push(sblk->preds, b, block_ptr_eq);
+        if (sblk) {
+            list_unique_push(sblk->preds, b, block_ptr_eq);
+            replace_phi_pred_label(sblk, t->id, b->id);
+        }
 
         changed = true;
         s->fold++;
@@ -1219,6 +1306,7 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_local_opts(f, &st);
         changed |= pass_const_branch(f, &st);
         changed |= pass_jump_threading(f, &st);
+        rebuild_preds(f);
         changed |= pass_phi(f, &st);
         changed |= pass_store_cleanup(f, &st);
         changed |= pass_binop_const_inline(f, &st);
