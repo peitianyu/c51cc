@@ -250,7 +250,6 @@ static bool pass_const_fold(Func *f, Stats *s) {
             }
             if (ok) {
                 i->op = IROP_CONST; i->imm.ival = r;
-                list_clear(i->args); list_clear(i->labels);
                 ++s->fold; changed = true;
             }
         }
@@ -288,12 +287,13 @@ static bool pass_local_opts(Func *f, Stats *s) {
         Block *b = iter_next(&it);
         for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
             Instr *i = iter_next(&jt);
+            if (!i || !i->args) continue;
             /* 1. 代数 */
             if (i->args->len >= 1) {
                 ValueName a = get_arg(i, 0), b = i->args->len >= 2 ? get_arg(i, 1) : 0;
                 if ((i->op == IROP_SUB || i->op == IROP_XOR) && a == b) {
                     i->op = IROP_CONST; i->imm.ival = 0;
-                    list_clear(i->args); ++s->fold; changed = true; continue;
+                    ++s->fold; changed = true; continue;
                 }
                 if ((i->op == IROP_AND || i->op == IROP_OR) && a == b) {
                     /* replace with a */

@@ -1603,11 +1603,13 @@ typedef struct {
 
 static List* collect_consts(Func *f) {
     List *consts = make_list();
+    if (!f || !f->blocks) return consts;
     for (int j = 0; j < f->blocks->len; j++) {
         Block *blk = list_get(f->blocks, j);
+        if (!blk || !blk->instrs) continue;
         for (int i = 0; i < blk->instrs->len; i++) {
             Instr *inst = list_get(blk->instrs, i);
-            if (inst->op == IROP_CONST && inst->dest > 0) {
+            if (inst && inst->op == IROP_CONST && inst->dest > 0) {
                 ConstEntry *e = ssa_alloc(sizeof(ConstEntry));
                 e->val = inst->dest;
                 e->const_val = inst->imm.ival;
@@ -1635,6 +1637,7 @@ static bool is_const(List *consts, ValueName val) {
 }
 
 void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
+    if (!i) return;
     if (i->op == IROP_NOP) return;
     
     if (i->dest > 0) {
@@ -1648,8 +1651,7 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
         fprintf(fp, "param %s", (char*)list_get(i->labels, 0));
         break;
     case IROP_CONST:
-        fprintf(fp, "const %ld", i->imm.ival);
-        i->type = ctype_int;  // TODO: 常量默认int类型
+        fprintf(fp, "const %ld", (long)i->imm.ival);
         break;
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD: {
         const char *op_str = (i->op == IROP_ADD) ? "add" :
@@ -1800,7 +1802,7 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
     }
     case IROP_RET: {
         fprintf(fp, "ret");
-        if (i->args->len >= 1) {
+        if (i->args && i->args->len >= 1) {
             ValueName *v = list_get(i->args, 0);
             fprintf(fp, " v%d", *v);
         }
@@ -1813,36 +1815,47 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
 }
 
 static void ssa_print_func(FILE *fp, Func *f) {
+    if (!f) return;
     fprintf(fp, "@%s(", f->name);
-    for (int i = 0; i < f->params->len; i++) {
-        if (i > 0) fprintf(fp, ", ");
-        fprintf(fp, "%s: int", (char*)list_get(f->params, i));
+    if (f->params) {
+        for (int i = 0; i < f->params->len; i++) {
+            if (i > 0) fprintf(fp, ", ");
+            fprintf(fp, "%s: int", (char*)list_get(f->params, i));
+        }
     }
     fprintf(fp, "): %s {\n", get_type_str(f->ret_type));
     
     // 收集所有常量定义
     List *consts = collect_consts(f);
     
-    for (int j = 0; j < f->blocks->len; j++) {
-        Block *blk = list_get(f->blocks, j);
-        // 跳过空死块：无前驱且无指令的块（除了第一个块）
-        bool is_first = (j == 0);
-        bool has_preds = blk->preds && blk->preds->len > 0;
-        bool has_instrs = (blk->phis && blk->phis->len > 0) ||
-                          (blk->instrs && blk->instrs->len > 0);
-        if (!is_first && !has_preds && !has_instrs) {
-            continue; // 跳过空死块
-        }
-        fprintf(fp, "\n  .b%d:\n", blk->id);
-        
-        for (int i = 0; i < blk->phis->len; i++) {
-            ssa_print_instr(fp, list_get(blk->phis, i), consts);
-        }
-        
-        for (int i = 0; i < blk->instrs->len; i++) {
-            Instr *inst = list_get(blk->instrs, i);
-            if (inst->op != IROP_PHI) // PHI已在上面打印
-                ssa_print_instr(fp, inst, consts);
+    if (f->blocks) {
+        for (int j = 0; j < f->blocks->len; j++) {
+            Block *blk = list_get(f->blocks, j);
+            if (!blk) continue;
+            // 跳过空死块：无前驱且无指令的块（除了第一个块）
+            bool is_first = (j == 0);
+            bool has_preds = blk->preds && blk->preds->len > 0;
+            bool has_instrs = (blk->phis && blk->phis->len > 0) ||
+                              (blk->instrs && blk->instrs->len > 0);
+            if (!is_first && !has_preds && !has_instrs) {
+                continue; // 跳过空死块
+            }
+            fprintf(fp, "\n  .b%d:\n", blk->id);
+            
+            if (blk->phis) {
+                for (int i = 0; i < blk->phis->len; i++) {
+                    Instr *phi = list_get(blk->phis, i);
+                    if (phi) ssa_print_instr(fp, phi, consts);
+                }
+            }
+            
+            if (blk->instrs) {
+                for (int i = 0; i < blk->instrs->len; i++) {
+                    Instr *inst = list_get(blk->instrs, i);
+                    if (inst && inst->op != IROP_PHI) // PHI已在上面打印
+                        ssa_print_instr(fp, inst, consts);
+                }
+            }
         }
     }
     fprintf(fp, "}\n");
