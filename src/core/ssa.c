@@ -1672,14 +1672,14 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
     }
     case IROP_SELECT: {
         ValueName *c = list_get(i->args, 0);
-    case IROP_ASM: {
-        const char *t = (i->labels && i->labels->len > 0) ? (char *)list_get(i->labels, 0) : "";
-        fprintf(fp, "asm \"%s\"", t ? t : "");
-        break;
-    }
         ValueName *t = list_get(i->args, 1);
         ValueName *f = list_get(i->args, 2);
         fprintf(fp, "select v%d, v%d, v%d", *c, *t, *f);
+        break;
+    }
+    case IROP_ASM: {
+        const char *t = (i->labels && i->labels->len > 0) ? (char *)list_get(i->labels, 0) : "";
+        fprintf(fp, "asm \"%s\"", t ? t : "");
         break;
     }
     case IROP_LOAD: {

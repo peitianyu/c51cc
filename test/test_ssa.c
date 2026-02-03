@@ -42,22 +42,22 @@
 //     return result;
 // }
 
-// 测试for循环和break/continue
-int find_first_even(int arr[], int size) {
-    int i;
-    for (i = 0; i < size; i = i + 1) {
-        if (arr[i] % 2 == 0) {
-            break;
-        }
-    }
-    return i;
-}
+// // 测试for循环和break/continue
+// int find_first_even(int arr[], int size) {
+//     int i;
+//     for (i = 0; i < size; i = i + 1) {
+//         if (arr[i] % 2 == 0) {
+//             break;
+//         }
+//     }
+//     return i;
+// }
 
-// // // 测试复杂表达式和类型转换
-// // int complex_expr(int a, int b, int c) {
-// //     int result = (a > b) ? ((c > 0) ? a + c : b - c) : ((a + b) * c);
-// //     return result;
-// // }
+// 测试复杂表达式和类型转换
+int complex_expr(int a, int b, int c) {
+    int result = (a > b) ? ((c > 0) ? a + c : b - c) : ((a + b) * c);
+    return result;
+}
 
 // // 测试指针和数组
 // int array_sum(int arr[], int n) {
