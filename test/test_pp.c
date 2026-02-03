@@ -1,5 +1,12 @@
 #include "test_pp_include.h"
 
+/* #pragma once 测试：同一个头文件重复 include */
+#include "test_pp_once.h"
+#include "test_pp_once.h"
+
+/* #pragma message 测试：应打印但不失败 */
+#pragma message("pp pragma message test")
+
 /*=============================*
  * 一、基本宏定义测试 (对象式宏)
  *=============================*/
@@ -565,6 +572,12 @@ int test_error_warning_directives() {
     return 1;
 }
 
+int test_pragma_once_message() {
+    struct OnceStruct s;
+    s.a = ONCE_MACRO;
+    return s.a;
+}
+
 /*=============================*
  * 十六、综合测试函数
  *=============================*/
@@ -596,6 +609,7 @@ int test_all_pp_features() {
     result = result + test_variadic_macro();
     result = result + test_predefined_macros();
     result = result + test_error_warning_directives();
+    result = result + test_pragma_once_message();
     
     return result;
 }

@@ -130,7 +130,9 @@
     ✔ 预定义宏 - __FILE__, __LINE__, __DATE__, __TIME__, __STDC__ 等 @done(26-02-03 10:56)
     ✔ #error/#warning - 错误/警告指令 @done(26-02-03 10:57)
     ☐ #pragma - 编译器指令
-    ☐ __attribute__ 支持 - 函数/变量属性
+        ✔ #pragma once - include guard @done(26-02-03 11:10)
+        ✔ #pragma message("...") - 编译期输出提示信息 @done(26-02-03 11:10)
+        ☐ #pragma asm / #pragma endasm - 内联汇编块（或与 asm 语句对齐）
     ✔ 宏展开递归保护 - 防止无限递归 @done(26-02-03 10:41)
     ☐ comptime表达式支持 
 ✔ 处理由于预处理导致的行号/文件名变化 @done(26-01-29 17:36)

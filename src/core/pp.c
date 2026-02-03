@@ -49,6 +49,9 @@ typedef struct PPContext {
     /* 预定义宏：每次预处理运行固定的一组日期/时间 */
     char *pp_date;
     char *pp_time;
+
+    /* #pragma once：记录已标记 once 的文件（key=fullpath, val=(void*)1） */
+    Dict *pragma_once;
 } PPContext;
 
 static bool is_pp_macro(PPContext *ctx, const char *name);
@@ -63,6 +66,7 @@ static char *expand_macro_simple(PPContext *ctx, const char *line);
 static bool should_skip(PPContext *ctx);
 
 static bool handle_error_warning(PPContext *ctx, const char *args, bool is_error);
+static bool handle_pragma(PPContext *ctx, const char *args);
 
 static bool pp_remove_macro_entry(PPContext *ctx, const char *name, Macro **out_macro);
 
@@ -173,6 +177,7 @@ PPContext *pp_init(void)
 {
     PPContext *ctx = calloc(1, sizeof(PPContext));
     ctx->macros = make_dict(NULL);
+    ctx->pragma_once = make_dict(NULL);
     ctx->include_paths = make_list();
     ctx->line = malloc(PP_LINE_SIZE);
     ctx->last_line = NULL;
@@ -226,6 +231,20 @@ void pp_free(PPContext *ctx)
 
     free(ctx->pp_date);
     free(ctx->pp_time);
+
+    if (ctx->pragma_once && ctx->pragma_once->list) {
+        ListNode *node, *tmp;
+        list_for_each_safe(node, tmp, ctx->pragma_once->list) {
+            DictEntry *e = (DictEntry *)node->elem;
+            if (e) {
+                free(e->key);
+                free(e);
+            }
+            free(node);
+        }
+        free(ctx->pragma_once->list);
+        free(ctx->pragma_once);
+    }
     free(ctx);
 }
 
@@ -917,6 +936,13 @@ bool pp_push_file(PPContext *ctx, const char *filename)
     if (!fp) {
         return false;
     }
+
+    /* #pragma once：如果该文件已标记 once，则后续 include 直接跳过 */
+    if (ctx && ctx->pragma_once && fullpath && dict_get(ctx->pragma_once, fullpath)) {
+        fclose(fp);
+        free(fullpath);
+        return true;
+    }
     
     InputFile *f = malloc(sizeof(InputFile));
     f->fp = fp;
@@ -1484,6 +1510,13 @@ static bool handle_include(PPContext *ctx, const char *args)
             error("Cannot open include file: %s", filename);
             return false;
         }
+
+        /* #pragma once：如果该文件已标记 once，则后续 include 直接跳过 */
+        if (ctx && ctx->pragma_once && fullpath && dict_get(ctx->pragma_once, fullpath)) {
+            fclose(fp);
+            free(fullpath);
+            return true;
+        }
         
         InputFile *f = malloc(sizeof(InputFile));
         f->fp = fp;
@@ -1614,6 +1647,60 @@ static bool handle_error_warning(PPContext *ctx, const char *args, bool is_error
     return true;
 }
 
+static bool handle_pragma(PPContext *ctx, const char *args)
+{
+    const char *p = skip_space(args);
+    if (!*p) return true;
+
+    int len = 0;
+    char *kind = pp_get_ident(p, &len);
+    if (!kind) {
+        /* 不是标识符的 pragma：忽略 */
+        return true;
+    }
+    p += len;
+    p = skip_space(p);
+
+    if (strcmp(kind, "once") == 0) {
+        const char *cur = pp_current_file(ctx);
+        if (cur && ctx && ctx->pragma_once && !dict_get(ctx->pragma_once, (char *)cur)) {
+            dict_put(ctx->pragma_once, strdup(cur), (void *)1);
+        }
+        free(kind);
+        return true;
+    }
+
+    if (strcmp(kind, "message") == 0) {
+        const char *msg = p;
+        msg = skip_space(msg);
+        /* 兼容 #pragma message("...") */
+        if (msg[0] == '(') {
+            msg++;
+            msg = skip_space(msg);
+            const char *end = msg + strlen(msg);
+            while (end > msg && isspace((unsigned char)*(end - 1))) end--;
+            if (end > msg && *(end - 1) == ')') end--;
+
+            char *tmp = trim_copy_range(msg, end);
+            const char *file = pp_current_file(ctx);
+            int line = pp_current_line(ctx);
+            fprintf(stderr, "%s:%d: note: %s\n", file ? file : "(null)", line, tmp);
+            free(tmp);
+        } else {
+            const char *file = pp_current_file(ctx);
+            int line = pp_current_line(ctx);
+            fprintf(stderr, "%s:%d: note: %s\n", file ? file : "(null)", line, msg && *msg ? msg : "#pragma message");
+        }
+
+        free(kind);
+        return true;
+    }
+
+    /* 其他 pragma 暂时忽略（后续可扩展） */
+    free(kind);
+    return true;
+}
+
 static bool handle_ifdef(PPContext *ctx, const char *args, bool is_ifndef)
 {
     const char *p = skip_space(args);
@@ -1718,6 +1805,10 @@ static bool handle_directive(PPContext *ctx, const char *line)
     } else if (strcmp(directive, "warning") == 0) {
         if (!should_skip(ctx)) {
             handle_error_warning(ctx, args, false);
+        }
+    } else if (strcmp(directive, "pragma") == 0) {
+        if (!should_skip(ctx)) {
+            handle_pragma(ctx, args);
         }
     } else if (strcmp(directive, "if") == 0) {
         handle_if(ctx, args);
