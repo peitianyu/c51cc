@@ -1256,11 +1256,18 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         
         ssa_build_jmp(b, header);
         ssa_build_position(b, header);
-        
-        ValueName cond = gen_expr(b, ast->while_cond);
-        ValueName zero = ssa_build_const(b, 0);
-        ValueName cmp = ssa_build_binop(b, IROP_NE, cond, zero);
-        ssa_build_br(b, cmp, body, exit);
+
+        if (ast->while_cond && ast->while_cond->type == AST_LITERAL) {
+            if (ast->while_cond->ival)
+                ssa_build_jmp(b, body);
+            else
+                ssa_build_jmp(b, exit);
+        } else {
+            ValueName cond = gen_expr(b, ast->while_cond);
+            ValueName zero = ssa_build_const(b, 0);
+            ValueName cmp = ssa_build_binop(b, IROP_NE, cond, zero);
+            ssa_build_br(b, cmp, body, exit);
+        }
         
         ssa_build_position(b, body);
         ssa_build_push_cf(b, exit, header);
@@ -1286,11 +1293,20 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         
         ssa_build_jmp(b, header);
         ssa_build_position(b, header);
-        
-        ValueName cond = ast->forcond ? gen_expr(b, ast->forcond) : ssa_build_const(b, 1);
-        ValueName zero = ssa_build_const(b, 0);
-        ValueName cmp = ssa_build_binop(b, IROP_NE, cond, zero);
-        ssa_build_br(b, cmp, body, exit);
+
+        if (!ast->forcond) {
+            ssa_build_jmp(b, body);
+        } else if (ast->forcond->type == AST_LITERAL) {
+            if (ast->forcond->ival)
+                ssa_build_jmp(b, body);
+            else
+                ssa_build_jmp(b, exit);
+        } else {
+            ValueName cond = gen_expr(b, ast->forcond);
+            ValueName zero = ssa_build_const(b, 0);
+            ValueName cmp = ssa_build_binop(b, IROP_NE, cond, zero);
+            ssa_build_br(b, cmp, body, exit);
+        }
         
         ssa_build_position(b, body);
         ssa_build_push_cf(b, exit, step);

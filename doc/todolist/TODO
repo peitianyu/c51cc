@@ -68,7 +68,7 @@
 ☐ 添加typeof语句
 ☐ 添加typestr语句
 ☐ 添加defer语句
-☐ 添加空while支持 while(1);
+✔ 添加空while支持 while(1); @done(26-02-03 10:04)
 
 ✔ 完成ast->ssa的braun算法学习 @done(26-01-23 14:54)
 ✔ 尝试编写单独算法测试模块 @done(26-01-23 14:54)
@@ -121,11 +121,12 @@
     ✔ #define - 函数式宏定义（解析参数） @done(26-01-28 09:26)
     ✔ #undef - 取消宏定义 @done(26-01-28 09:26)
     ✔ #ifdef/#ifndef/#else/#endif - 条件编译 @done(26-01-28 09:26)
+    ☐ 支持更多的define特性
     ☐ #if/#elif - 常量表达式条件编译
     ☐ ## 运算符 - 标记粘贴（token pasting）
     ☐ # 运算符 - 字符串化（stringification）
     ☐ 变参宏 - __VA_ARGS__ 支持
-    ☐ 预定义宏 - __FILE__, __LINE__, __DATE__, __TIME__
+    ☐ 预定义宏 - __FILE__, __LINE__, __DATE__, __TIME__, __FUNCTION__
     ☐ #error/#warning - 错误/警告指令
     ☐ #pragma - 编译器指令
     ☐ 宏展开递归保护 - 防止无限递归

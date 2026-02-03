@@ -1993,6 +1993,12 @@ static Ast *read_stmt(void)
     }
     is_first = false;
 
+    // null statement: ';'
+    if (is_punct(tok, ';')) {
+        read_token();
+        return ast_compound_stmt(make_list());
+    }
+
     if (is_ident(tok, "if"))     { read_token(); return read_if_stmt(); }
     if (is_ident(tok, "switch")) { read_token(); return read_switch_stmt(); }
     if (is_ident(tok, "for"))    { read_token(); return read_for_stmt(); }
