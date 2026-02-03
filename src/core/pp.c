@@ -62,6 +62,8 @@ static bool handle_endif(PPContext *ctx, const char *args);
 static char *expand_macro_simple(PPContext *ctx, const char *line);
 static bool should_skip(PPContext *ctx);
 
+static bool handle_error_warning(PPContext *ctx, const char *args, bool is_error);
+
 static bool pp_remove_macro_entry(PPContext *ctx, const char *name, Macro **out_macro);
 
 static inline bool is_ident_start(char c);
@@ -1600,6 +1602,18 @@ static bool handle_undef(PPContext *ctx, const char *args)
     return true;
 }
 
+static bool handle_error_warning(PPContext *ctx, const char *args, bool is_error)
+{
+    const char *msg = skip_space(args);
+    const char *file = pp_current_file(ctx);
+    int line = pp_current_line(ctx);
+
+    if (!msg || msg[0] == '\0') msg = is_error ? "#error" : "#warning";
+    fprintf(stderr, "%s:%d: %s: %s\n", file ? file : "(null)", line, is_error ? "error" : "warning", msg);
+    if (is_error) exit(1);
+    return true;
+}
+
 static bool handle_ifdef(PPContext *ctx, const char *args, bool is_ifndef)
 {
     const char *p = skip_space(args);
@@ -1696,6 +1710,14 @@ static bool handle_directive(PPContext *ctx, const char *line)
     } else if (strcmp(directive, "undef") == 0) {
         if (!should_skip(ctx)) {
             handle_undef(ctx, args);
+        }
+    } else if (strcmp(directive, "error") == 0) {
+        if (!should_skip(ctx)) {
+            handle_error_warning(ctx, args, true);
+        }
+    } else if (strcmp(directive, "warning") == 0) {
+        if (!should_skip(ctx)) {
+            handle_error_warning(ctx, args, false);
         }
     } else if (strcmp(directive, "if") == 0) {
         handle_if(ctx, args);

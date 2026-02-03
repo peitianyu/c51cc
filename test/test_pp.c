@@ -547,6 +547,25 @@ int test_predefined_macros() {
 }
 
 /*=============================*
+ * 二十五、#error / #warning 测试
+ *=============================*/
+
+#define WARN_FEATURE
+
+#ifdef WARN_FEATURE
+#warning this is a pp warning test
+#endif
+
+#if 0
+#error this error must be skipped
+#endif
+
+int test_error_warning_directives() {
+    /* 只验证编译能通过即可 */
+    return 1;
+}
+
+/*=============================*
  * 十六、综合测试函数
  *=============================*/
 
@@ -576,6 +595,7 @@ int test_all_pp_features() {
     result = result + test_hash_ops();
     result = result + test_variadic_macro();
     result = result + test_predefined_macros();
+    result = result + test_error_warning_directives();
     
     return result;
 }
