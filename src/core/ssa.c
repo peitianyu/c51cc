@@ -513,6 +513,15 @@ static Func* ssa_find_func(SSAUnit *unit, const char *name) {
     return NULL;
 }
 
+static GlobalVar* ssa_find_global(SSAUnit *unit, const char *name) {
+    if (!unit || !name) return NULL;
+    for (Iter it = list_iter(unit->globals); !iter_end(it);) {
+        GlobalVar *g = iter_next(&it);
+        if (g && g->name && strcmp(g->name, name) == 0) return g;
+    }
+    return NULL;
+}
+
 void ssa_build_destroy(SSABuild *b) {
     if (!b) return;
     // 简化：不递归释放所有节点，由OS回收或后续添加arena释放
@@ -908,6 +917,18 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         ValueName addr = ssa_build_addr(b, ast->varname, ast->ctype);
         return ssa_build_load(b, addr, ast->ctype, ast->ctype);
     }
+
+    case AST_STRING: {
+        if (b && b->unit && ast->slabel) {
+            if (!ssa_find_global(b->unit, ast->slabel)) {
+                Instr *init_instr = build_global_init_instr(b, ast->ctype, ast);
+                bool has_init = (init_instr != NULL);
+                ssa_add_global(b, ast->slabel, ast->ctype, 0, has_init,
+                               init_instr, true, false);
+            }
+        }
+        return ssa_build_addr(b, ast->slabel, ast->ctype);
+    }
         
     case AST_ADDR: {
         // &var
@@ -1006,6 +1027,34 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         }
         ValueName cur = gen_expr(b, ast->operand);
         return ssa_build_binop_t(b, op, cur, one, ast->ctype);
+    }
+
+    case AST_POST_INC:
+    case AST_POST_DEC: {
+        IrOp op = (ast->type == AST_POST_INC) ? IROP_ADD : IROP_SUB;
+        ValueName one = ssa_build_const_t(b, 1, ast->ctype);
+
+        if (ast->operand && ast->operand->type == AST_LVAR) {
+            ValueName cur = ssa_build_read(b, ast->operand->varname);
+            ValueName val = ssa_build_binop_t(b, op, cur, one, ast->ctype);
+            ssa_build_write(b, ast->operand->varname, val);
+            return cur;
+        }
+        if (ast->operand && ast->operand->type == AST_GVAR) {
+            ValueName addr = ssa_build_addr(b, ast->operand->varname, ast->operand->ctype);
+            ValueName cur = ssa_build_load(b, addr, ast->ctype, ast->ctype);
+            ValueName val = ssa_build_binop_t(b, op, cur, one, ast->ctype);
+            ssa_build_store(b, addr, val, ast->ctype);
+            return cur;
+        }
+        if (ast->operand && ast->operand->type == AST_DEREF) {
+            ValueName ptr = gen_expr(b, ast->operand->operand);
+            ValueName cur = ssa_build_load(b, ptr, ast->ctype, ast->ctype);
+            ValueName val = ssa_build_binop_t(b, op, cur, one, ast->ctype);
+            ssa_build_store(b, ptr, val, ast->ctype);
+            return cur;
+        }
+        return gen_expr(b, ast->operand);
     }
     
     case '=': {
@@ -1479,7 +1528,7 @@ static void gen_func(SSABuild *b, Ast *ast) {
     
     // 只在当前块不为空或有前驱时才添加默认ret
     // 避免在死块（如if语句的merge块）中添加不必要的ret
-    if (b->cur_block && !f->is_noreturn) {
+    if (b->cur_block && !f->is_noreturn && ret && ret->type != CTYPE_VOID) {
         bool has_preds = b->cur_block->preds && b->cur_block->preds->len > 0;
         bool has_instrs = b->cur_block->instrs && b->cur_block->instrs->len > 0;
         if (has_preds || has_instrs) {
@@ -1958,7 +2007,30 @@ void ssa_print(FILE *fp, SSAUnit *unit) {
         for (Iter it = list_iter(unit->globals); !iter_end(it);) {
             GlobalVar *g = iter_next(&it);
             fprintf(fp, "  @%s: %s", g->name, ctype_to_string(g->type));
-            if (g->has_init) fprintf(fp, " = %ld", g->init_value);
+            if (g->has_init) {
+                if (g->init_instr && g->init_instr->op == IROP_CONST &&
+                    g->init_instr->imm.blob.bytes && g->init_instr->imm.blob.len > 0) {
+                    if (g->type && g->type->type == CTYPE_ARRAY &&
+                        g->type->ptr && g->type->ptr->type == CTYPE_CHAR) {
+                        int len = g->init_instr->imm.blob.len;
+                        char *tmp = ssa_alloc((size_t)len + 1);
+                        memcpy(tmp, g->init_instr->imm.blob.bytes, (size_t)len);
+                        int slen = 0;
+                        while (slen < len && tmp[slen] != '\0') slen++;
+                        tmp[slen] = '\0';
+                        fprintf(fp, " = \"%s\"", quote_cstring(tmp));
+                    } else {
+                        fprintf(fp, " = {");
+                        for (int i = 0; i < g->init_instr->imm.blob.len; ++i) {
+                            if (i > 0) fprintf(fp, ", ");
+                            fprintf(fp, "0x%02X", g->init_instr->imm.blob.bytes[i]);
+                        }
+                        fprintf(fp, "}");
+                    }
+                } else {
+                    fprintf(fp, " = %ld", g->init_value);
+                }
+            }
             fprintf(fp, "\n");
         }
         fprintf(fp, "}\n\n");

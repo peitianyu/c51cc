@@ -295,6 +295,12 @@ static void ast_to_string_int(String *buf, Ast *ast)
     case PUNCT_DEC:
         uop_to_string(buf, "--", ast);
         break;
+    case AST_POST_INC:
+        uop_to_string(buf, "post++", ast);
+        break;
+    case AST_POST_DEC:
+        uop_to_string(buf, "post--", ast);
+        break;
     case PUNCT_LOGAND:
         binop_to_string(buf, "and", ast);
         break;

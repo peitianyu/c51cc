@@ -1048,7 +1048,7 @@ static bool pass_block_merge(Func *f, Stats *s) {
         Block *t = find_block_by_id(f, tid);
         if (!t || t == b) continue;
         if (t->phis && t->phis->len > 0) continue;
-        if (!t->instrs || t->instrs->len != 1) continue;
+        if (!t->instrs || t->instrs->len == 0) continue;
         if (t->preds && t->preds->len != 1) continue;
 
         /* 移除b的终结jmp */
@@ -1289,6 +1289,88 @@ static bool pass_jump_threading(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 入口块空跳转消除 ----------*/
+static bool pass_entry_jmp_elim(Func *f, Stats *s) {
+    if (!f || !f->entry || !f->blocks) return false;
+    Block *b = f->entry;
+    if (!b || (b->phis && b->phis->len > 0)) return false;
+    if (!b->instrs || b->instrs->len != 1) return false;
+    Instr *term = (Instr *)list_get(b->instrs, 0);
+    if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) return false;
+
+    int tid = -1;
+    sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+    if (tid < 0) return false;
+    Block *t = find_block_by_id(f, tid);
+    if (!t || t == b) return false;
+    if (t->phis && t->phis->len > 0) return false;
+    if (t->preds && t->preds->len != 1) return false;
+
+    /* 将入口设置为目标块，清理目标块前驱 */
+    f->entry = t;
+    if (t->preds) t->preds = preds_remove(t->preds, b);
+
+    /* 清空旧入口块 */
+    list_clear_shallow(b->instrs);
+    b->instrs = make_list();
+    b->preds = make_list();
+
+    s->rm++;
+    return true;
+}
+
+/*---------- 入口块参数下沉 ----------*/
+static bool pass_entry_param_sink(Func *f, Stats *s) {
+    if (!f || !f->entry || !f->blocks) return false;
+    Block *b = f->entry;
+    if (!b || (b->phis && b->phis->len > 0)) return false;
+    if (!b->instrs || b->instrs->len < 2) return false;
+
+    Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+    if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) return false;
+
+    int tid = -1;
+    sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+    if (tid < 0) return false;
+    Block *t = find_block_by_id(f, tid);
+    if (!t || t == b) return false;
+    if (t->phis && t->phis->len > 0) return false;
+    if (t->preds && t->preds->len != 1) return false;
+
+    /* 入口块除终结跳转外必须全是param */
+    for (int i = 0; i < b->instrs->len - 1; ++i) {
+        Instr *inst = (Instr *)list_get(b->instrs, i);
+        if (!inst || inst->op != IROP_PARAM) return false;
+    }
+
+    /* 组装新指令列表：params + 目标块指令 */
+    List *new_instrs = make_list();
+    for (int i = 0; i < b->instrs->len - 1; ++i) {
+        Instr *inst = (Instr *)list_get(b->instrs, i);
+        list_push(new_instrs, inst);
+    }
+    if (t->instrs) {
+        for (Iter it = list_iter(t->instrs); !iter_end(it);) {
+            Instr *inst = iter_next(&it);
+            list_push(new_instrs, inst);
+        }
+    }
+    list_clear_shallow(t->instrs);
+    t->instrs = new_instrs;
+
+    /* 更新入口 */
+    f->entry = t;
+    if (t->preds) t->preds = preds_remove(t->preds, b);
+
+    /* 清空旧入口块 */
+    list_clear_shallow(b->instrs);
+    b->instrs = make_list();
+    b->preds = make_list();
+
+    s->rm++;
+    return true;
+}
+
 /*---------- 统一迭代框架 ----------*/
 void ssa_optimize_func(Func *f, int level) {
     if (!f || level == OPT_O0) return;
@@ -1306,6 +1388,8 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_local_opts(f, &st);
         changed |= pass_const_branch(f, &st);
         changed |= pass_jump_threading(f, &st);
+        changed |= pass_entry_jmp_elim(f, &st);
+        changed |= pass_entry_param_sink(f, &st);
         rebuild_preds(f);
         changed |= pass_phi(f, &st);
         changed |= pass_store_cleanup(f, &st);

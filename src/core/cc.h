@@ -83,6 +83,8 @@ enum {
     PUNCT_MUL_ASSIGN,  /* *= */
     PUNCT_DIV_ASSIGN,  /* /= */
     PUNCT_MOD_ASSIGN,  /* %= */
+    AST_POST_INC,
+    AST_POST_DEC,
 };
 
 enum {

@@ -1145,10 +1145,10 @@ static Ast *read_expr_int(int prec)
             unget_token(tok);
             return ast;
         }
-        // FIXME: this is BUG!! ++ should be in read_unary_expr() , I think.
         if (is_punct(tok, PUNCT_INC) || is_punct(tok, PUNCT_DEC)) {
             ensure_lvalue(ast);
-            ast = ast_uop(get_punct(tok), ast->ctype, ast);
+            int post_type = is_punct(tok, PUNCT_INC) ? AST_POST_INC : AST_POST_DEC;
+            ast = ast_uop(post_type, ast->ctype, ast);
             continue;
         }
         if (is_assign_punct(get_punct(tok)))
