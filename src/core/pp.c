@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <time.h>
 #include "cc.h"
 
 #define PP_LINE_SIZE 4096
@@ -44,6 +45,10 @@ typedef struct PPContext {
     char *line;             /* 当前行缓冲区 */
     char *last_line;        /* 上次返回的行（用于释放） */
     bool in_block_comment;  /* 是否处于跨行块注释中 */
+
+    /* 预定义宏：每次预处理运行固定的一组日期/时间 */
+    char *pp_date;
+    char *pp_time;
 } PPContext;
 
 static bool is_pp_macro(PPContext *ctx, const char *name);
@@ -63,6 +68,15 @@ static inline bool is_ident_start(char c);
 static inline bool is_ident_char(char c);
 static inline char *string_steal(String *s);
 static bool list_contains_cstr(List *list, const char *s);
+
+/* pp.c 对外接口（本文件内会提前使用） */
+const char *pp_current_file(PPContext *ctx);
+int pp_current_line(PPContext *ctx);
+
+static bool is_predefined_macro(const char *name);
+static char *pp_predefined_macro_expansion(PPContext *ctx, const char *name);
+static char *pp_make_c_string_literal(const char *raw);
+static void pp_init_date_time(PPContext *ctx);
 
 static void string_rtrim_ws(String *s)
 {
@@ -160,6 +174,8 @@ PPContext *pp_init(void)
     ctx->include_paths = make_list();
     ctx->line = malloc(PP_LINE_SIZE);
     ctx->last_line = NULL;
+
+    pp_init_date_time(ctx);
     
     list_push(ctx->include_paths, strdup("."));
     list_push(ctx->include_paths, strdup("/usr/include"));
@@ -205,6 +221,9 @@ void pp_free(PPContext *ctx)
     
     free(ctx->line);
     free(ctx->last_line);
+
+    free(ctx->pp_date);
+    free(ctx->pp_time);
     free(ctx);
 }
 
@@ -224,7 +243,112 @@ static char *pp_get_ident(const char *p, int *len)
 
 static bool is_pp_macro(PPContext *ctx, const char *name)
 {
+    if (is_predefined_macro(name)) return true;
     return get_pp_macro(ctx, name) != NULL;
+}
+
+static bool is_predefined_macro(const char *name)
+{
+    if (!name) return false;
+    return strcmp(name, "__FILE__") == 0 ||
+           strcmp(name, "__LINE__") == 0 ||
+           strcmp(name, "__DATE__") == 0 ||
+           strcmp(name, "__TIME__") == 0 ||
+           strcmp(name, "__STDC__") == 0 ||
+           strcmp(name, "__STDC_VERSION__") == 0 ||
+           strcmp(name, "__STDC_HOSTED__") == 0;
+}
+
+static void pp_init_date_time(PPContext *ctx)
+{
+    if (!ctx) return;
+
+    time_t t = time(NULL);
+    struct tm tmv;
+    struct tm *ptm = NULL;
+
+    /* localtime_r 在部分平台可用；这里用 localtime 兼容即可 */
+    ptm = localtime(&t);
+    if (!ptm) {
+        ctx->pp_date = strdup("Jan  1 1970");
+        ctx->pp_time = strdup("00:00:00");
+        return;
+    }
+    tmv = *ptm;
+
+    static const char *months[] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    };
+    const char *mon = (tmv.tm_mon >= 0 && tmv.tm_mon < 12) ? months[tmv.tm_mon] : "Jan";
+
+    char datebuf[16];
+    int day = tmv.tm_mday;
+    int year = tmv.tm_year + 1900;
+    /* 标准样式："Mmm dd yyyy"，dd 为两字符，前导空格 */
+    snprintf(datebuf, sizeof(datebuf), "%s %2d %4d", mon, day, year);
+    ctx->pp_date = strdup(datebuf);
+
+    char timebuf[16];
+    snprintf(timebuf, sizeof(timebuf), "%02d:%02d:%02d", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    ctx->pp_time = strdup(timebuf);
+}
+
+static char *pp_make_c_string_literal(const char *raw)
+{
+    const char *p = raw ? raw : "";
+    String out = make_string();
+    string_append(&out, '"');
+    while (*p) {
+        unsigned char c = (unsigned char)*p++;
+        if (c == '\\' || c == '"') {
+            string_append(&out, '\\');
+            string_append(&out, (char)c);
+        } else if (c == '\n') {
+            string_appendf(&out, "\\n");
+        } else if (c == '\r') {
+            string_appendf(&out, "\\r");
+        } else if (c == '\t') {
+            string_appendf(&out, "\\t");
+        } else {
+            string_append(&out, (char)c);
+        }
+    }
+    string_append(&out, '"');
+    return string_steal(&out);
+}
+
+static char *pp_predefined_macro_expansion(PPContext *ctx, const char *name)
+{
+    if (!name) return NULL;
+
+    if (strcmp(name, "__LINE__") == 0) {
+        int line = pp_current_line(ctx);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", line);
+        return strdup(buf);
+    }
+    if (strcmp(name, "__FILE__") == 0) {
+        const char *file = pp_current_file(ctx);
+        return pp_make_c_string_literal(file ? file : "");
+    }
+    if (strcmp(name, "__DATE__") == 0) {
+        return pp_make_c_string_literal(ctx && ctx->pp_date ? ctx->pp_date : "Jan  1 1970");
+    }
+    if (strcmp(name, "__TIME__") == 0) {
+        return pp_make_c_string_literal(ctx && ctx->pp_time ? ctx->pp_time : "00:00:00");
+    }
+    if (strcmp(name, "__STDC__") == 0) {
+        return strdup("1");
+    }
+    if (strcmp(name, "__STDC_VERSION__") == 0) {
+        return strdup("199901");
+    }
+    if (strcmp(name, "__STDC_HOSTED__") == 0) {
+        return strdup("0");
+    }
+
+    return NULL;
 }
 
 static Macro *get_pp_macro(PPContext *ctx, const char *name)
@@ -660,6 +784,17 @@ static char *pp_expand_macros_for_if(PPContext *ctx, const char *args, List *exp
                 free(ident);
                 p += len;
                 continue;
+            }
+
+            if (is_predefined_macro(ident)) {
+                char *exp = pp_predefined_macro_expansion(ctx, ident);
+                if (exp) {
+                    string_appendf(&out, "%s ", exp);
+                    free(exp);
+                    free(ident);
+                    p += len;
+                    continue;
+                }
             }
 
             if (list_contains_cstr(expanding, ident)) {
@@ -1178,6 +1313,16 @@ static char *expand_macro_text(PPContext *ctx, const char *text, List *expanding
             int len = 0;
             char *ident = pp_get_ident(p, &len);
             if (ident) {
+                if (is_predefined_macro(ident)) {
+                    char *exp = pp_predefined_macro_expansion(ctx, ident);
+                    if (exp) {
+                        string_appendf(&out, "%s", exp);
+                        free(exp);
+                        free(ident);
+                        p += len;
+                        continue;
+                    }
+                }
                 Macro *m = get_pp_macro(ctx, ident);
                 if (!m || list_contains_cstr(expanding, ident)) {
                     string_appendf(&out, "%s", ident);
@@ -1376,6 +1521,12 @@ static bool handle_define(PPContext *ctx, const char *args)
         error("Expected identifier in #define");
         return false;
     }
+
+    if (is_predefined_macro(name)) {
+        error("Cannot redefine predefined macro: %s", name);
+        free(name);
+        return false;
+    }
     p += len;
     
     if (*p == '(') {
@@ -1436,6 +1587,12 @@ static bool handle_undef(PPContext *ctx, const char *args)
     char *name = pp_get_ident(p, &len);
     if (!name) {
         error("Expected identifier in #undef");
+        return false;
+    }
+
+    if (is_predefined_macro(name)) {
+        error("Cannot undefine predefined macro: %s", name);
+        free(name);
         return false;
     }
     pp_undef(ctx, name);

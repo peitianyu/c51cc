@@ -511,6 +511,42 @@ int test_variadic_macro() {
 }
 
 /*=============================*
+ * 二十四、预定义宏测试
+ *=============================*/
+
+#if !defined(__LINE__) || !defined(__FILE__) || !defined(__DATE__) || !defined(__TIME__)
+#error "predefined macros missing"
+#endif
+
+/* 这些宏用于 #if 表达式 */
+#if __STDC__ != 1
+#error "__STDC__ unexpected"
+#endif
+
+#if __STDC_HOSTED__ != 0
+#error "__STDC_HOSTED__ unexpected"
+#endif
+
+#if __STDC_VERSION__ < 199901
+#error "__STDC_VERSION__ unexpected"
+#endif
+
+int test_predefined_macros() {
+    int r = 0;
+    int line = __LINE__;
+    char *file = __FILE__;
+    char *date = __DATE__;
+    char *time = __TIME__;
+
+    r = r + (line > 0);
+    (void)file;
+    (void)date;
+    (void)time;
+
+    return r;
+}
+
+/*=============================*
  * 十六、综合测试函数
  *=============================*/
 
@@ -539,6 +575,7 @@ int test_all_pp_features() {
     result = result + test_if_elif_expr();
     result = result + test_hash_ops();
     result = result + test_variadic_macro();
+    result = result + test_predefined_macros();
     
     return result;
 }
