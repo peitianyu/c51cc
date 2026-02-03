@@ -31,6 +31,98 @@ static List *filter_list(List *src, bool (*pred)(void *, void *), void *aux) {
 
 static bool block_ptr_eq(void *a, void *b) { return a == b; }
 
+static int max_value_in_func(Func *f) {
+    int maxv = 0;
+    if (!f || !f->blocks) return 0;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        if (b->phis) {
+            for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i) continue;
+                if (i->dest > maxv) maxv = i->dest;
+                if (i->args) {
+                    for (int k = 0; k < i->args->len; ++k) {
+                        int v = *(ValueName *)list_get(i->args, k);
+                        if (v > maxv) maxv = v;
+                    }
+                }
+            }
+        }
+        if (b->instrs) {
+            for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i) continue;
+                if (i->dest > maxv) maxv = i->dest;
+                if (i->args) {
+                    for (int k = 0; k < i->args->len; ++k) {
+                        int v = *(ValueName *)list_get(i->args, k);
+                        if (v > maxv) maxv = v;
+                    }
+                }
+            }
+        }
+    }
+    return maxv;
+}
+
+static void replace_value(Func *f, ValueName from, ValueName to) {
+    if (!f || from == to) return;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        if (b->phis) {
+            for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || !i->args) continue;
+                for (int k = 0; k < i->args->len; ++k) {
+                    ValueName *v = list_get(i->args, k);
+                    if (v && *v == from) *v = to;
+                }
+            }
+        }
+        if (b->instrs) {
+            for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || !i->args) continue;
+                for (int k = 0; k < i->args->len; ++k) {
+                    ValueName *v = list_get(i->args, k);
+                    if (v && *v == from) *v = to;
+                }
+            }
+        }
+    }
+}
+
+static void replace_value_skip_phi(Func *f, ValueName from, ValueName to, Instr *skip_phi) {
+    if (!f || from == to) return;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        if (b->phis) {
+            for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || i == skip_phi || !i->args) continue;
+                for (int k = 0; k < i->args->len; ++k) {
+                    ValueName *v = list_get(i->args, k);
+                    if (v && *v == from) *v = to;
+                }
+            }
+        }
+        if (b->instrs) {
+            for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || !i->args) continue;
+                for (int k = 0; k < i->args->len; ++k) {
+                    ValueName *v = list_get(i->args, k);
+                    if (v && *v == from) *v = to;
+                }
+            }
+        }
+    }
+}
+
 static bool block_has_ret(Block *b) {
     if (!b || !b->instrs) return false;
     for (Iter it = list_iter(b->instrs); !iter_end(it);) {
@@ -1334,40 +1426,136 @@ static bool pass_entry_param_sink(Func *f, Stats *s) {
     if (tid < 0) return false;
     Block *t = find_block_by_id(f, tid);
     if (!t || t == b) return false;
-    if (t->phis && t->phis->len > 0) return false;
-    if (t->preds && t->preds->len != 1) return false;
-
     /* 入口块除终结跳转外必须全是param */
     for (int i = 0; i < b->instrs->len - 1; ++i) {
         Instr *inst = (Instr *)list_get(b->instrs, i);
         if (!inst || inst->op != IROP_PARAM) return false;
     }
 
-    /* 组装新指令列表：params + 目标块指令 */
-    List *new_instrs = make_list();
-    for (int i = 0; i < b->instrs->len - 1; ++i) {
-        Instr *inst = (Instr *)list_get(b->instrs, i);
-        list_push(new_instrs, inst);
+    int next_val = max_value_in_func(f) + 1;
+
+    /* 重定向所有前驱：将指向t的边改为指向b */
+    if (t->preds) {
+        for (Iter it = list_iter(t->preds); !iter_end(it);) {
+            Block *pred = iter_next(&it);
+            if (!pred || pred == b || !pred->instrs || pred->instrs->len == 0) continue;
+            Instr *pterm = (Instr *)list_get(pred->instrs, pred->instrs->len - 1);
+            if (!pterm || !pterm->labels) continue;
+            if (pterm->op == IROP_JMP && pterm->labels->len >= 1) {
+                int pid = -1;
+                sscanf((char *)list_get(pterm->labels, 0), "block%d", &pid);
+                if (pid == (int)t->id) {
+                    char *rep = pass_alloc(32);
+                    snprintf(rep, 32, "block%d", b->id);
+                    list_set(pterm->labels, 0, rep);
+                    list_unique_push(b->preds, pred, block_ptr_eq);
+                }
+            } else if (pterm->op == IROP_BR && pterm->labels->len >= 2) {
+                for (int k = 0; k < pterm->labels->len; ++k) {
+                    int pid = -1;
+                    sscanf((char *)list_get(pterm->labels, k), "block%d", &pid);
+                    if (pid == (int)t->id) {
+                        char *rep = pass_alloc(32);
+                        snprintf(rep, 32, "block%d", b->id);
+                        list_set(pterm->labels, k, rep);
+                        list_unique_push(b->preds, pred, block_ptr_eq);
+                    }
+                }
+            }
+        }
     }
+
+    /* 为入口参数引入PHI（多前驱时） */
+    if (b->preds && b->preds->len > 1) {
+        for (int i = 0; i < b->instrs->len - 1; ++i) {
+            Instr *param = (Instr *)list_get(b->instrs, i);
+            if (!param || param->op != IROP_PARAM) continue;
+
+            Instr *phi = pass_alloc(sizeof(Instr));
+            memset(phi, 0, sizeof(*phi));
+            phi->op = IROP_PHI;
+            phi->dest = next_val++;
+            phi->type = param->type;
+            phi->args = make_list();
+            phi->labels = make_list();
+
+            for (Iter it = list_iter(b->preds); !iter_end(it);) {
+                Block *pred = iter_next(&it);
+                char *lbl = pass_alloc(32);
+                snprintf(lbl, 32, "block%d", pred->id);
+                list_push(phi->labels, lbl);
+
+                ValueName *v = pass_alloc(sizeof(ValueName));
+                *v = param->dest;
+                list_push(phi->args, v);
+            }
+
+            list_push(b->phis, phi);
+            replace_value_skip_phi(f, param->dest, phi->dest, phi);
+        }
+    }
+
+    /* 移除b的终结jmp */
+    list_remove_last(b->instrs, NULL);
+
+    /* 合并PHI */
+    if (t->phis && t->phis->len > 0) {
+        if (!b->phis) b->phis = make_list();
+        for (Iter it = list_iter(t->phis); !iter_end(it);) {
+            Instr *phi = iter_next(&it);
+            list_push(b->phis, phi);
+        }
+    }
+
+    /* 追加目标块指令到入口块 */
     if (t->instrs) {
         for (Iter it = list_iter(t->instrs); !iter_end(it);) {
             Instr *inst = iter_next(&it);
-            list_push(new_instrs, inst);
+            list_push(b->instrs, inst);
         }
     }
+
+    /* 更新目标块后继的preds */
+    if (t->instrs && t->instrs->len > 0) {
+        Instr *tterm = (Instr *)list_get(t->instrs, t->instrs->len - 1);
+        if (tterm && tterm->labels) {
+            if (tterm->op == IROP_JMP && tterm->labels->len >= 1) {
+                int sid = -1;
+                sscanf((char *)list_get(tterm->labels, 0), "block%d", &sid);
+                Block *sblk = find_block_by_id(f, sid);
+                if (sblk) {
+                    sblk->preds = preds_remove(sblk->preds, t);
+                    list_unique_push(sblk->preds, b, block_ptr_eq);
+                    replace_phi_pred_label(sblk, t->id, b->id);
+                }
+            } else if (tterm->op == IROP_BR && tterm->labels->len >= 2) {
+                int s1 = -1, s2 = -1;
+                sscanf((char *)list_get(tterm->labels, 0), "block%d", &s1);
+                sscanf((char *)list_get(tterm->labels, 1), "block%d", &s2);
+                Block *sblk1 = find_block_by_id(f, s1);
+                Block *sblk2 = find_block_by_id(f, s2);
+                if (sblk1) {
+                    sblk1->preds = preds_remove(sblk1->preds, t);
+                    list_unique_push(sblk1->preds, b, block_ptr_eq);
+                    replace_phi_pred_label(sblk1, t->id, b->id);
+                }
+                if (sblk2) {
+                    sblk2->preds = preds_remove(sblk2->preds, t);
+                    list_unique_push(sblk2->preds, b, block_ptr_eq);
+                    replace_phi_pred_label(sblk2, t->id, b->id);
+                }
+            }
+        }
+    }
+
+    /* 清空目标块 */
     list_clear_shallow(t->instrs);
-    t->instrs = new_instrs;
+    t->instrs = make_list();
+    list_clear_shallow(t->phis);
+    t->phis = make_list();
+    t->preds = make_list();
 
-    /* 更新入口 */
-    f->entry = t;
-    if (t->preds) t->preds = preds_remove(t->preds, b);
-
-    /* 清空旧入口块 */
-    list_clear_shallow(b->instrs);
-    b->instrs = make_list();
-    b->preds = make_list();
-
-    s->rm++;
+    s->merge++;
     return true;
 }
 

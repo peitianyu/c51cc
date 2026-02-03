@@ -1956,7 +1956,11 @@ static void ssa_print_func(FILE *fp, Func *f) {
     if (f->params) {
         for (int i = 0; i < f->params->len; i++) {
             if (i > 0) fprintf(fp, ", ");
-            fprintf(fp, "%s: int", (char*)list_get(f->params, i));
+            Ctype *pt = NULL;
+            if (f->param_types && i < f->param_types->len) {
+                pt = (Ctype *)list_get(f->param_types, i);
+            }
+            fprintf(fp, "%s: %s", (char*)list_get(f->params, i), get_type_str(pt));
         }
     }
     fprintf(fp, "): %s {\n", get_type_str(f->ret_type));
