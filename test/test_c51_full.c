@@ -43,22 +43,22 @@ int add4(int a, int b, int c, int d) {
 /* ===== 运算/比较/移位 ===== */
 int test_ops(int x, int y) {
     int r = 0;
-    r = r + x + y;
-    r = r + x - y;
-    r = r + x * y;
-    if (y) r = r + x / y;
-    if (y) r = r + x % y;
-    r = r + (x & y);
-    r = r + (x | y);
-    r = r + (x ^ y);
-    r = r + (x << 1);
-    r = r + (x >> 1);
-    r = r + (x < y);
-    r = r + (x <= y);
-    r = r + (x > y);
-    r = r + (x >= y);
-    r = r + (x == y);
-    r = r + (x != y);
+    r += x + y;
+    r += x - y;
+    r += x * y;
+    if (y) r += x / y;
+    if (y) r += x % y;
+    r += (x & y);
+    r += (x | y);
+    r += (x ^ y);
+    r += (x << 1);
+    r += (x >> 1);
+    r += (x < y);
+    r += (x <= y);
+    r += (x > y);
+    r += (x >= y);
+    r += (x == y);
+    r += (x != y);
     return r;
 }
 
@@ -83,8 +83,8 @@ int test_ptr_struct(void) {
     struct S s2 = {.a = 5, .b = 6};
     int *p = g_arr;
     int r = p[1] + p[2];
-    r = r + s.a + s.b;
-    r = r + s2.a + s2.b;
+    r += s.a + s.b;
+    r += s2.a + s2.b;
     return r;
 }
 
@@ -109,10 +109,10 @@ int test_call(void) {
 
 int main() {
     int r = 0;
-    r = r + test_ops(g_i, g_u);
-    r = r + test_ctrl(g_i);
-    r = r + test_ptr_struct();
-    r = r + test_sfr();
-    r = r + test_call();
+    r += test_ops(g_i, g_u);
+    r += test_ctrl(g_i);
+    r += test_ptr_struct();
+    r += test_sfr();
+    r += test_call();
     return r;
 }

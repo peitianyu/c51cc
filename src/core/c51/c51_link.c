@@ -106,6 +106,12 @@ Section *objfile_get_section(ObjFile *obj, int index)
     return list_get(obj->sections, index);
 }
 
+const Section *objfile_get_section_const(const ObjFile *obj, int index)
+{
+    if (!obj) return NULL;
+    return list_get(obj->sections, index);
+}
+
 int objfile_add_symbol(ObjFile *obj, const char *name, SymbolKind kind, int section, int value, int size, unsigned flags)
 {
     if (!obj || !name) return -1;
@@ -446,7 +452,7 @@ void print_link_summary(const ObjFile *out)
         if (!sym || !sym->name) continue;
         const char *sec = sym->section == -2 ? "abs" :
                           sym->section == -1 ? "ext" :
-                          objfile_get_section(out, sym->section)->name;
+                          objfile_get_section_const(out, sym->section)->name;
         fprintf(stderr, "symbol %-16s  sec=%-6s  value=0x%04X  size=%-3d\n",
                 sym->name, sec, sym->value, sym->size);
     }
@@ -454,7 +460,7 @@ void print_link_summary(const ObjFile *out)
     for (Iter it = list_iter(out->relocs); !iter_end(it);) {
         Reloc *r = iter_next(&it);
         if (!r) continue;
-        Section *sec = objfile_get_section(out, r->section);
+        const Section *sec = objfile_get_section_const(out, r->section);
         fprintf(stderr, "reloc  off=0x%04X  kind=%d  sym=%-16s  addend=%d  → %s\n",
                 r->offset, r->kind, r->symbol, r->addend,
                 sec ? sec->name : "?");

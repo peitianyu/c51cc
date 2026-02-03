@@ -76,6 +76,7 @@ ObjFile *objfile_new(void);
 void objfile_free(ObjFile *obj);
 int objfile_add_section(ObjFile *obj, const char *name, SectionKind kind, int size, int align);
 Section *objfile_get_section(ObjFile *obj, int index);
+const Section *objfile_get_section_const(const ObjFile *obj, int index);
 
 /* collection helpers */
 void section_append_bytes(Section *sec, const unsigned char *bytes, int len);
