@@ -319,6 +319,36 @@ static void ast_to_string_int(String *buf, Ast *ast)
     case PUNCT_RSHIFT:
         binop_to_string(buf, ">>", ast);
         break;
+    case PUNCT_SHL_ASSIGN:
+        binop_to_string(buf, "<<=", ast);
+        break;
+    case PUNCT_SHR_ASSIGN:
+        binop_to_string(buf, ">>=", ast);
+        break;
+    case PUNCT_AND_ASSIGN:
+        binop_to_string(buf, "&=", ast);
+        break;
+    case PUNCT_OR_ASSIGN:
+        binop_to_string(buf, "|=", ast);
+        break;
+    case PUNCT_XOR_ASSIGN:
+        binop_to_string(buf, "^=", ast);
+        break;
+    case PUNCT_ADD_ASSIGN:
+        binop_to_string(buf, "+=", ast);
+        break;
+    case PUNCT_SUB_ASSIGN:
+        binop_to_string(buf, "-=", ast);
+        break;
+    case PUNCT_MUL_ASSIGN:
+        binop_to_string(buf, "*=", ast);
+        break;
+    case PUNCT_DIV_ASSIGN:
+        binop_to_string(buf, "/=", ast);
+        break;
+    case PUNCT_MOD_ASSIGN:
+        binop_to_string(buf, "%=", ast);
+        break;
     default: {
         char *left = ast_to_string(ast->left);
         char *right = ast_to_string(ast->right);

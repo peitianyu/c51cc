@@ -31,6 +31,15 @@ static List *filter_list(List *src, bool (*pred)(void *, void *), void *aux) {
 
 static bool block_ptr_eq(void *a, void *b) { return a == b; }
 
+static bool block_has_ret(Block *b) {
+    if (!b || !b->instrs) return false;
+    for (Iter it = list_iter(b->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (i && i->op == IROP_RET) return true;
+    }
+    return false;
+}
+
 static void list_remove_last(List *list, void **out) {
     if (out) *out = NULL;
     if (!list || !list->tail) return;
@@ -489,6 +498,73 @@ static bool pass_const_merge(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 地址公共子表达式合并 (Common Subexpression Elimination for addr) ----------*/
+static bool pass_addr_merge(Func *f, Stats *s) {
+    bool changed = false;
+    #define MAX_ADDRS 64
+    typedef struct { const char *label; Ctype *mem_type; ValueName val; } AddrEntry;
+    AddrEntry addrs[MAX_ADDRS];
+    int addr_count = 0;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_ADDR || !i->labels || i->labels->len == 0) continue;
+            const char *label = (const char *)list_get(i->labels, 0);
+            if (!label) continue;
+
+            int found_idx = -1;
+            for (int k = 0; k < addr_count; k++) {
+                if (addrs[k].label && !strcmp(addrs[k].label, label) &&
+                    addrs[k].mem_type == i->mem_type) {
+                    found_idx = k;
+                    break;
+                }
+            }
+
+            if (found_idx >= 0) {
+                ValueName existing = addrs[found_idx].val;
+                for (Iter kt = list_iter(f->blocks); !iter_end(kt);) {
+                    Block *bb = iter_next(&kt);
+                    for (Iter lt = list_iter(bb->instrs); !iter_end(lt);) {
+                        Instr *use = iter_next(&lt);
+                        if (use->args) {
+                            for (int idx = 0; idx < use->args->len; ++idx) {
+                                ValueName *arg = list_get(use->args, idx);
+                                if (*arg == i->dest) {
+                                    *arg = existing;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    for (Iter lt = list_iter(bb->phis); !iter_end(lt);) {
+                        Instr *phi = iter_next(&lt);
+                        if (phi->args) {
+                            for (int idx = 0; idx < phi->args->len; ++idx) {
+                                ValueName *arg = list_get(phi->args, idx);
+                                if (*arg == i->dest) {
+                                    *arg = existing;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                i->op = IROP_NOP;
+                ++s->fold;
+            } else if (addr_count < MAX_ADDRS) {
+                addrs[addr_count].label = label;
+                addrs[addr_count].mem_type = i->mem_type;
+                addrs[addr_count].val = i->dest;
+                addr_count++;
+            }
+        }
+    }
+    return changed;
+}
+
 /*---------- 只读全局常量折叠 ----------*/
 static bool pass_global_load(Func *f, Stats *s) {
     bool changed = false;
@@ -841,6 +917,59 @@ static bool pass_const_store_prune(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 二元运算立即数内联 ----------*/
+static bool pass_binop_const_inline(Func *f, Stats *s) {
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || !i->args || i->args->len < 2) continue;
+            if (i->type && i->type->size >= 2) continue;
+            switch (i->op) {
+            case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
+            case IROP_AND: case IROP_OR:  case IROP_XOR:
+            case IROP_SHL: case IROP_SHR:
+                break;
+            default:
+                continue;
+            }
+
+            ValueName lhs = get_arg(i, 0);
+            ValueName rhs = get_arg(i, 1);
+
+            Instr *def = find_def_instr(f, rhs);
+            if ((!def || def->op != IROP_CONST) &&
+                (i->op == IROP_ADD || i->op == IROP_MUL || i->op == IROP_AND ||
+                 i->op == IROP_OR || i->op == IROP_XOR || i->op == IROP_EQ ||
+                 i->op == IROP_NE)) {
+                Instr *def2 = find_def_instr(f, lhs);
+                if (def2 && def2->op == IROP_CONST) {
+                    rhs = lhs;
+                    lhs = get_arg(i, 1);
+                    def = def2;
+                }
+            }
+            if (!def || def->op != IROP_CONST) continue;
+
+            i->imm.ival = def->imm.ival;
+            list_clear(i->args);
+            ValueName *p = pass_alloc(sizeof *p); *p = lhs;
+            list_push(i->args, p);
+
+            if (!i->labels) i->labels = make_list();
+            list_clear(i->labels);
+            char *tag = pass_alloc(4);
+            strcpy(tag, "imm");
+            list_push(i->labels, tag);
+
+            changed = true;
+            s->fold++;
+        }
+    }
+    return changed;
+}
+
 /*---------- 基本块合并 ----------*/
 static bool pass_block_merge(Func *f, Stats *s) {
     bool changed = false;
@@ -898,44 +1027,6 @@ static bool pass_block_merge(Func *f, Stats *s) {
                 }
             }
         }
-
-        /* 清空目标块 */
-        list_clear_shallow(t->instrs);
-        t->instrs = make_list();
-        list_clear_shallow(t->phis);
-        t->phis = make_list();
-        t->preds = make_list();
-
-        s->merge++;
-        changed = true;
-    }
-    return changed;
-}
-
-/*---------- 尾部ret合并 ----------*/
-static bool pass_tail_ret_merge(Func *f, Stats *s) {
-    bool changed = false;
-    if (!f || !f->blocks) return false;
-
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *b = iter_next(&it);
-        if (!b || !b->instrs || b->instrs->len == 0) continue;
-        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
-        if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) continue;
-
-        int tid = -1;
-        sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
-        if (tid < 0) continue;
-        Block *t = find_block_by_id(f, tid);
-        if (!t || t == b) continue;
-        if (t->phis && t->phis->len > 0) continue;
-        if (!t->instrs || t->instrs->len != 1) continue;
-        Instr *only = (Instr *)list_get(t->instrs, 0);
-        if (!only || only->op != IROP_RET) continue;
-
-        /* 用ret替换jmp */
-        list_remove_last(b->instrs, NULL);
-        list_push(b->instrs, only);
 
         /* 清空目标块 */
         list_clear_shallow(t->instrs);
@@ -1031,11 +1122,23 @@ static bool pass_const_branch(Func *f, Stats *s) {
             }
         }
 
+        bool has_reachable_ret = false;
+        for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+            Block *b = iter_next(&it);
+            if (!b) continue;
+            if ((int)b->id <= max_id && seen[b->id]) {
+                if (block_has_ret(b)) { has_reachable_ret = true; break; }
+            }
+        }
+
         for (Iter it = list_iter(f->blocks); !iter_end(it);) {
             Block *b = iter_next(&it);
             if (!b) continue;
             if (entry && b == entry) continue;
             if ((int)b->id <= max_id && !seen[b->id]) {
+                if (!has_reachable_ret && block_has_ret(b)) {
+                    continue; /* 保留一个ret块，避免优化后无ret */
+                }
                 b->preds = make_list();
                 b->phis = make_list();
                 b->instrs = make_list();
@@ -1048,6 +1151,54 @@ static bool pass_const_branch(Func *f, Stats *s) {
         free(seen);
     }
     
+    return changed;
+}
+
+/*---------- jmp 跳转链折叠 ----------*/
+static bool pass_jump_threading(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks) return false;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs || b->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) continue;
+
+        int tid = -1;
+        sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+        if (tid < 0) continue;
+        Block *t = find_block_by_id(f, tid);
+        if (!t || t == b) continue;
+        if (t->phis && t->phis->len > 0) continue;
+        if (!t->instrs || t->instrs->len == 0) continue;
+
+        Instr *tterm = (Instr *)list_get(t->instrs, t->instrs->len - 1);
+        if (!tterm || tterm->op != IROP_JMP || !tterm->labels || tterm->labels->len < 1) continue;
+
+        int sid = -1;
+        sscanf((char *)list_get(tterm->labels, 0), "block%d", &sid);
+        if (sid < 0 || sid == (int)b->id) continue;
+
+        char *new_label = NULL;
+        const char *raw = (const char *)list_get(tterm->labels, 0);
+        if (raw) {
+            new_label = pass_alloc(strlen(raw) + 1);
+            strcpy(new_label, raw);
+        }
+        if (!new_label) continue;
+
+        list_clear(term->labels);
+        list_push(term->labels, new_label);
+
+        /* 更新 preds */
+        if (t->preds) t->preds = preds_remove(t->preds, b);
+        Block *sblk = find_block_by_id(f, sid);
+        if (sblk) list_unique_push(sblk->preds, b, block_ptr_eq);
+
+        changed = true;
+        s->fold++;
+    }
     return changed;
 }
 
@@ -1064,14 +1215,16 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_global_load(f, &st);
         changed |= pass_copy_prop(f, &st);
         changed |= pass_const_merge(f, &st);
+        changed |= pass_addr_merge(f, &st);
         changed |= pass_local_opts(f, &st);
         changed |= pass_const_branch(f, &st);
+        changed |= pass_jump_threading(f, &st);
         changed |= pass_phi(f, &st);
         changed |= pass_store_cleanup(f, &st);
+        changed |= pass_binop_const_inline(f, &st);
         changed |= pass_ret_const_inline(f, &st);
         changed |= pass_const_store_prune(f, &st);
         changed |= pass_block_merge(f, &st);
-        changed |= pass_tail_ret_merge(f, &st);
         changed |= pass_dce(f, &st);
     } while (changed && ++it < 20);
 }

@@ -1703,27 +1703,31 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
     case IROP_CONST:
         fprintf(fp, "const %ld", (long)i->imm.ival);
         break;
-    case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD: {
-        const char *op_str = (i->op == IROP_ADD) ? "add" :
-                            (i->op == IROP_SUB) ? "sub" :
-                            (i->op == IROP_MUL) ? "mul" :
-                            (i->op == IROP_DIV) ? "div" : "mod";
-        ValueName *a1 = list_get(i->args, 0);
-        ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "%s v%d, v%d", op_str, *a1, *a2);
-        break;
-    }
     case IROP_NEG: {
         ValueName *a = list_get(i->args, 0);
         fprintf(fp, "neg v%d", *a);
         break;
     }
+    case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
     case IROP_AND: case IROP_OR: case IROP_XOR: {
-        const char *op_str = (i->op == IROP_AND) ? "and" :
+        const char *op_str = (i->op == IROP_ADD) ? "add" :
+                            (i->op == IROP_SUB) ? "sub" :
+                            (i->op == IROP_MUL) ? "mul" :
+                            (i->op == IROP_DIV) ? "div" :
+                            (i->op == IROP_MOD) ? "mod" :
+                            (i->op == IROP_AND) ? "and" :
                             (i->op == IROP_OR) ? "or" : "xor";
         ValueName *a1 = list_get(i->args, 0);
+        fprintf(fp, "%s v%d", op_str, *a1);
+        if (i->labels && i->labels->len > 0) {
+            char *tag = (char *)list_get(i->labels, 0);
+            if (tag && strcmp(tag, "imm") == 0) {
+                fprintf(fp, ", const %ld", (long)i->imm.ival);
+                break;
+            }
+        }
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "%s v%d, v%d", op_str, *a1, *a2);
+        fprintf(fp, ", v%d", *a2);
         break;
     }
     case IROP_NOT: case IROP_LNOT: {
@@ -1735,8 +1739,16 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
     case IROP_SHL: case IROP_SHR: {
         const char *op_str = (i->op == IROP_SHL) ? "shl" : "shr";
         ValueName *a1 = list_get(i->args, 0);
+        fprintf(fp, "%s v%d", op_str, *a1);
+        if (i->labels && i->labels->len > 0) {
+            char *tag = (char *)list_get(i->labels, 0);
+            if (tag && strcmp(tag, "imm") == 0) {
+                fprintf(fp, ", const %ld", (long)i->imm.ival);
+                break;
+            }
+        }
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "%s v%d, v%d", op_str, *a1, *a2);
+        fprintf(fp, ", v%d", *a2);
         break;
     }
     case IROP_EQ: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: case IROP_NE: {
@@ -1746,8 +1758,16 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
                             (i->op == IROP_LE) ? "le" :
                             (i->op == IROP_GE) ? "ge" : "ne";
         ValueName *a1 = list_get(i->args, 0);
+        fprintf(fp, "%s v%d", op_str, *a1);
+        if (i->labels && i->labels->len > 0) {
+            char *tag = (char *)list_get(i->labels, 0);
+            if (tag && strcmp(tag, "imm") == 0) {
+                fprintf(fp, ", const %ld", (long)i->imm.ival);
+                break;
+            }
+        }
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "%s v%d, v%d", op_str, *a1, *a2);
+        fprintf(fp, ", v%d", *a2);
         break;
     }
     case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT: 

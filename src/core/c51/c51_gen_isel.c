@@ -101,6 +101,16 @@ static void emit_inline_asm_text(Section *sec, const char *text)
     }
 }
 
+    static bool instr_has_imm(const Instr *ins, int *out) {
+        if (!ins || !ins->labels || ins->labels->len < 1) return false;
+        char *tag = (char *)list_get(ins->labels, 0);
+        if (tag && strcmp(tag, "imm") == 0) {
+            if (out) *out = (int)ins->imm.ival;
+            return true;
+        }
+        return false;
+    }
+
 /* === Instruction selection === */
 void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
 {
@@ -201,8 +211,18 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             emit_ins2(sec, "addc", "A", b1);
             emit_ins2(sec, "mov", d1, "A");
         } else {
-            emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-            emit_ins2(sec, "add", "A", vreg(*(ValueName *)list_get(ins->args, 1)));
+            ValueName a = *(ValueName *)list_get(ins->args, 0);
+            int imm = 0;
+            if (instr_has_imm(ins, &imm)) {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
+                emit_ins2(sec, "mov", "A", vreg(a));
+                emit_ins2(sec, "add", "A", ibuf);
+            } else {
+                ValueName b = *(ValueName *)list_get(ins->args, 1);
+                emit_ins2(sec, "mov", "A", vreg(a));
+                emit_ins2(sec, "add", "A", vreg(b));
+            }
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
         }
         break;
@@ -228,50 +248,129 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             emit_ins2(sec, "subb", "A", b1);
             emit_ins2(sec, "mov", d1, "A");
         } else {
-            emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
+            ValueName a = *(ValueName *)list_get(ins->args, 0);
+            int imm = 0;
+            emit_ins2(sec, "mov", "A", vreg(a));
             emit_ins1(sec, "clr", "C");
-            emit_ins2(sec, "subb", "A", vreg(*(ValueName *)list_get(ins->args, 1)));
+            if (instr_has_imm(ins, &imm)) {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
+                emit_ins2(sec, "subb", "A", ibuf);
+            } else {
+                ValueName b = *(ValueName *)list_get(ins->args, 1);
+                emit_ins2(sec, "subb", "A", vreg(b));
+            }
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
         }
         break;
     case IROP_MUL:
-        emit_ins2(sec, "mov", "B", vreg(*(ValueName *)list_get(ins->args, 1)));
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
+        {
+            ValueName a = *(ValueName *)list_get(ins->args, 0);
+            int imm = 0;
+            if (instr_has_imm(ins, &imm)) {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
+                emit_ins2(sec, "mov", "B", ibuf);
+            } else {
+                ValueName b = *(ValueName *)list_get(ins->args, 1);
+                emit_ins2(sec, "mov", "B", vreg(b));
+            }
+            emit_ins2(sec, "mov", "A", vreg(a));
+        }
         emit_ins1(sec, "mul", "AB");
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     case IROP_DIV:
-        emit_ins2(sec, "mov", "B", vreg(*(ValueName *)list_get(ins->args, 1)));
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
+        {
+            ValueName a = *(ValueName *)list_get(ins->args, 0);
+            int imm = 0;
+            if (instr_has_imm(ins, &imm)) {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
+                emit_ins2(sec, "mov", "B", ibuf);
+            } else {
+                ValueName b = *(ValueName *)list_get(ins->args, 1);
+                emit_ins2(sec, "mov", "B", vreg(b));
+            }
+            emit_ins2(sec, "mov", "A", vreg(a));
+        }
         emit_ins1(sec, "div", "AB");
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     case IROP_MOD:
-        emit_ins2(sec, "mov", "B", vreg(*(ValueName *)list_get(ins->args, 1)));
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
+        {
+            ValueName a = *(ValueName *)list_get(ins->args, 0);
+            int imm = 0;
+            if (instr_has_imm(ins, &imm)) {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
+                emit_ins2(sec, "mov", "B", ibuf);
+            } else {
+                ValueName b = *(ValueName *)list_get(ins->args, 1);
+                emit_ins2(sec, "mov", "B", vreg(b));
+            }
+            emit_ins2(sec, "mov", "A", vreg(a));
+        }
         emit_ins1(sec, "div", "AB");
         emit_ins2(sec, "mov", vreg(ins->dest), "B");
         break;
     case IROP_AND:
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "anl", "A", vreg(*(ValueName *)list_get(ins->args, 1)));
+        {
+            ValueName a = *(ValueName *)list_get(ins->args, 0);
+            int imm = 0;
+            emit_ins2(sec, "mov", "A", vreg(a));
+            if (instr_has_imm(ins, &imm)) {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
+                emit_ins2(sec, "anl", "A", ibuf);
+            } else {
+                ValueName b = *(ValueName *)list_get(ins->args, 1);
+                emit_ins2(sec, "anl", "A", vreg(b));
+            }
+        }
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     case IROP_OR:
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "orl", "A", vreg(*(ValueName *)list_get(ins->args, 1)));
+        {
+            ValueName a = *(ValueName *)list_get(ins->args, 0);
+            int imm = 0;
+            emit_ins2(sec, "mov", "A", vreg(a));
+            if (instr_has_imm(ins, &imm)) {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
+                emit_ins2(sec, "orl", "A", ibuf);
+            } else {
+                ValueName b = *(ValueName *)list_get(ins->args, 1);
+                emit_ins2(sec, "orl", "A", vreg(b));
+            }
+        }
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     case IROP_XOR:
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "xrl", "A", vreg(*(ValueName *)list_get(ins->args, 1)));
+        {
+            ValueName a = *(ValueName *)list_get(ins->args, 0);
+            int imm = 0;
+            emit_ins2(sec, "mov", "A", vreg(a));
+            if (instr_has_imm(ins, &imm)) {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
+                emit_ins2(sec, "xrl", "A", ibuf);
+            } else {
+                ValueName b = *(ValueName *)list_get(ins->args, 1);
+                emit_ins2(sec, "xrl", "A", vreg(b));
+            }
+        }
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     case IROP_SHL: {
         ValueName a = *(ValueName *)list_get(ins->args, 0);
-        ValueName b = *(ValueName *)list_get(ins->args, 1);
         int shift_cnt = 0;
-        bool b_is_const = const_map_get(b, &shift_cnt);
+        bool b_is_const = instr_has_imm(ins, &shift_cnt);
+        ValueName b = 0;
+        if (!b_is_const) {
+            b = *(ValueName *)list_get(ins->args, 1);
+            b_is_const = const_map_get(b, &shift_cnt);
+        }
         
         if (b_is_const && shift_cnt == 1) {
             emit_ins2(sec, "mov", "A", vreg(a));
@@ -307,9 +406,13 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     }
     case IROP_SHR: {
         ValueName a = *(ValueName *)list_get(ins->args, 0);
-        ValueName b = *(ValueName *)list_get(ins->args, 1);
         int shift_cnt = 0;
-        bool b_is_const = const_map_get(b, &shift_cnt);
+        bool b_is_const = instr_has_imm(ins, &shift_cnt);
+        ValueName b = 0;
+        if (!b_is_const) {
+            b = *(ValueName *)list_get(ins->args, 1);
+            b_is_const = const_map_get(b, &shift_cnt);
+        }
         bool is_signed = is_signed_type(ins->type);
         
         if (b_is_const && !is_signed) {
