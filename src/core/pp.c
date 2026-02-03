@@ -18,6 +18,7 @@ typedef struct Macro {
     MacroType type;
     char *body;
     List *params;   /* 函数式宏的参数列表 */
+    bool is_variadic; /* 是否为变参宏（最后参数为 ...） */
 } Macro;
 
 typedef struct InputFile {
@@ -137,6 +138,7 @@ static Macro *macro_create(const char *name, MacroType type, const char *body)
     m->type = type;
     m->body = strdup(body);
     m->params = NULL;
+    m->is_variadic = false;
     return m;
 }
 
@@ -245,13 +247,27 @@ void pp_define(PPContext *ctx, const char *name, const char *body)
     dict_put(ctx->macros, name_copy, m);
 }
 
-void pp_define_func(PPContext *ctx, const char *name, List *params, const char *body)
+void pp_define_func(PPContext *ctx, const char *name, List *params, bool is_variadic, const char *body)
 {
     pp_undef(ctx, name);
     char *name_copy = strdup(name);
     Macro *m = macro_create(name_copy, MACRO_FUNC, body);
     m->params = params;
+    m->is_variadic = is_variadic;
     dict_put(ctx->macros, name_copy, m);
+}
+
+static char *join_args_range(List *args, int start)
+{
+    if (!args || start >= (int)args->len) return strdup("");
+    String s = make_string();
+    for (int i = start; i < (int)args->len; i++) {
+        char *a = (char *)list_get(args, i);
+        if (!a) a = "";
+        if (i != start) string_appendf(&s, ", %s", a);
+        else string_appendf(&s, "%s", a);
+    }
+    return string_steal(&s);
 }
 
 static bool pp_remove_macro_entry(PPContext *ctx, const char *name, Macro **out_macro)
@@ -948,6 +964,12 @@ static char *substitute_macro_params(PPContext *ctx, Macro *m, List *args, List 
     String out = make_string();
     const char *p = m->body;
     bool paste_next = false;
+    char *va_join = NULL;
+    int nfixed = 0;
+    if (m->is_variadic && m->params && m->params->len > 0) {
+        nfixed = (int)m->params->len - 1;
+        va_join = join_args_range(args, nfixed);
+    }
 
     while (*p) {
         if (!paste_next && isspace((unsigned char)*p)) {
@@ -1036,7 +1058,10 @@ static char *substitute_macro_params(PPContext *ctx, Macro *m, List *args, List 
                 bool is_paste_operand = paste_next || next_is_paste;
 
                 if (is_param) {
-                    char *arg = (char *)list_get(args, idx);
+                    char *arg = NULL;
+                    bool is_va = (m->is_variadic && strcmp(ident, "__VA_ARGS__") == 0);
+                    if (is_va) arg = va_join;
+                    else arg = (char *)list_get(args, idx);
                     if (!arg) arg = "";
                     if (is_paste_operand) {
                         const char *as = arg;
@@ -1044,6 +1069,15 @@ static char *substitute_macro_params(PPContext *ctx, Macro *m, List *args, List 
                         const char *ae = as + strlen(as);
                         while (ae > as && isspace((unsigned char)*(ae - 1))) ae--;
                         if (paste_next) string_rtrim_ws(&out);
+
+                        /* GNU 扩展：`, ##__VA_ARGS__` 在 __VA_ARGS__ 为空时消隐逗号 */
+                        if (is_va && (ae == as)) {
+                            string_rtrim_ws(&out);
+                            if (out.len > 0 && out.body[out.len - 1] == ',') {
+                                out.body[--out.len] = '\0';
+                                string_rtrim_ws(&out);
+                            }
+                        }
                         string_appendf(&out, "%.*s", (int)(ae - as), as);
                     } else {
                         char *expanded_arg = expand_macro_text(ctx, arg, expanding, depth + 1);
@@ -1071,6 +1105,7 @@ static char *substitute_macro_params(PPContext *ctx, Macro *m, List *args, List 
         paste_next = false;
     }
 
+    if (va_join) free(va_join);
     return string_steal(&out);
 }
 
@@ -1185,12 +1220,23 @@ static char *expand_macro_text(PPContext *ctx, const char *text, List *expanding
 
                 int nparams = m->params ? m->params->len : 0;
                 int nargs = args ? args->len : 0;
-                if (nparams != nargs) {
-                    while (p < after) string_append(&out, *p++);
-                    free(ident);
-                    list_free(args);
-                    free(args);
-                    continue;
+                if (!m->is_variadic) {
+                    if (nparams != nargs) {
+                        while (p < after) string_append(&out, *p++);
+                        free(ident);
+                        list_free(args);
+                        free(args);
+                        continue;
+                    }
+                } else {
+                    int nfixed = nparams > 0 ? (nparams - 1) : 0;
+                    if (nargs < nfixed) {
+                        while (p < after) string_append(&out, *p++);
+                        free(ident);
+                        list_free(args);
+                        free(args);
+                        continue;
+                    }
                 }
 
                 List *next_expanding = clone_expanding_with(expanding, ident);
@@ -1334,6 +1380,7 @@ static bool handle_define(PPContext *ctx, const char *args)
     
     if (*p == '(') {
         List *params = make_list();
+        bool is_variadic = false;
         p++;
         while (1) {
             p = skip_space(p);
@@ -1341,6 +1388,21 @@ static bool handle_define(PPContext *ctx, const char *args)
                 p++;
                 break;
             }
+
+            if (p[0] == '.' && p[1] == '.' && p[2] == '.') {
+                /* C99 variadic macro: ... 作为最后一个形参 */
+                is_variadic = true;
+                list_push(params, strdup("__VA_ARGS__"));
+                p += 3;
+                p = skip_space(p);
+                if (*p != ')') {
+                    error("'...' must be the last macro parameter");
+                    return false;
+                }
+                p++;
+                break;
+            }
+
             char *param = pp_get_ident(p, &len);
             if (!param) {
                 error("Expected parameter name");
@@ -1357,7 +1419,7 @@ static bool handle_define(PPContext *ctx, const char *args)
             }
         }
         const char *body = skip_space(p);
-        pp_define_func(ctx, name, params, body);
+        pp_define_func(ctx, name, params, is_variadic, body);
     } else {
         const char *body = skip_space(p);
         pp_define(ctx, name, body);

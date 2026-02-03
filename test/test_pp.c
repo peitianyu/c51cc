@@ -460,6 +460,57 @@ int test_hash_ops() {
 }
 
 /*=============================*
+ * 二十三、变参宏（... / __VA_ARGS__）测试
+ *=============================*/
+
+/* 仅变参：允许 0 个或多个实参 */
+#define VA_CONST(...) 123
+
+/* __VA_ARGS__ 透传：在表达式中多实参会变成逗号表达式，结果为最后一个 */
+#define VA_PAREN(...) (__VA_ARGS__)
+
+/* 多实参透传测试：避免依赖逗号表达式，改用三参宏 */
+#define SUM3(a, b, c) ((a) + (b) + (c))
+#define VA_SUM3(...) SUM3(__VA_ARGS__)
+
+/* 固定 + 变参：用 GNU 扩展 `, ##__VA_ARGS__` 测试空变参时逗号消隐 */
+#define VA_ELEMS(a, ...) (a), ##__VA_ARGS__
+
+/* __VA_ARGS__ 内部再次展开测试 */
+#define VA_ADD(...) ADD(__VA_ARGS__)
+
+/* 仅变参宏内部转发到另一个仅变参宏 */
+#define VA_FWD(...) VA_CONST(__VA_ARGS__)
+
+/* 用于验证空变参时 `, ##__VA_ARGS__` 不留下尾逗号 */
+int va_arr1[] = { VA_ELEMS(1) };
+int va_arr2[] = { VA_ELEMS(1, 2, 3) };
+
+/* 用于验证 __VA_ARGS__ 里的宏会继续展开 */
+#define VA_X 5
+
+int test_variadic_macro() {
+    int r = 0;
+
+    r = r + VA_CONST();
+    r = r + VA_CONST(1, 2, 3);
+
+    r = r + VA_PAREN(7);
+    r = r + VA_SUM3(1, 2, 3);
+
+    r = r + VA_ADD(10, 20);
+    r = r + VA_SUM3(VA_X, 1, 2);
+
+    r = r + VA_FWD();
+    r = r + VA_FWD(999);
+
+    /* 引用数组避免未使用告警（并验证宏展开后仍是合法声明） */
+    r = r + va_arr1[0] + va_arr2[2];
+
+    return r;
+}
+
+/*=============================*
  * 十六、综合测试函数
  *=============================*/
 
@@ -487,6 +538,7 @@ int test_all_pp_features() {
     result = result + test_multiline_macro();
     result = result + test_if_elif_expr();
     result = result + test_hash_ops();
+    result = result + test_variadic_macro();
     
     return result;
 }
