@@ -417,20 +417,118 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         emit_ins1(sec, "cpl", "A");
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
+    case IROP_TRUNC: {
+        /* Truncate integer to smaller size (currently: keep low byte) */
+        ValueName srcv = *(ValueName *)list_get(ins->args, 0);
+        int const_val = 0;
+        if (const_map_get(srcv, &const_val)) {
+            snprintf(buf, sizeof(buf), "#%d", const_val & 0xFF);
+            emit_ins2(sec, "mov", vreg(ins->dest), buf);
+            if (g_const_map) const_map_put(ins->dest, const_val & 0xFF);
+        } else if (is_v16_value(srcv) || val_size(srcv) >= 2) {
+            int addr = v16_addr(srcv);
+            char src0[16];
+            fmt_direct(src0, sizeof(src0), addr);
+            emit_ins2(sec, "mov", "A", src0);
+            emit_ins2(sec, "mov", vreg(ins->dest), "A");
+        } else {
+            emit_ins2(sec, "mov", vreg(ins->dest), vreg(srcv));
+        }
+        break;
+    }
+    case IROP_ZEXT: {
+        /* Zero-extend integer to larger size (currently: 8 -> 16) */
+        ValueName srcv = *(ValueName *)list_get(ins->args, 0);
+        int dst_addr = v16_addr(ins->dest);
+        char dst0[16], dst1[16];
+        fmt_direct(dst0, sizeof(dst0), dst_addr);
+        fmt_direct(dst1, sizeof(dst1), dst_addr + 1);
+
+        int const_val = 0;
+        if (const_map_get(srcv, &const_val)) {
+            snprintf(buf, sizeof(buf), "#%d", const_val & 0xFF);
+            emit_ins2(sec, "mov", dst0, buf);
+            emit_ins2(sec, "mov", dst1, "#0");
+            if (g_const_map) const_map_put(ins->dest, const_val & 0xFF);
+        } else if (is_v16_value(srcv) || val_size(srcv) >= 2) {
+            int src_addr = v16_addr(srcv);
+            char src0[16], src1[16];
+            fmt_direct(src0, sizeof(src0), src_addr);
+            fmt_direct(src1, sizeof(src1), src_addr + 1);
+            emit_ins2(sec, "mov", dst0, src0);
+            emit_ins2(sec, "mov", dst1, src1);
+        } else {
+            emit_ins2(sec, "mov", "A", vreg(srcv));
+            emit_ins2(sec, "mov", dst0, "A");
+            emit_ins2(sec, "mov", dst1, "#0");
+        }
+        break;
+    }
+    case IROP_SEXT: {
+        /* Sign-extend integer to larger size (currently: 8 -> 16) */
+        ValueName srcv = *(ValueName *)list_get(ins->args, 0);
+        int dst_addr = v16_addr(ins->dest);
+        char dst0[16], dst1[16];
+        fmt_direct(dst0, sizeof(dst0), dst_addr);
+        fmt_direct(dst1, sizeof(dst1), dst_addr + 1);
+
+        int const_val = 0;
+        if (const_map_get(srcv, &const_val)) {
+            int low = const_val & 0xFF;
+            int high = (low & 0x80) ? 0xFF : 0x00;
+            snprintf(buf, sizeof(buf), "#%d", low);
+            emit_ins2(sec, "mov", dst0, buf);
+            snprintf(buf, sizeof(buf), "#%d", high);
+            emit_ins2(sec, "mov", dst1, buf);
+            if (g_const_map) const_map_put(ins->dest, (high << 8) | low);
+        } else if (is_v16_value(srcv) || val_size(srcv) >= 2) {
+            int src_addr = v16_addr(srcv);
+            char src0[16], src1[16];
+            fmt_direct(src0, sizeof(src0), src_addr);
+            fmt_direct(src1, sizeof(src1), src_addr + 1);
+            emit_ins2(sec, "mov", dst0, src0);
+            emit_ins2(sec, "mov", dst1, src1);
+        } else {
+            char *l_pos = new_label("sext_pos");
+            char *l_end = new_label("sext_end");
+            emit_ins2(sec, "mov", "A", vreg(srcv));
+            emit_ins2(sec, "mov", dst0, "A");
+            emit_ins2(sec, "anl", "A", "#0x80");
+            emit_ins1(sec, "jz", l_pos);
+            emit_ins2(sec, "mov", dst1, "#255");
+            emit_ins1(sec, "sjmp", l_end);
+            emit_label(sec, l_pos);
+            emit_ins2(sec, "mov", dst1, "#0");
+            emit_label(sec, l_end);
+            free(l_pos);
+            free(l_end);
+        }
+        break;
+    }
     case IROP_EQ: {
         ValueName a = *(ValueName *)list_get(ins->args, 0);
         ValueName b = *(ValueName *)list_get(ins->args, 1);
         if ((ins->type && ins->type->size >= 2) || val_size(a) >= 2 || val_size(b) >= 2) {
             char *l_false = new_label("eq_false");
             char *l_end = new_label("eq_end");
-            int da = v16_addr(a);
-            int db = v16_addr(b);
-            char a0[16], a1[16], b0[16], b1[16];
-            fmt_direct(a0, sizeof(a0), da);
-            fmt_direct(a1, sizeof(a1), da + 1);
             int imm = 0;
             bool b_is_zero = const_map_get(b, &imm) && imm == 0;
             bool a_is_zero = const_map_get(a, &imm) && imm == 0;
+
+            /* 对 0 的比较：允许直接用 8-bit 值判断，避免不必要的 v16 临时区读取 */
+            if (b_is_zero && val_size(a) < 2) {
+                emit_ins2(sec, "mov", "A", vreg(a));
+                emit_ins3(sec, "cjne", "A", "#0", l_false);
+            } else if (a_is_zero && val_size(b) < 2) {
+                emit_ins2(sec, "mov", "A", vreg(b));
+                emit_ins3(sec, "cjne", "A", "#0", l_false);
+            } else {
+                int da = v16_addr(a);
+                int db = v16_addr(b);
+                char a0[16], a1[16], b0[16], b1[16];
+                fmt_direct(a0, sizeof(a0), da);
+                fmt_direct(a1, sizeof(a1), da + 1);
+
             if (b_is_zero) {
                 emit_ins2(sec, "mov", "A", a1);
                 emit_ins3(sec, "cjne", "A", "#0", l_false);
@@ -450,6 +548,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                 emit_ins3(sec, "cjne", "A", b1, l_false);
                 emit_ins2(sec, "mov", "A", a0);
                 emit_ins3(sec, "cjne", "A", b0, l_false);
+            }
             }
             emit_ins2(sec, "mov", vreg(ins->dest), "#1");
             emit_ins1(sec, "sjmp", l_end);
@@ -479,14 +578,23 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         if ((ins->type && ins->type->size >= 2) || val_size(a) >= 2 || val_size(b) >= 2) {
             char *l_true = new_label("ne_true");
             char *l_end = new_label("ne_end");
-            int da = v16_addr(a);
-            int db = v16_addr(b);
-            char a0[16], a1[16], b0[16], b1[16];
-            fmt_direct(a0, sizeof(a0), da);
-            fmt_direct(a1, sizeof(a1), da + 1);
             int imm = 0;
             bool b_is_zero = const_map_get(b, &imm) && imm == 0;
             bool a_is_zero = const_map_get(a, &imm) && imm == 0;
+
+            if (b_is_zero && val_size(a) < 2) {
+                emit_ins2(sec, "mov", "A", vreg(a));
+                emit_ins3(sec, "cjne", "A", "#0", l_true);
+            } else if (a_is_zero && val_size(b) < 2) {
+                emit_ins2(sec, "mov", "A", vreg(b));
+                emit_ins3(sec, "cjne", "A", "#0", l_true);
+            } else {
+                int da = v16_addr(a);
+                int db = v16_addr(b);
+                char a0[16], a1[16], b0[16], b1[16];
+                fmt_direct(a0, sizeof(a0), da);
+                fmt_direct(a1, sizeof(a1), da + 1);
+
             if (b_is_zero) {
                 emit_ins2(sec, "mov", "A", a1);
                 emit_ins3(sec, "cjne", "A", "#0", l_true);
@@ -506,6 +614,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                 emit_ins3(sec, "cjne", "A", b1, l_true);
                 emit_ins2(sec, "mov", "A", a0);
                 emit_ins3(sec, "cjne", "A", b0, l_true);
+            }
             }
             emit_ins2(sec, "mov", vreg(ins->dest), "#0");
             emit_ins1(sec, "sjmp", l_end);
@@ -917,10 +1026,20 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     case IROP_BR: {
         char *t = list_get(ins->labels, 0);  // true 块
         char *f = list_get(ins->labels, 1);  // false 块
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));  // 加载条件值
-        emit_ins1(sec, "jnz", map_block_label(func_name, f));  // 0 时跳 false
+        ValueName condv = *(ValueName *)list_get(ins->args, 0);
+        char *l_true = new_label("br_true");
+        emit_ins2(sec, "mov", "A", vreg(condv));  // 条件非0 => true
+        emit_ins1(sec, "jnz", l_true);
+
+        /* false edge */
+        emit_phi_moves_for_edge(sec, func, cur_block, f);
+        emit_ins1(sec, "sjmp", map_block_label(func_name, f));
+
+        /* true edge */
+        emit_label(sec, l_true);
         emit_phi_moves_for_edge(sec, func, cur_block, t);
-        emit_ins1(sec, "sjmp", map_block_label(func_name, t));  // 跳 true
+        emit_ins1(sec, "sjmp", map_block_label(func_name, t));
+        free(l_true);
         break;
     }
     case IROP_CALL: {
@@ -1051,7 +1170,26 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                 }
             }
         } else {
-            emit_ins2(sec, "mov", "A", "#0");
+            int has_imm = 0;
+            if (ins->labels && ins->labels->len > 0) {
+                char *tag = (char *)list_get(ins->labels, 0);
+                if (tag && strcmp(tag, "imm") == 0) has_imm = 1;
+            }
+            if (has_imm) {
+                if (func && func->ret_type && func->ret_type->size >= 2) {
+                    char buf0[16], buf1[16];
+                    snprintf(buf0, sizeof(buf0), "#%ld", ins->imm.ival & 0xFF);
+                    snprintf(buf1, sizeof(buf1), "#%ld", (ins->imm.ival >> 8) & 0xFF);
+                    emit_ins2(sec, "mov", "0x82", buf0);
+                    emit_ins2(sec, "mov", "0x83", buf1);
+                } else {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "#%ld", ins->imm.ival & 0xFF);
+                    emit_ins2(sec, "mov", "A", buf);
+                }
+            } else {
+                emit_ins2(sec, "mov", "A", "#0");
+            }
         }
         
         if (func && func->stack_size > 0)

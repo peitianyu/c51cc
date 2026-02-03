@@ -173,12 +173,17 @@ TEST(test, c51_gen) {
     if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
         puts("open fail"), exit(1);
 
+    /* 避免下一行 asm 输出粘连在提示后面 */
+    fflush(stdout);
+    putchar('\n');
+
     set_current_filename(infile);
 
     SSABuild *b = ssa_build_create();
     List *toplevels = read_toplevels();
     for (Iter i = list_iter(toplevels); !iter_end(i);) {
         Ast *v = iter_next(&i);
+        printf("ast %s\n", ast_to_string(v));
         ssa_convert_ast(b, v);
     }
 

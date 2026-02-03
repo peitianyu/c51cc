@@ -1,4 +1,3 @@
-/* ssa_pass.c  – 精简版，功能与原文件 100% 兼容 */
 #include "ssa.h"
 #include <stdlib.h>
 #include <string.h>
@@ -30,11 +29,54 @@ static List *filter_list(List *src, bool (*pred)(void *, void *), void *aux) {
     return dst;
 }
 
+static bool block_ptr_eq(void *a, void *b) { return a == b; }
+
+static void list_remove_last(List *list, void **out) {
+    if (out) *out = NULL;
+    if (!list || !list->tail) return;
+    ListNode *tail = list->tail;
+    if (out) *out = tail->elem;
+    list->tail = tail->prev;
+    if (list->tail) list->tail->next = NULL;
+    else list->head = NULL;
+    free(tail);
+    list->len--;
+}
+
+static void list_clear_shallow(List *list) {
+    if (!list) return;
+    ListNode *node = list->head;
+    while (node) {
+        ListNode *next = node->next;
+        free(node);
+        node = next;
+    }
+    list->len = 0;
+    list->head = list->tail = NULL;
+}
+
+static List *preds_remove(List *preds, Block *rem) {
+    List *dst = make_list();
+    if (!preds) return dst;
+    for (Iter it = list_iter(preds); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (b != rem) list_push(dst, b);
+    }
+    return dst;
+}
+
 /*---------- 指令属性 ----------*/
 static bool is_volatile_mem(const Instr *i) {
     if (!i || !i->mem_type) return false;
     CtypeAttr a = get_attr(i->mem_type->attr);
     return a.ctype_volatile || a.ctype_register;
+}
+
+// store->load 转发只屏蔽 volatile（不屏蔽 register），用于测试时的SSA简化
+static bool is_volatile_for_forwarding(const Instr *i) {
+    if (!i || !i->mem_type) return false;
+    CtypeAttr a = get_attr(i->mem_type->attr);
+    return a.ctype_volatile;
 }
 
 static bool is_pure_instr(const Instr *i) {
@@ -71,6 +113,15 @@ static Instr *find_def_instr(Func *f, ValueName v) {
     return NULL;
 }
 
+static Block *find_block_by_id(Func *f, int id) {
+    if (!f || !f->blocks) return NULL;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (b && (int)b->id == id) return b;
+    }
+    return NULL;
+}
+
 static GlobalVar *find_global(const char *name) {
     if (!g_unit || !name) return NULL;
     for (Iter it = list_iter(g_unit->globals); !iter_end(it);) {
@@ -103,6 +154,12 @@ static bool value_used(Func *f, ValueName v)
         /* 扫描普通指令 */
         for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
             Instr *i = iter_next(&jt);
+            if (i && i->op == IROP_STORE && i->labels && i->labels->len > 0) {
+                char *label = (char *)list_get(i->labels, 0);
+                if (label && label[0] == '@') {
+                    continue; /* const store 的参数不计为使用 */
+                }
+            }
             if (i->args) {
                 for (int k = 0; k < i->args->len; ++k)
                     if (*(ValueName *)list_get(i->args, k) == v)
@@ -120,6 +177,39 @@ static bool value_used(Func *f, ValueName v)
         }
     }
     return false;
+}
+
+static int count_uses(Func *f, ValueName v)
+{
+    int cnt = 0;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        /* 普通指令 */
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i && i->op == IROP_STORE && i->labels && i->labels->len > 0) {
+                char *label = (char *)list_get(i->labels, 0);
+                if (label && label[0] == '@') {
+                    continue; /* const store 的参数不计为使用 */
+                }
+            }
+            if (i->args) {
+                for (int k = 0; k < i->args->len; ++k)
+                    if (*(ValueName *)list_get(i->args, k) == v)
+                        cnt++;
+            }
+        }
+        /* PHI */
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr *p = iter_next(&jt);
+            if (p->args) {
+                for (int k = 0; k < p->args->len; ++k)
+                    if (*(ValueName *)list_get(p->args, k) == v)
+                        cnt++;
+            }
+        }
+    }
+    return cnt;
 }
 
 /*---------- 常量折叠 ----------*/
@@ -233,7 +323,8 @@ static bool pass_const_fold(Func *f, Stats *s) {
                         const char *gname = (const char *)list_get(addr->labels, 0);
                         if (gname) {
                             i->imm.ival = val->imm.ival;
-                            list_clear(i->args); list_clear(i->labels);
+                            /* 注意：不要清空 args。否则会破坏后续 pass_store_load_forwarding 对 store 的识别。 */
+                            list_clear(i->labels);
                             char *lab = pass_alloc(strlen(gname) + 2);
                             lab[0] = '@'; strcpy(lab + 1, gname);
                             list_push(i->labels, lab);
@@ -436,6 +527,13 @@ static bool pass_local_opts(Func *f, Stats *s) {
                     list_clear(i->args);
                     ++s->fold; changed = true; continue;
                 }
+                /* 1.1 比较自反：eq x,x = 1; ne x,x = 0 */
+                if ((i->op == IROP_EQ || i->op == IROP_NE) && a == bv) {
+                    bool is_eq = (i->op == IROP_EQ);
+                    i->op = IROP_CONST; i->imm.ival = is_eq ? 1 : 0;
+                    list_clear(i->args);
+                    ++s->fold; changed = true; continue;
+                }
             }
             /* 2. 代数：x & x = x, x | x = x */
             if (i->args->len >= 2) {
@@ -447,6 +545,17 @@ static bool pass_local_opts(Func *f, Stats *s) {
                     ValueName *p = pass_alloc(sizeof *p); *p = a;
                     list_push(i->args, p);
                     ++s->fold; changed = true; continue;
+                }
+                /* 2.1 常量比较：eq/ne const,const -> const */
+                if (i->op == IROP_EQ || i->op == IROP_NE) {
+                    int64_t ca = 0, cb = 0;
+                    if (get_const_value(f, a, &ca) && get_const_value(f, bv, &cb)) {
+                        bool is_eq = (i->op == IROP_EQ);
+                        i->op = IROP_CONST;
+                        i->imm.ival = is_eq ? (ca == cb) : (ca != cb);
+                        list_clear(i->args);
+                        ++s->fold; changed = true; continue;
+                    }
                 }
             }
             /* 3. 代数简化扩展：x+0=x, x*1=x, x*0=0等 */
@@ -546,6 +655,402 @@ static bool pass_local_opts(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 存储到加载转发 ----------*/
+static bool pass_store_load_forwarding(Func *f, Stats *s) {
+    bool changed = false;
+    
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        
+        // 使用简单映射记录当前块内每个地址的最新存储值
+        // 地址 -> 存储的值
+        typedef struct { const char *name; ValueName val; } StoreMap;
+        StoreMap stores[64];
+        int store_count = 0;
+        
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            
+            if (i->op == IROP_STORE) {
+                if (is_volatile_for_forwarding(i)) {
+                    store_count = 0;
+                    continue;
+                }
+                // 记录这次存储
+                Instr *addr = find_def_instr(f, get_arg(i, 0));
+                if (addr && addr->op == IROP_ADDR) {
+                    const char *name = list_get(addr->labels, 0);
+                    // 更新映射
+                    bool found = false;
+                    for (int k = 0; k < store_count; k++) {
+                        if (stores[k].name && !strcmp(stores[k].name, name)) {
+                            stores[k].val = get_arg(i, 1);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found && store_count < 64) {
+                        stores[store_count].name = name;
+                        stores[store_count].val = get_arg(i, 1);
+                        store_count++;
+                    }
+                }
+            }
+            else if (i->op == IROP_LOAD) {
+                if (is_volatile_for_forwarding(i)) {
+                    store_count = 0;
+                    continue;
+                }
+                // 检查是否有可用的存储转发
+                Instr *addr = find_def_instr(f, get_arg(i, 0));
+                if (addr && addr->op == IROP_ADDR) {
+                    const char *name = list_get(addr->labels, 0);
+                    for (int k = 0; k < store_count; k++) {
+                        if (stores[k].name && !strcmp(stores[k].name, name)) {
+                            // 找到匹配的store，进行转发
+                            i->op = IROP_TRUNC; // 使用trunc作为复制
+                            list_clear(i->args);
+                            ValueName *p = pass_alloc(sizeof *p);
+                            *p = stores[k].val;
+                            list_push(i->args, p);
+                            changed = true;
+                            s->fold++;
+                            break;
+                        }
+                    }
+                }
+            }
+            // 如果遇到函数调用或volatile操作，清空映射
+            else if (i->op == IROP_CALL) {
+                store_count = 0;
+            }
+        }
+    }
+    return changed;
+}
+
+/*---------- store 标记后清理 ----------*/
+static bool pass_store_cleanup(Func *f, Stats *s) {
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_STORE) continue;
+            if (!i->labels || i->labels->len == 0) continue;
+            char *label = (char *)list_get(i->labels, 0);
+            if (label && label[0] == '@' && i->args && i->args->len > 0) {
+                list_clear(i->args);
+                changed = true;
+                s->rm++;
+            }
+        }
+    }
+    return changed;
+}
+
+/*---------- ret 常量内联 ----------*/
+static bool pass_ret_const_inline(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->ret_type || f->ret_type->type == CTYPE_VOID) return false;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_RET) continue;
+            if (!i->args || i->args->len < 1) continue;
+            ValueName v = get_arg(i, 0);
+            Instr *def = find_def_instr(f, v);
+            if (!def || def->op != IROP_CONST) continue;
+
+            i->imm.ival = def->imm.ival;
+            list_clear(i->args);
+            i->args = NULL;
+            if (!i->labels) i->labels = make_list();
+            list_clear(i->labels);
+            char *tag = pass_alloc(4);
+            strcpy(tag, "imm");
+            list_push(i->labels, tag);
+            /* 如果该常量仅用于本次ret，标记为NOP以便清理 */
+            if (count_uses(f, def->dest) == 0) {
+                def->op = IROP_NOP;
+            }
+            changed = true;
+            s->fold++;
+        }
+    }
+    return changed;
+}
+
+/*---------- 仅用于const store的常量清理 ----------*/
+static bool pass_const_store_prune(Func *f, Stats *s) {
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *def = iter_next(&jt);
+            if (!def || def->op != IROP_CONST || def->dest == 0) continue;
+
+            bool used = false;
+            bool ok = true;
+
+            for (Iter it2 = list_iter(f->blocks); !iter_end(it2);) {
+                Block *bb = iter_next(&it2);
+                for (Iter jt2 = list_iter(bb->instrs); !iter_end(jt2);) {
+                    Instr *use = iter_next(&jt2);
+                    if (!use || !use->args) continue;
+                    for (int k = 0; k < use->args->len; ++k) {
+                        if (*(ValueName *)list_get(use->args, k) != def->dest) continue;
+                        used = true;
+                        if (use->op != IROP_STORE) { ok = false; }
+                        else if (!use->labels || use->labels->len == 0) { ok = false; }
+                        else {
+                            char *label = (char *)list_get(use->labels, 0);
+                            if (!label || label[0] != '@') ok = false;
+                        }
+                    }
+                }
+            }
+
+            if (!used || !ok) continue;
+
+            for (Iter it2 = list_iter(f->blocks); !iter_end(it2);) {
+                Block *bb = iter_next(&it2);
+                for (Iter jt2 = list_iter(bb->instrs); !iter_end(jt2);) {
+                    Instr *use = iter_next(&jt2);
+                    if (!use || !use->args) continue;
+                    bool hit = false;
+                    for (int k = 0; k < use->args->len; ++k) {
+                        if (*(ValueName *)list_get(use->args, k) == def->dest) {
+                            hit = true;
+                            break;
+                        }
+                    }
+                    if (hit && use->op == IROP_STORE) {
+                        list_clear(use->args);
+                    }
+                }
+            }
+
+            def->op = IROP_NOP;
+            s->rm++;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/*---------- 基本块合并 ----------*/
+static bool pass_block_merge(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks) return false;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs || b->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) continue;
+
+        int tid = -1;
+        sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+        if (tid < 0) continue;
+        Block *t = find_block_by_id(f, tid);
+        if (!t || t == b) continue;
+        if (t->phis && t->phis->len > 0) continue;
+        if (t->preds && t->preds->len != 1) continue;
+
+        /* 移除b的终结jmp */
+        list_remove_last(b->instrs, NULL);
+
+        /* 追加目标块指令 */
+        for (Iter jt = list_iter(t->instrs); !iter_end(jt);) {
+            Instr *inst = iter_next(&jt);
+            list_push(b->instrs, inst);
+        }
+
+        /* 更新目标块后继的preds */
+        if (t->instrs && t->instrs->len > 0) {
+            Instr *tterm = (Instr *)list_get(t->instrs, t->instrs->len - 1);
+            if (tterm && tterm->labels) {
+                if (tterm->op == IROP_JMP && tterm->labels->len >= 1) {
+                    int sid = -1;
+                    sscanf((char *)list_get(tterm->labels, 0), "block%d", &sid);
+                    Block *sblk = find_block_by_id(f, sid);
+                    if (sblk) {
+                        sblk->preds = preds_remove(sblk->preds, t);
+                        list_unique_push(sblk->preds, b, block_ptr_eq);
+                    }
+                } else if (tterm->op == IROP_BR && tterm->labels->len >= 2) {
+                    int s1 = -1, s2 = -1;
+                    sscanf((char *)list_get(tterm->labels, 0), "block%d", &s1);
+                    sscanf((char *)list_get(tterm->labels, 1), "block%d", &s2);
+                    Block *sblk1 = find_block_by_id(f, s1);
+                    Block *sblk2 = find_block_by_id(f, s2);
+                    if (sblk1) {
+                        sblk1->preds = preds_remove(sblk1->preds, t);
+                        list_unique_push(sblk1->preds, b, block_ptr_eq);
+                    }
+                    if (sblk2) {
+                        sblk2->preds = preds_remove(sblk2->preds, t);
+                        list_unique_push(sblk2->preds, b, block_ptr_eq);
+                    }
+                }
+            }
+        }
+
+        /* 清空目标块 */
+        list_clear_shallow(t->instrs);
+        t->instrs = make_list();
+        list_clear_shallow(t->phis);
+        t->phis = make_list();
+        t->preds = make_list();
+
+        s->merge++;
+        changed = true;
+    }
+    return changed;
+}
+
+/*---------- 尾部ret合并 ----------*/
+static bool pass_tail_ret_merge(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks) return false;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs || b->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) continue;
+
+        int tid = -1;
+        sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+        if (tid < 0) continue;
+        Block *t = find_block_by_id(f, tid);
+        if (!t || t == b) continue;
+        if (t->phis && t->phis->len > 0) continue;
+        if (!t->instrs || t->instrs->len != 1) continue;
+        Instr *only = (Instr *)list_get(t->instrs, 0);
+        if (!only || only->op != IROP_RET) continue;
+
+        /* 用ret替换jmp */
+        list_remove_last(b->instrs, NULL);
+        list_push(b->instrs, only);
+
+        /* 清空目标块 */
+        list_clear_shallow(t->instrs);
+        t->instrs = make_list();
+        list_clear_shallow(t->phis);
+        t->phis = make_list();
+        t->preds = make_list();
+
+        s->merge++;
+        changed = true;
+    }
+    return changed;
+}
+
+/*---------- 常量分支消除 + 死块删除 ----------*/
+static bool pass_const_branch(Func *f, Stats *s) {
+    bool changed = false;
+    
+    // 第一遍：识别常量分支并简化
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        Instr *terminator = list_empty(b->instrs) ? NULL 
+            : list_get(b->instrs, b->instrs->len - 1);
+        if (!terminator || terminator->op != IROP_BR) continue;
+        ValueName cond = get_arg(terminator, 0);
+        int64_t val;
+        if (!get_const_value(f, cond, &val)) continue;
+        
+        // 确定目标块和死块
+        const char *live_label = val ? list_get(terminator->labels, 0) 
+                                      : list_get(terminator->labels, 1);
+        const char *dead_label = val ? list_get(terminator->labels, 1) 
+                                      : list_get(terminator->labels, 0);
+
+        char *live_label_copy = NULL;
+        if (live_label) {
+            live_label_copy = pass_alloc(strlen(live_label) + 1);
+            strcpy(live_label_copy, live_label);
+        }
+        
+        // 将br替换为无条件jmp
+        terminator->op = IROP_JMP;
+        list_clear(terminator->args);
+        list_clear(terminator->labels);
+        if (live_label_copy) list_push(terminator->labels, live_label_copy);
+        s->fold++;
+        changed = true;
+    }
+    
+    // 第二遍：从入口块做可达性分析，清空不可达块（避免SSA输出残留死分支）
+    if (f && f->blocks && f->blocks->len > 0) {
+        int max_id = 0;
+        for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+            Block *b = iter_next(&it);
+            if (b && (int)b->id > max_id) max_id = (int)b->id;
+        }
+
+        bool *seen = (bool *)calloc((size_t)max_id + 1, sizeof(bool));
+        Block **work = (Block **)malloc(((size_t)max_id + 1) * sizeof(Block *));
+        int wlen = 0;
+
+        Block *entry = f->entry ? f->entry : (Block *)list_get(f->blocks, 0);
+        if (entry && (int)entry->id <= max_id) {
+            seen[entry->id] = true;
+            work[wlen++] = entry;
+        }
+
+        while (wlen > 0) {
+            Block *b = work[--wlen];
+            if (!b || !b->instrs || b->instrs->len == 0) continue;
+            Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+            if (!term || !term->labels) continue;
+
+            if (term->op == IROP_JMP && term->labels->len >= 1) {
+                int tid = -1;
+                sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+                if (tid >= 0 && tid <= max_id && !seen[tid]) {
+                    Block *t = find_block_by_id(f, tid);
+                    if (t) { seen[tid] = true; work[wlen++] = t; }
+                }
+            } else if (term->op == IROP_BR && term->labels->len >= 2) {
+                int t1 = -1, t2 = -1;
+                sscanf((char *)list_get(term->labels, 0), "block%d", &t1);
+                sscanf((char *)list_get(term->labels, 1), "block%d", &t2);
+                if (t1 >= 0 && t1 <= max_id && !seen[t1]) {
+                    Block *t = find_block_by_id(f, t1);
+                    if (t) { seen[t1] = true; work[wlen++] = t; }
+                }
+                if (t2 >= 0 && t2 <= max_id && !seen[t2]) {
+                    Block *t = find_block_by_id(f, t2);
+                    if (t) { seen[t2] = true; work[wlen++] = t; }
+                }
+            }
+        }
+
+        for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+            Block *b = iter_next(&it);
+            if (!b) continue;
+            if (entry && b == entry) continue;
+            if ((int)b->id <= max_id && !seen[b->id]) {
+                b->preds = make_list();
+                b->phis = make_list();
+                b->instrs = make_list();
+                changed = true;
+                s->rm++;
+            }
+        }
+
+        free(work);
+        free(seen);
+    }
+    
+    return changed;
+}
+
 /*---------- 统一迭代框架 ----------*/
 void ssa_optimize_func(Func *f, int level) {
     if (!f || level == OPT_O0) return;
@@ -553,14 +1058,22 @@ void ssa_optimize_func(Func *f, int level) {
     bool changed;
     int it = 0;
     do {
-        changed  = pass_const_fold(f, &st);
-        changed |= pass_const_merge(f, &st); /* 新增：公共常量合并 */
+        changed = false;
+        changed |= pass_const_fold(f, &st);
+        changed |= pass_store_load_forwarding(f, &st);
         changed |= pass_global_load(f, &st);
+        changed |= pass_copy_prop(f, &st);
+        changed |= pass_const_merge(f, &st);
         changed |= pass_local_opts(f, &st);
-        changed |= pass_copy_prop(f, &st);   /* 新增：复制传播 */
+        changed |= pass_const_branch(f, &st);
         changed |= pass_phi(f, &st);
+        changed |= pass_store_cleanup(f, &st);
+        changed |= pass_ret_const_inline(f, &st);
+        changed |= pass_const_store_prune(f, &st);
+        changed |= pass_block_merge(f, &st);
+        changed |= pass_tail_ret_merge(f, &st);
         changed |= pass_dce(f, &st);
-    } while (changed && ++it < 10);
+    } while (changed && ++it < 20);
 }
 
 void ssa_optimize(SSAUnit *u, int level) {
@@ -571,7 +1084,6 @@ void ssa_optimize(SSAUnit *u, int level) {
     g_unit = NULL;
 }
 
-/*---------- 测试入口（未改动） ----------*/
 #ifdef MINITEST_IMPLEMENTATION
 #include "minitest.h"
 extern List *ctypes, *strings;
@@ -592,9 +1104,9 @@ TEST(test, ssa_opt) {
         printf("ast: %s\n", ast_to_string(v));
         ssa_convert_ast(b, v);
     }
-    printf("\n=== Original SSA Output ===\n");
-    ssa_print(stdout, b->unit);
-    printf("\n=== Running Optimizations (O1) ===\n");
+    // printf("\n=== Original SSA Output ===\n");
+    // ssa_print(stdout, b->unit);
+    // printf("\n=== Running Optimizations (O1) ===\n");
     ssa_optimize(b->unit, OPT_O1);
     printf("\n=== Optimized SSA Output ===\n");
     ssa_print(stdout, b->unit);

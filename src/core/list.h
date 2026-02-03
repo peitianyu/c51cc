@@ -98,6 +98,11 @@ static inline void *list_get(List *list, int idx)
     return n->elem;
 }
 
+static inline bool list_empty(List *list)
+{
+    return list->len == 0;
+}
+
 static inline void *list_shift(List *list)
 {
     if (!list->head)

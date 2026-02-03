@@ -1596,6 +1596,56 @@ static void print_arg(FILE *fp, ValueName val, List *consts) {
     }
 }
 
+static Func *g_print_func = NULL;
+
+static Instr *find_def_instr_print(Func *f, ValueName v) {
+    if (!f) return NULL;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i->dest == v) return i;
+        }
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr *p = iter_next(&jt);
+            if (p->dest == v) return p;
+        }
+    }
+    return NULL;
+}
+
+static bool suppress_const_print(Func *f, ValueName v) {
+    Instr *def = find_def_instr_print(f, v);
+    if (!def || def->op != IROP_CONST) return false;
+
+    bool used = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || !i->args) continue;
+            for (int k = 0; k < i->args->len; ++k) {
+                if (*(ValueName *)list_get(i->args, k) != v) continue;
+                used = true;
+                if (i->op == IROP_STORE && i->labels && i->labels->len > 0) {
+                    char *label = (char *)list_get(i->labels, 0);
+                    if (label && label[0] == '@') continue;
+                }
+                if (i->op == IROP_RET) continue;
+                return false; /* 还有其他用途，不能隐藏 */
+            }
+        }
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr *p = iter_next(&jt);
+            if (!p || !p->args) continue;
+            for (int k = 0; k < p->args->len; ++k) {
+                if (*(ValueName *)list_get(p->args, k) == v) return false;
+            }
+        }
+    }
+    return used || true;
+}
+
 typedef struct {
     ValueName val;
     int64_t const_val;
@@ -1804,7 +1854,18 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
         fprintf(fp, "ret");
         if (i->args && i->args->len >= 1) {
             ValueName *v = list_get(i->args, 0);
-            fprintf(fp, " v%d", *v);
+            Instr *def = find_def_instr_print(g_print_func, *v);
+            if (def && def->op == IROP_CONST && suppress_const_print(g_print_func, *v)) {
+                fprintf(fp, " const %ld", def->imm.ival);
+            } else {
+                fprintf(fp, " ");
+                print_arg(fp, *v, consts);
+            }
+        } else if (i->labels && i->labels->len > 0) {
+            char *tag = (char *)list_get(i->labels, 0);
+            if (tag && strcmp(tag, "imm") == 0) {
+                fprintf(fp, " const %ld", i->imm.ival);
+            }
         }
         break;
     }
@@ -1816,6 +1877,7 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
 
 static void ssa_print_func(FILE *fp, Func *f) {
     if (!f) return;
+    g_print_func = f;
     fprintf(fp, "@%s(", f->name);
     if (f->params) {
         for (int i = 0; i < f->params->len; i++) {
@@ -1852,12 +1914,16 @@ static void ssa_print_func(FILE *fp, Func *f) {
             if (blk->instrs) {
                 for (int i = 0; i < blk->instrs->len; i++) {
                     Instr *inst = list_get(blk->instrs, i);
-                    if (inst && inst->op != IROP_PHI) // PHI已在上面打印
+                    if (inst && inst->op != IROP_PHI) { // PHI已在上面打印
+                        if (inst->op == IROP_CONST && suppress_const_print(f, inst->dest))
+                            continue;
                         ssa_print_instr(fp, inst, consts);
+                    }
                 }
             }
         }
     }
+    g_print_func = NULL;
     fprintf(fp, "}\n");
 }
 
