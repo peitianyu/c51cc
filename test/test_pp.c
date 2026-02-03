@@ -311,6 +311,86 @@ int test_include() {
 }
 
 /*=============================*
+ * 十七、函数式宏测试
+ *=============================*/
+
+#define ADD(a, b) ((a) + (b))
+#define MUL(a, b) ((a) * (b))
+#define INC(x) ((x) + 1)
+#define WRAP(x) (x)
+
+int test_func_like_macro() {
+    int r = 0;
+    r = r + ADD(1, 2);
+    r = r + MUL(3, 4);
+    r = r + INC(10);
+    r = r + WRAP(ADD(5, 6));
+    return r;
+}
+
+/*=============================*
+ * 十八、递归/嵌套宏展开测试
+ *=============================*/
+
+#define NEST_A 7
+#define NEST_B NEST_A
+#define NEST_C NEST_B
+
+int test_nested_macro_expand() {
+    int r = 0;
+    r = r + NEST_C; /* 期望最终展开为 7 */
+    return r;
+}
+
+/*=============================*
+ * 十九、do { } while(0) 语句宏测试
+ *=============================*/
+
+#define ADD_TO_RESULT(res, v) do { (res) = (res) + (v); } while (0)
+
+int test_do_while_0_macro() {
+    int result = 0;
+
+    ADD_TO_RESULT(result, 1);
+    ADD_TO_RESULT(result, 2);
+
+    /* 典型 if/else 场景：要求宏能作为单语句使用 */
+    if (1)
+        ADD_TO_RESULT(result, 3);
+    else
+        ADD_TO_RESULT(result, 1000);
+
+    return result;
+}
+
+/*=============================*
+ * 二十、多行宏（\\ 续行）测试
+ *=============================*/
+
+#define MULTI_ADD(a, b) \
+    ((a) + \
+     (b))
+
+#define MULTI_STMT(res) \
+    do { \
+        (res) = (res) + 10; \
+        (res) = (res) + 20; \
+    } while (0)
+
+int test_multiline_macro() {
+    int r = 0;
+    r = r + MULTI_ADD(1, 2);
+    MULTI_STMT(r);
+
+    /* 多行注释跨行：预处理器不应在注释内做宏替换 */
+    /* MULTI_ADD(100, 200)
+       MULTI_STMT(r)
+     */
+
+    return r;
+}
+
+/*=============================*
  * 十六、综合测试函数
  *=============================*/
 
@@ -332,6 +412,10 @@ int test_all_pp_features() {
     result = result + test_multi_macro();
     result = result + test_macro_init();
     result = result + test_include();
+    result = result + test_func_like_macro();
+    result = result + test_nested_macro_expand();
+    result = result + test_do_while_0_macro();
+    result = result + test_multiline_macro();
     
     return result;
 }

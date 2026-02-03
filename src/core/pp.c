@@ -51,6 +51,7 @@ typedef struct PPContext {
     int out_cap;
     char *line;             /* 当前行缓冲区 */
     char *last_line;        /* 上次返回的行（用于释放） */
+    bool in_block_comment;  /* 是否处于跨行块注释中 */
 } PPContext;
 
 static PPContext *g_pp_ctx = NULL;
@@ -58,11 +59,14 @@ static PPContext *g_pp_ctx = NULL;
 /* 前向声明 */
 static bool is_pp_macro(PPContext *ctx, const char *name);
 static Macro *get_pp_macro(PPContext *ctx, const char *name);
+void pp_undef(PPContext *ctx, const char *name);
 static bool handle_ifdef(PPContext *ctx, const char *args, bool is_ifndef);
 static bool handle_else(PPContext *ctx, const char *args);
 static bool handle_endif(PPContext *ctx, const char *args);
 static char *expand_macro_simple(PPContext *ctx, const char *line);
 static bool should_skip(PPContext *ctx);
+
+static bool pp_remove_macro_entry(PPContext *ctx, const char *name, Macro **out_macro);
 
 /* 创建宏定义 - name 会被 dict entry 引用，Macro 内部不单独存储 name */
 static Macro *macro_create(const char *name, MacroType type, const char *body)
@@ -182,18 +186,28 @@ static char *pp_get_ident(const char *p, int *len)
 /* 检查是否为宏 */
 static bool is_pp_macro(PPContext *ctx, const char *name)
 {
-    return dict_get(ctx->macros, (char *)name) != NULL;
+    return get_pp_macro(ctx, name) != NULL;
 }
 
 /* 获取宏定义 */
 static Macro *get_pp_macro(PPContext *ctx, const char *name)
 {
-    return dict_get(ctx->macros, (char *)name);
+    if (!ctx || !ctx->macros || !ctx->macros->list) return NULL;
+    Macro *found = NULL;
+    for (Iter i = list_iter(ctx->macros->list); !iter_end(i);) {
+        DictEntry *e = iter_next(&i);
+        if (e && e->key && strcmp(e->key, name) == 0) {
+            found = (Macro *)e->val;
+        }
+    }
+    return found;
 }
 
 /* 定义宏 */
 void pp_define(PPContext *ctx, const char *name, const char *body)
 {
+    /* 最新定义覆盖旧定义 */
+    pp_undef(ctx, name);
     char *name_copy = strdup(name);
     Macro *m = macro_create(name_copy, MACRO_OBJ, body);
     dict_put(ctx->macros, name_copy, m);
@@ -202,22 +216,51 @@ void pp_define(PPContext *ctx, const char *name, const char *body)
 /* 定义函数式宏 */
 void pp_define_func(PPContext *ctx, const char *name, List *params, const char *body)
 {
+    /* 最新定义覆盖旧定义 */
+    pp_undef(ctx, name);
     char *name_copy = strdup(name);
     Macro *m = macro_create(name_copy, MACRO_FUNC, body);
     m->params = params;
     dict_put(ctx->macros, name_copy, m);
 }
 
-/* 取消宏定义 - dict_remove 会释放 key，然后我们再释放 Macro */
+/* 从宏表中移除最后一次定义（最新的） */
+static bool pp_remove_macro_entry(PPContext *ctx, const char *name, Macro **out_macro)
+{
+    if (out_macro) *out_macro = NULL;
+    if (!ctx || !ctx->macros || !ctx->macros->list) return false;
+
+    ListNode *node = ctx->macros->list->tail;
+    while (node) {
+        DictEntry *entry = (DictEntry *)node->elem;
+        if (entry && entry->key && strcmp(entry->key, name) == 0) {
+            ListNode *prev = node->prev;
+            ListNode *next = node->next;
+            if (prev) prev->next = next;
+            else ctx->macros->list->head = next;
+            if (next) next->prev = prev;
+            else ctx->macros->list->tail = prev;
+
+            ctx->macros->list->len--;
+
+            if (out_macro) *out_macro = (Macro *)entry->val;
+            /* entry->key 归 Macro->name 所有权同源，只释放一次 */
+            free(entry->key);
+            free(entry);
+            free(node);
+            return true;
+        }
+        node = node->prev;
+    }
+    return false;
+}
+
+/* 取消宏定义 - 删除最新定义，并释放 Macro */
 void pp_undef(PPContext *ctx, const char *name)
 {
-    Macro *m = dict_get(ctx->macros, (char *)name);
-    if (m) {
-        /* 先保存 name 指针，因为 dict_remove 会释放它 */
-        char *saved_name = m->name;
-        dict_remove(ctx->macros, (char *)name);
-        /* 现在释放 Macro，但不释放 name（已经被 dict_remove 释放了） */
-        m->name = NULL;  /* 避免 macro_free 尝试释放 */
+    Macro *m = NULL;
+    if (pp_remove_macro_entry(ctx, name, &m) && m) {
+        m->name = NULL;
         macro_free(m);
     }
 }
@@ -319,8 +362,8 @@ void pp_pop_file(PPContext *ctx)
     free(f);
 }
 
-/* 从当前文件读取一行 */
-static char *read_line_from_file(InputFile *f)
+/* 从当前文件读取一行（物理行），返回 f->buf（不含换行符） */
+static char *read_physical_line(InputFile *f)
 {
     if (!f || !f->fp) return NULL;
     if (fgets(f->buf, PP_LINE_SIZE, f->fp)) {
@@ -335,34 +378,394 @@ static char *read_line_from_file(InputFile *f)
     return NULL;
 }
 
-/* 展开宏 - 简单替换，返回新分配的字符串（调用者需释放） */
-static char *expand_macro_simple(PPContext *ctx, const char *line)
+/* 读取逻辑行：处理反斜杠续行（\\\n），返回 ctx->line */
+static char *read_logical_line(PPContext *ctx, InputFile *f)
 {
-    String result = make_string();
-    const char *p = line;
-    
+    if (!ctx || !f) return NULL;
+
+    char *line = read_physical_line(f);
+    if (!line) return NULL;
+
+    /* 拷贝到 ctx->line，便于拼接 */
+    ctx->line[0] = '\0';
+    size_t cap = PP_LINE_SIZE;
+    size_t used = 0;
+
+    while (1) {
+        size_t n = strlen(line);
+        if (used + n + 1 > cap) {
+            error("PP line too long (>%d)", PP_LINE_SIZE);
+            return NULL;
+        }
+        memcpy(ctx->line + used, line, n);
+        used += n;
+        ctx->line[used] = '\0';
+
+        /* 反斜杠续行：去掉末尾 \\ 并继续读取下一物理行 */
+        if (used > 0 && ctx->line[used - 1] == '\\') {
+            ctx->line[--used] = '\0';
+            line = read_physical_line(f);
+            if (!line) break;
+            continue;
+        }
+        break;
+    }
+
+    return ctx->line;
+}
+
+static inline bool is_ident_start(char c)
+{
+    return isalpha((unsigned char)c) || c == '_';
+}
+
+static inline bool is_ident_char(char c)
+{
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+static inline char *string_steal(String *s)
+{
+    char *r = s->body;
+    s->body = NULL;
+    s->nalloc = s->len = 0;
+    return r;
+}
+
+static bool list_contains_cstr(List *list, const char *s)
+{
+    if (!list) return false;
+    for (Iter i = list_iter(list); !iter_end(i);) {
+        char *v = iter_next(&i);
+        if (v && strcmp(v, s) == 0) return true;
+    }
+    return false;
+}
+
+static char *trim_copy_range(const char *start, const char *end)
+{
+    while (start < end && isspace((unsigned char)*start)) start++;
+    while (end > start && isspace((unsigned char)*(end - 1))) end--;
+    size_t n = (size_t)(end - start);
+    char *r = malloc(n + 1);
+    memcpy(r, start, n);
+    r[n] = '\0';
+    return r;
+}
+
+static bool parse_macro_call_args(const char *p, const char **out_after, List **out_args)
+{
+    /* p 指向 '(' */
+    if (*p != '(') return false;
+    p++;
+
+    List *args = make_list();
+    const char *arg_start = p;
+    int depth = 0;
+    bool in_str = false, in_chr = false;
+
     while (*p) {
-        if (isalpha((unsigned char)*p) || *p == '_') {
-            int len;
+        char c = *p;
+
+        if (in_str) {
+            if (c == '\\' && p[1]) { p += 2; continue; }
+            if (c == '"') in_str = false;
+            p++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && p[1]) { p += 2; continue; }
+            if (c == '\'') in_chr = false;
+            p++;
+            continue;
+        }
+
+        if (c == '"') { in_str = true; p++; continue; }
+        if (c == '\'') { in_chr = true; p++; continue; }
+
+        if (c == '(') { depth++; p++; continue; }
+        if (c == ')') {
+            if (depth == 0) {
+                char *arg = trim_copy_range(arg_start, p);
+                /* 允许空参数列表：() => args.len==0 */
+                if (!(args->len == 0 && arg[0] == '\0')) {
+                    list_push(args, arg);
+                } else {
+                    free(arg);
+                }
+                p++;
+                if (out_after) *out_after = p;
+                if (out_args) *out_args = args;
+                return true;
+            }
+            depth--;
+            p++;
+            continue;
+        }
+        if (c == ',' && depth == 0) {
+            char *arg = trim_copy_range(arg_start, p);
+            list_push(args, arg);
+            p++;
+            arg_start = p;
+            continue;
+        }
+
+        p++;
+    }
+
+    /* 未闭合 */
+    list_free(args);
+    free(args);
+    return false;
+}
+
+static char *expand_macro_text(PPContext *ctx, const char *text, List *expanding, int depth);
+
+static char *substitute_macro_params(PPContext *ctx, Macro *m, List *args, List *expanding, int depth)
+{
+    if (!m->params) {
+        return strdup(m->body);
+    }
+    String out = make_string();
+    const char *p = m->body;
+
+    while (*p) {
+        if (*p == '"') {
+            string_append(&out, *p++);
+            while (*p) {
+                char c = *p;
+                string_append(&out, c);
+                p++;
+                if (c == '\\' && *p) {
+                    string_append(&out, *p++);
+                    continue;
+                }
+                if (c == '"') break;
+            }
+            continue;
+        }
+        if (*p == '\'') {
+            string_append(&out, *p++);
+            while (*p) {
+                char c = *p;
+                string_append(&out, c);
+                p++;
+                if (c == '\\' && *p) {
+                    string_append(&out, *p++);
+                    continue;
+                }
+                if (c == '\'') break;
+            }
+            continue;
+        }
+
+        if (is_ident_start(*p)) {
+            int len = 0;
             char *ident = pp_get_ident(p, &len);
             if (ident) {
-                Macro *m = get_pp_macro(ctx, ident);
-                if (m && m->type == MACRO_OBJ) {
-                    /* 替换为宏体 */
-                    string_appendf(&result, "%s", m->body);
-                } else {
-                    string_appendf(&result, "%s", ident);
+                bool replaced = false;
+                int idx = 0;
+                for (Iter it = list_iter(m->params); !iter_end(it); idx++) {
+                    char *param = iter_next(&it);
+                    if (param && strcmp(param, ident) == 0) {
+                        char *arg = (char *)list_get(args, idx);
+                        if (!arg) arg = "";
+                        char *expanded_arg = expand_macro_text(ctx, arg, expanding, depth + 1);
+                        string_appendf(&out, "%s", expanded_arg);
+                        free(expanded_arg);
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    string_appendf(&out, "%s", ident);
                 }
                 free(ident);
                 p += len;
                 continue;
             }
         }
-        string_append(&result, *p);
+
+        string_append(&out, *p);
         p++;
     }
-    
-    return strdup(get_cstring(result));
+
+    return string_steal(&out);
+}
+
+static char *expand_macro_text(PPContext *ctx, const char *text, List *expanding, int depth)
+{
+    if (!text) return strdup("");
+    if (depth > 64) return strdup(text);
+
+    String out = make_string();
+    const char *p = text;
+
+    while (*p) {
+        /* 处理跨行块注释状态 */
+        if (ctx->in_block_comment) {
+            const char *q = strstr(p, "*/");
+            if (!q) {
+                string_appendf(&out, "%s", p);
+                return string_steal(&out);
+            }
+            /* 输出到 */
+            while (p < q + 2) string_append(&out, *p++);
+            ctx->in_block_comment = false;
+            continue;
+        }
+
+        /* 行注释 */
+        if (p[0] == '/' && p[1] == '/') {
+            string_appendf(&out, "%s", p);
+            return string_steal(&out);
+        }
+        /* 块注释开始 */
+        if (p[0] == '/' && p[1] == '*') {
+            const char *q = strstr(p + 2, "*/");
+            if (!q) {
+                ctx->in_block_comment = true;
+                string_appendf(&out, "%s", p);
+                return string_steal(&out);
+            }
+            while (p < q + 2) string_append(&out, *p++);
+            continue;
+        }
+
+        /* 字符串/字符常量：不展开 */
+        if (*p == '"') {
+            string_append(&out, *p++);
+            while (*p) {
+                char c = *p;
+                string_append(&out, c);
+                p++;
+                if (c == '\\' && *p) {
+                    string_append(&out, *p++);
+                    continue;
+                }
+                if (c == '"') break;
+            }
+            continue;
+        }
+        if (*p == '\'') {
+            string_append(&out, *p++);
+            while (*p) {
+                char c = *p;
+                string_append(&out, c);
+                p++;
+                if (c == '\\' && *p) {
+                    string_append(&out, *p++);
+                    continue;
+                }
+                if (c == '\'') break;
+            }
+            continue;
+        }
+
+        if (is_ident_start(*p)) {
+            int len = 0;
+            char *ident = pp_get_ident(p, &len);
+            if (ident) {
+                Macro *m = get_pp_macro(ctx, ident);
+                if (!m || list_contains_cstr(expanding, ident)) {
+                    string_appendf(&out, "%s", ident);
+                    free(ident);
+                    p += len;
+                    continue;
+                }
+
+                /* 对象式宏 */
+                if (m->type == MACRO_OBJ) {
+                    List *next_expanding = make_list();
+                    /* 复制 expanding */
+                    for (Iter it = list_iter(expanding); !iter_end(it);) {
+                        char *v = iter_next(&it);
+                        list_push(next_expanding, strdup(v));
+                    }
+                    list_push(next_expanding, strdup(ident));
+
+                    char *expanded_body = expand_macro_text(ctx, m->body, next_expanding, depth + 1);
+                    string_appendf(&out, "%s", expanded_body);
+
+                    free(expanded_body);
+                    list_free(next_expanding);
+                    free(next_expanding);
+                    free(ident);
+                    p += len;
+                    continue;
+                }
+
+                /* 函数式宏：识别调用 */
+                const char *q = p + len;
+                while (*q && isspace((unsigned char)*q)) q++;
+                if (*q != '(') {
+                    string_appendf(&out, "%s", ident);
+                    free(ident);
+                    p += len;
+                    continue;
+                }
+
+                const char *after = NULL;
+                List *args = NULL;
+                if (!parse_macro_call_args(q, &after, &args)) {
+                    /* 解析失败：当作普通标识符输出 */
+                    string_appendf(&out, "%s", ident);
+                    free(ident);
+                    p += len;
+                    continue;
+                }
+
+                int nparams = m->params ? m->params->len : 0;
+                int nargs = args ? args->len : 0;
+                if (nparams != nargs) {
+                    /* 参数不匹配：保守起见不展开 */
+                    /* 输出原始调用文本 */
+                    while (p < after) string_append(&out, *p++);
+                    free(ident);
+                    list_free(args);
+                    free(args);
+                    continue;
+                }
+
+                List *next_expanding = make_list();
+                for (Iter it = list_iter(expanding); !iter_end(it);) {
+                    char *v = iter_next(&it);
+                    list_push(next_expanding, strdup(v));
+                }
+                list_push(next_expanding, strdup(ident));
+
+                char *substed = substitute_macro_params(ctx, m, args, next_expanding, depth + 1);
+                char *expanded = expand_macro_text(ctx, substed, next_expanding, depth + 1);
+                string_appendf(&out, "%s", expanded);
+
+                free(expanded);
+                free(substed);
+                list_free(next_expanding);
+                free(next_expanding);
+                list_free(args);
+                free(args);
+                free(ident);
+
+                p = after;
+                continue;
+            }
+        }
+
+        string_append(&out, *p);
+        p++;
+    }
+
+    return string_steal(&out);
+}
+
+/* 展开宏 - 支持对象式/函数式、递归展开、并跳过字符串/注释区域 */
+static char *expand_macro_simple(PPContext *ctx, const char *line)
+{
+    List *expanding = make_list();
+    char *r = expand_macro_text(ctx, line, expanding, 0);
+    list_free(expanding);
+    free(expanding);
+    return r;
 }
 
 /* 获取目录部分（不含末尾的/）*/
@@ -627,7 +1030,7 @@ char *pp_read_line(PPContext *ctx)
     }
     
     while (ctx->input) {
-        char *line = read_line_from_file(ctx->input);
+        char *line = read_logical_line(ctx, ctx->input);
         if (!line) {
             /* 当前文件结束，弹出 */
             pp_pop_file(ctx);
