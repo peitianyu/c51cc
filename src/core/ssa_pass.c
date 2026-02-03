@@ -258,6 +258,146 @@ static bool pass_const_fold(Func *f, Stats *s) {
 }
 #undef CASE_BIN
 
+/*---------- 复制传播 ----------*/
+static bool is_copy_instr(const Instr *i) {
+    if (!i) return false;
+    /* trunc, zext, sext 作为复制操作 */
+    if (i->op == IROP_TRUNC || i->op == IROP_ZEXT || i->op == IROP_SEXT) {
+        return i->args && i->args->len == 1;
+    }
+    return false;
+}
+
+static bool pass_copy_prop(Func *f, Stats *s) {
+    bool changed = false;
+    /* 第一遍：收集所有复制指令 y = copy(x) */
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (is_copy_instr(i)) {
+                ValueName src = get_arg(i, 0);
+                /* 避免循环依赖：检查源是否也是复制 */
+                Instr *src_def = find_def_instr(f, src);
+                while (src_def && is_copy_instr(src_def)) {
+                    src = get_arg(src_def, 0);
+                    src_def = find_def_instr(f, src);
+                }
+                /* 将当前指令的目的地映射到最终的源 */
+                if (src != i->dest) {
+                    /* 替换所有使用 i->dest 的地方为 src */
+                    for (Iter kt = list_iter(f->blocks); !iter_end(kt);) {
+                        Block *bb = iter_next(&kt);
+                        /* 替换普通指令 */
+                        for (Iter lt = list_iter(bb->instrs); !iter_end(lt);) {
+                            Instr *use = iter_next(&lt);
+                            if (use->args) {
+                                for (int idx = 0; idx < use->args->len; ++idx) {
+                                    ValueName *arg = list_get(use->args, idx);
+                                    if (*arg == i->dest) {
+                                        *arg = src;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        /* 替换 PHI 节点 */
+                        for (Iter lt = list_iter(bb->phis); !iter_end(lt);) {
+                            Instr *phi = iter_next(&lt);
+                            if (phi->args) {
+                                for (int idx = 0; idx < phi->args->len; ++idx) {
+                                    ValueName *arg = list_get(phi->args, idx);
+                                    if (*arg == i->dest) {
+                                        *arg = src;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (changed) {
+                        /* 将此指令转为 NOP，后续DCE会删除 */
+                        i->op = IROP_NOP;
+                        ++s->fold;
+                    }
+                }
+            }
+        }
+    }
+    return changed;
+}
+
+/*---------- 公共常量合并 (Common Subexpression Elimination for const) ----------*/
+static bool pass_const_merge(Func *f, Stats *s) {
+    bool changed = false;
+    /* 使用简单数组记录常量：最多支持64个不同的常量值 */
+    #define MAX_CONSTS 64
+    int64_t const_vals[MAX_CONSTS];
+    ValueName const_names[MAX_CONSTS];
+    int const_count = 0;
+    
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i->op != IROP_CONST) continue;
+            
+            int64_t val = i->imm.ival;
+            /* 查找是否已有相同值的常量 */
+            int found_idx = -1;
+            for (int k = 0; k < const_count; k++) {
+                if (const_vals[k] == val) {
+                    found_idx = k;
+                    break;
+                }
+            }
+            
+            if (found_idx >= 0) {
+                /* 已经有相同的常量，替换所有使用当前指令dest的地方 */
+                ValueName existing = const_names[found_idx];
+                for (Iter kt = list_iter(f->blocks); !iter_end(kt);) {
+                    Block *bb = iter_next(&kt);
+                    /* 替换普通指令 */
+                    for (Iter lt = list_iter(bb->instrs); !iter_end(lt);) {
+                        Instr *use = iter_next(&lt);
+                        if (use->args) {
+                            for (int idx = 0; idx < use->args->len; ++idx) {
+                                ValueName *arg = list_get(use->args, idx);
+                                if (*arg == i->dest) {
+                                    *arg = existing;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    /* 替换 PHI 节点 */
+                    for (Iter lt = list_iter(bb->phis); !iter_end(lt);) {
+                        Instr *phi = iter_next(&lt);
+                        if (phi->args) {
+                            for (int idx = 0; idx < phi->args->len; ++idx) {
+                                ValueName *arg = list_get(phi->args, idx);
+                                if (*arg == i->dest) {
+                                    *arg = existing;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                /* 将此指令转为 NOP，后续DCE会删除 */
+                i->op = IROP_NOP;
+                ++s->fold;
+            } else if (const_count < MAX_CONSTS) {
+                /* 记录这个常量 */
+                const_vals[const_count] = val;
+                const_names[const_count] = i->dest;
+                const_count++;
+            }
+        }
+    }
+    return changed;
+}
+
 /*---------- 只读全局常量折叠 ----------*/
 static bool pass_global_load(Func *f, Stats *s) {
     bool changed = false;
@@ -288,40 +428,110 @@ static bool pass_local_opts(Func *f, Stats *s) {
         for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
             Instr *i = iter_next(&jt);
             if (!i || !i->args) continue;
-            /* 1. 代数 */
-            if (i->args->len >= 1) {
-                ValueName a = get_arg(i, 0), b = i->args->len >= 2 ? get_arg(i, 1) : 0;
-                if ((i->op == IROP_SUB || i->op == IROP_XOR) && a == b) {
+            /* 1. 代数：x - x = 0, x ^ x = 0 */
+            if (i->args->len >= 2) {
+                ValueName a = get_arg(i, 0), bv = get_arg(i, 1);
+                if ((i->op == IROP_SUB || i->op == IROP_XOR) && a == bv) {
                     i->op = IROP_CONST; i->imm.ival = 0;
+                    list_clear(i->args);
                     ++s->fold; changed = true; continue;
                 }
-                if ((i->op == IROP_AND || i->op == IROP_OR) && a == b) {
+            }
+            /* 2. 代数：x & x = x, x | x = x */
+            if (i->args->len >= 2) {
+                ValueName a = get_arg(i, 0), bv = get_arg(i, 1);
+                if ((i->op == IROP_AND || i->op == IROP_OR) && a == bv) {
                     /* replace with a */
+                    i->op = IROP_TRUNC; /* 使用TRUNC作为identity/copy操作 */
                     list_clear(i->args);
                     ValueName *p = pass_alloc(sizeof *p); *p = a;
                     list_push(i->args, p);
                     ++s->fold; changed = true; continue;
                 }
             }
-            /* 2. 比较链  ne (eq x,0),0 -> x */
-            if (i->op == IROP_NE && i->args->len == 2) {
+            /* 3. 代数简化扩展：x+0=x, x*1=x, x*0=0等 */
+            if (i->args->len >= 1) {
+                ValueName a = get_arg(i, 0);
+                int64_t b_val = 0;
+                bool has_b = false;
+                if (i->args->len >= 2) {
+                    has_b = get_const_value(f, get_arg(i, 1), &b_val);
+                }
+                
+                /* x + 0 = x, x - 0 = x */
+                if ((i->op == IROP_ADD || i->op == IROP_SUB) && has_b && b_val == 0) {
+                    i->op = IROP_TRUNC; /* copy */
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = a;
+                    list_push(i->args, p);
+                    ++s->fold; changed = true; continue;
+                }
+                /* x * 1 = x, x / 1 = x */
+                if ((i->op == IROP_MUL || i->op == IROP_DIV) && has_b && b_val == 1) {
+                    i->op = IROP_TRUNC; /* copy */
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = a;
+                    list_push(i->args, p);
+                    ++s->fold; changed = true; continue;
+                }
+                /* x * 0 = 0, 0 * x = 0 */
+                if (i->op == IROP_MUL && has_b && b_val == 0) {
+                    i->op = IROP_CONST; i->imm.ival = 0;
+                    list_clear(i->args);
+                    ++s->fold; changed = true; continue;
+                }
+                /* x << 0 = x, x >> 0 = x */
+                if ((i->op == IROP_SHL || i->op == IROP_SHR) && has_b && b_val == 0) {
+                    i->op = IROP_TRUNC; /* copy */
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = a;
+                    list_push(i->args, p);
+                    ++s->fold; changed = true; continue;
+                }
+                /* x & 0 = 0, 0 & x = 0 */
+                if (i->op == IROP_AND && has_b && b_val == 0) {
+                    i->op = IROP_CONST; i->imm.ival = 0;
+                    list_clear(i->args);
+                    ++s->fold; changed = true; continue;
+                }
+                /* x & -1 = x (全部置位), x | 0 = x, x ^ 0 = x */
+                if ((i->op == IROP_AND && has_b && b_val == -1) ||
+                    (i->op == IROP_OR && has_b && b_val == 0) ||
+                    (i->op == IROP_XOR && has_b && b_val == 0)) {
+                    i->op = IROP_TRUNC; /* copy */
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = a;
+                    list_push(i->args, p);
+                    ++s->fold; changed = true; continue;
+                }
+            }
+            /* 4. 比较链优化：ne (gt x, y), 0 -> gt x, y
+                     ne (lt x, y), 0 -> lt x, y
+                     ne (eq x, y), 0 -> ne x, y */
+            if ((i->op == IROP_NE || i->op == IROP_EQ) && i->args->len == 2) {
                 ValueName a = get_arg(i, 0), b = get_arg(i, 1);
                 Instr *db = find_def_instr(f, b);
+                /* 检查 b 是否为 const 0 */
                 if (db && db->op == IROP_CONST && db->imm.ival == 0) {
                     Instr *da = find_def_instr(f, a);
-                    if (da && da->op == IROP_EQ && da->args->len == 2) {
-                        Instr *dz = find_def_instr(f, get_arg(da, 1));
-                        if (dz && dz->op == IROP_CONST && dz->imm.ival == 0) {
+                    if (da && (da->op == IROP_GT || da->op == IROP_LT ||
+                               da->op == IROP_GE || da->op == IROP_LE ||
+                               da->op == IROP_EQ || da->op == IROP_NE)) {
+                        /* 比较操作已经是0/1结果，ne v, 0 或 eq v, 1 可以简化 */
+                        if (i->op == IROP_NE) {
+                            /* ne (cmp x y), 0 -> trunc (cmp x y) */
+                            i->op = IROP_TRUNC;
                             list_clear(i->args);
-                            ValueName *p = pass_alloc(sizeof *p); *p = get_arg(da, 0);
+                            ValueName *p = pass_alloc(sizeof *p); *p = a;
                             list_push(i->args, p);
-                            i->op = IROP_TRUNC; /* bool cast */
                             ++s->fold; changed = true; continue;
                         }
                     }
                 }
             }
-            /* 3. br trunc 消除 */
+            /* 5. 复制传播：trunc x -> 如果x只有一个用户，可以替换 */
+            /* 已经在其他优化中处理 */
+            /* 6. br trunc 消除 */
             if (i->op == IROP_BR && i->args->len >= 1) {
                 Instr *c = find_def_instr(f, get_arg(i, 0));
                 if (c && c->op == IROP_TRUNC && c->args->len >= 1) {
@@ -344,8 +554,10 @@ void ssa_optimize_func(Func *f, int level) {
     int it = 0;
     do {
         changed  = pass_const_fold(f, &st);
+        changed |= pass_const_merge(f, &st); /* 新增：公共常量合并 */
         changed |= pass_global_load(f, &st);
         changed |= pass_local_opts(f, &st);
+        changed |= pass_copy_prop(f, &st);   /* 新增：复制传播 */
         changed |= pass_phi(f, &st);
         changed |= pass_dce(f, &st);
     } while (changed && ++it < 10);
