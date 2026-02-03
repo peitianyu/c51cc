@@ -70,24 +70,24 @@
 //     return sum;
 // }
 
-// 测试位运算
-int bit_operations(int x, int y) {
-    int and_result = x & y;
-    int or_result = x | y;
-    int xor_result = x ^ y;
-    int shift_left = x << 2;
-    int shift_right = y >> 1;
-    return (and_result + or_result) ^ (xor_result | shift_left) & shift_right;
-}
+// // 测试位运算
+// int bit_operations(int x, int y) {
+//     int and_result = x & y;
+//     int or_result = x | y;
+//     int xor_result = x ^ y;
+//     int shift_left = x << 2;
+//     int shift_right = y >> 1;
+//     return (and_result + or_result) ^ (xor_result | shift_left) & shift_right;
+// }
 
-// // // 测试递归（简单阶乘）
-// // int factorial(int n) {
-// //     if (n <= 1) {
-// //         return 1;
-// //     } else {
-// //         return n * factorial(n - 1);
-// //     }
-// // }
+// 测试递归（简单阶乘）
+int factorial(int n) {
+    if (n <= 1) {
+        return 1;
+    } else {
+        return n * factorial(n - 1);
+    }
+}
 
 // // 测试多个返回路径
 // int multi_return(int x) {

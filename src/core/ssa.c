@@ -1436,8 +1436,14 @@ static void gen_func(SSABuild *b, Ast *ast) {
         gen_stmt(b, ast->body);
     }
     
+    // 只在当前块不为空或有前驱时才添加默认ret
+    // 避免在死块（如if语句的merge块）中添加不必要的ret
     if (b->cur_block && !f->is_noreturn) {
-        ssa_build_ret(b, 0);
+        bool has_preds = b->cur_block->preds && b->cur_block->preds->len > 0;
+        bool has_instrs = b->cur_block->instrs && b->cur_block->instrs->len > 0;
+        if (has_preds || has_instrs) {
+            ssa_build_ret(b, 0);
+        }
     }
 }
 
@@ -1779,6 +1785,14 @@ static void ssa_print_func(FILE *fp, Func *f) {
     
     for (int j = 0; j < f->blocks->len; j++) {
         Block *blk = list_get(f->blocks, j);
+        // 跳过空死块：无前驱且无指令的块（除了第一个块）
+        bool is_first = (j == 0);
+        bool has_preds = blk->preds && blk->preds->len > 0;
+        bool has_instrs = (blk->phis && blk->phis->len > 0) ||
+                          (blk->instrs && blk->instrs->len > 0);
+        if (!is_first && !has_preds && !has_instrs) {
+            continue; // 跳过空死块
+        }
         fprintf(fp, "\n  .b%d:\n", blk->id);
         
         for (int i = 0; i < blk->phis->len; i++) {
