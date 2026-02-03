@@ -243,14 +243,8 @@ static bool pass_const_fold(Func *f, Stats *s) {
                 }
                 continue;
             case IROP_RET:
-                if (i->args->len >= 1) {
-                    Instr *v = find_def_instr(f, get_arg(i, 0));
-                    if (v && v->op == IROP_CONST) {
-                        i->imm.ival = v->imm.ival;
-                        list_clear(i->args);
-                        ++s->fold; changed = true;
-                    }
-                }
+                // 保持 ret 指令的标准格式，不进行常量折叠优化
+                // ret 指令应该始终引用虚拟寄存器，保持 SSA 格式的一致性
                 continue;
             default: break;
             }

@@ -404,7 +404,7 @@ char *token_to_string(const Token tok)
 
 #include "minitest.h"
 
-TEST(test, verbose) {
+TEST(test, ast) {
     char infile[256];
     printf("file path: ");
     if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))

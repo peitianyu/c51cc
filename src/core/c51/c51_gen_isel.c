@@ -1015,22 +1015,8 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         break;
     }
     case IROP_RET:
-        // 检查是否是优化后的格式（args 为空但有 imm 值）
-        if (!ins->args || ins->args->len == 0) {
-            // 优化后的 ret const
-            int const_val = ins->imm.ival;
-            if (func && func->ret_type && func->ret_type->size >= 2) {
-                char buf0[16], buf1[16];
-                snprintf(buf0, sizeof(buf0), "#%d", const_val & 0xFF);
-                snprintf(buf1, sizeof(buf1), "#%d", (const_val >> 8) & 0xFF);
-                emit_ins2(sec, "mov", "0x82", buf0);
-                emit_ins2(sec, "mov", "0x83", buf1);
-            } else {
-                char buf[16];
-                snprintf(buf, sizeof(buf), "#%d", const_val & 0xFF);
-                emit_ins2(sec, "mov", "A", buf);
-            }
-        } else if (ins->args && ins->args->len > 0) {
+        // ret 指令应该始终有参数（虚拟寄存器引用），不再使用 ret const 格式
+        if (ins->args && ins->args->len > 0) {
             ValueName v = *(ValueName *)list_get(ins->args, 0);
             
             if (func && func->ret_type && func->ret_type->size >= 2) {

@@ -1799,11 +1799,8 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
         break;
     }
     case IROP_RET: {
-        // 检查是否是优化后的格式：无参数但有 imm 值
-        if (i->args->len == 0) {
-            fprintf(fp, "ret const %ld", i->imm.ival);
-        } else {
-            fprintf(fp, "ret");
+        fprintf(fp, "ret");
+        if (i->args->len >= 1) {
             ValueName *v = list_get(i->args, 0);
             fprintf(fp, " v%d", *v);
         }
