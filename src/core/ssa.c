@@ -105,6 +105,8 @@ static void ssa_add_pred(Block *blk, Block *pred) {
 
 void ssa_build_write(SSABuild *b, const char *var, ValueName val) {
     if (!b->cur_block) return;
+    // 先删除已存在的条目，避免dict_get返回旧值
+    dict_remove(b->cur_block->var_map, (char*)var);
     ValueName *p = ssa_alloc(sizeof(ValueName));
     *p = val;
     dict_put(b->cur_block->var_map, ssa_strdup(var), p);
@@ -129,8 +131,22 @@ static ValueName ssa_try_remove_trivial_phi(SSABuild *b, Instr *phi);
 static ValueName ssa_read_recursive(SSABuild *b, const char *var, Block *blk) {
     ValueName val;
     
-    if (!blk->sealed) {
-        // 未密封：创建不完整Phi
+    // 检查var_map中是否已有值（可能是之前创建的phi占位符）
+    ValueName *existing = dict_get(blk->var_map, (char*)var);
+    if (existing) {
+        return *existing;
+    }
+    
+    // 单前驱：直接读取前驱，不创建phi（即使未密封）
+    if (blk->preds->len == 1) {
+        Block *pred = list_get(blk->preds, 0);
+        Block *saved = b->cur_block;
+        b->cur_block = pred;
+        val = ssa_build_read(b, var);
+        b->cur_block = saved;
+    }
+    else if (!blk->sealed) {
+        // 多前驱且未密封：创建不完整Phi
         Instr *phi = ssa_make_instr(b, IROP_PHI);
         phi->dest = ssa_new_value(b);
         ssa_emit(b, phi);
@@ -142,13 +158,7 @@ static ValueName ssa_read_recursive(SSABuild *b, const char *var, Block *blk) {
         
         ssa_build_write(b, var, phi->dest);
         val = phi->dest;
-    } 
-    else if (blk->preds->len == 1) {
-        // 单前驱：直接读取
-        Block *pred = list_get(blk->preds, 0);
-        ValueName *p = dict_get(pred->var_map, (char*)var);
-        val = p ? *p : 0;
-    } 
+    }
     else {
         // 多前驱：创建Phi
         Instr *phi = ssa_make_instr(b, IROP_PHI);
@@ -227,16 +237,15 @@ static void ssa_build_seal(SSABuild *b, Block *blk) {
     if (!blk || blk->sealed) return;
     blk->sealed = true;
     
+    // 第一轮：处理所有前驱都已sealed的phi，跳过未sealed前驱的phi
+    // 这些会在对应的前驱sealed后被处理
     for (Iter it = list_iter(blk->incomplete); !iter_end(it);) {
         IncompletePhi *inc = iter_next(&it);
         
         for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
             Instr *phi = iter_next(&jt);
             if (phi->dest == inc->phi && phi->args->len == 0) {
-                ValueName result = ssa_add_phi_operands(b, inc->var, phi, blk);
-                if (result != phi->dest) {
-                    ssa_build_write(b, inc->var, result);
-                }
+                ssa_add_phi_operands(b, inc->var, phi, blk);
                 break;
             }
         }
@@ -1260,10 +1269,16 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         Block *header = ssa_build_block(b);
         Block *body = ssa_build_block(b);
         Block *exit = ssa_build_block(b);
+        Block *entry = b->cur_block;
         
         ssa_build_jmp(b, header);
         ssa_build_position(b, header);
+        
+        // 关键：预先添加body作为header的前驱
+        // 这样读取条件时就知道是循环头，会创建phi节点
+        ssa_add_pred(header, body);
 
+        // 处理条件
         if (ast->while_cond && ast->while_cond->type == AST_LITERAL) {
             if (ast->while_cond->ival)
                 ssa_build_jmp(b, body);
@@ -1282,10 +1297,12 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         ssa_build_pop_cf(b);
         
         ssa_build_jmp(b, header);
+        // 先seal body，让body中的最终值确定
         ssa_build_seal(b, body);
+        // 再seal header，这样header的phi可以正确读取body的最终值
+        ssa_build_seal(b, header);
         
         ssa_build_position(b, exit);
-        ssa_build_seal(b, header);
         ssa_build_seal(b, exit);
         break;
     }
@@ -1300,6 +1317,10 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         
         ssa_build_jmp(b, header);
         ssa_build_position(b, header);
+        
+        // 关键：预先添加body和step作为header的前驱
+        ssa_add_pred(header, body);
+        ssa_add_pred(header, step);
 
         if (!ast->forcond) {
             ssa_build_jmp(b, body);
@@ -1322,14 +1343,15 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         ssa_build_jmp(b, step);
         
         ssa_build_position(b, step);
-        if (ast->forstep) gen_expr(b, ast->forstep);
+        if (ast->forstep) gen_stmt(b, ast->forstep);
         ssa_build_jmp(b, header);
         
+        // 按正确顺序seal：先seal body和step，再seal header
         ssa_build_seal(b, body);
         ssa_build_seal(b, step);
+        ssa_build_seal(b, header);
         
         ssa_build_position(b, exit);
-        ssa_build_seal(b, header);
         ssa_build_seal(b, exit);
         break;
     }
