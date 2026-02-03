@@ -53,11 +53,11 @@
 //     return i;
 // }
 
-// 测试复杂表达式和类型转换
-int complex_expr(int a, int b, int c) {
-    int result = (a > b) ? ((c > 0) ? a + c : b - c) : ((a + b) * c);
-    return result;
-}
+// // 测试复杂表达式和类型转换
+// int complex_expr(int a, int b, int c) {
+//     int result = (a > b) ? ((c > 0) ? a + c : b - c) : ((a + b) * c);
+//     return result;
+// }
 
 // // 测试指针和数组
 // int array_sum(int arr[], int n) {
@@ -70,15 +70,15 @@ int complex_expr(int a, int b, int c) {
 //     return sum;
 // }
 
-// // 测试位运算
-// int bit_operations(int x, int y) {
-//     int and_result = x & y;
-//     int or_result = x | y;
-//     int xor_result = x ^ y;
-//     int shift_left = x << 2;
-//     int shift_right = y >> 1;
-//     return (and_result + or_result) ^ (xor_result | shift_left) & shift_right;
-// }
+// 测试位运算
+int bit_operations(int x, int y) {
+    int and_result = x & y;
+    int or_result = x | y;
+    int xor_result = x ^ y;
+    int shift_left = x << 2;
+    int shift_right = y >> 1;
+    return (and_result + or_result) ^ (xor_result | shift_left) & shift_right;
+}
 
 // // // 测试递归（简单阶乘）
 // // int factorial(int n) {

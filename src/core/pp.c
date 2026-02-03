@@ -975,6 +975,11 @@ static char *read_physical_line(InputFile *f)
         int len = strlen(f->buf);
         if (len > 0 && f->buf[len - 1] == '\n') {
             f->buf[len - 1] = '\0';
+            len--;
+        }
+        // 处理 Windows 换行符 \r\n
+        if (len > 0 && f->buf[len - 1] == '\r') {
+            f->buf[len - 1] = '\0';
         }
         return f->buf;
     }

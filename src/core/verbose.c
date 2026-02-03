@@ -313,6 +313,12 @@ static void ast_to_string_int(String *buf, Ast *ast)
     case '|':
         binop_to_string(buf, "|", ast);
         break;
+    case PUNCT_LSHIFT:
+        binop_to_string(buf, "<<", ast);
+        break;
+    case PUNCT_RSHIFT:
+        binop_to_string(buf, ">>", ast);
+        break;
     default: {
         char *left = ast_to_string(ast->left);
         char *right = ast_to_string(ast->right);
