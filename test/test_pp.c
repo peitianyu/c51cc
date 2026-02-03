@@ -391,6 +391,50 @@ int test_multiline_macro() {
 }
 
 /*=============================*
+ * 二十一、#if / #elif 常量表达式测试
+ *=============================*/
+
+#define IF_MACRO_VAL 3
+
+#if 0
+int if_expr_a = 1000;
+#elif 1
+int if_expr_a = 10;
+#else
+int if_expr_a = 2000;
+#endif
+
+#if (1 + 2 * 3) == 7
+int if_expr_b = 1;
+#else
+int if_expr_b = 0;
+#endif
+
+#if IF_MACRO_VAL > 2
+int if_expr_c = 5;
+#else
+int if_expr_c = 0;
+#endif
+
+#if defined(DEBUG_MODE)
+int if_expr_d = 7;
+#else
+int if_expr_d = 0;
+#endif
+
+#if defined(UNDEFINED_MACRO)
+int if_expr_e = 100;
+#elif defined(UNDEFINED_MACRO2)
+int if_expr_e = 200;
+#else
+int if_expr_e = 3;
+#endif
+
+int test_if_elif_expr() {
+    return if_expr_a + if_expr_b + if_expr_c + if_expr_d + if_expr_e;
+}
+
+/*=============================*
  * 十六、综合测试函数
  *=============================*/
 
@@ -416,6 +460,7 @@ int test_all_pp_features() {
     result = result + test_nested_macro_expand();
     result = result + test_do_while_0_macro();
     result = result + test_multiline_macro();
+    result = result + test_if_elif_expr();
     
     return result;
 }

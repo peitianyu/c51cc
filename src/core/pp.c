@@ -61,12 +61,20 @@ static bool is_pp_macro(PPContext *ctx, const char *name);
 static Macro *get_pp_macro(PPContext *ctx, const char *name);
 void pp_undef(PPContext *ctx, const char *name);
 static bool handle_ifdef(PPContext *ctx, const char *args, bool is_ifndef);
+static bool handle_if(PPContext *ctx, const char *args);
+static bool handle_elif(PPContext *ctx, const char *args);
 static bool handle_else(PPContext *ctx, const char *args);
 static bool handle_endif(PPContext *ctx, const char *args);
 static char *expand_macro_simple(PPContext *ctx, const char *line);
 static bool should_skip(PPContext *ctx);
 
 static bool pp_remove_macro_entry(PPContext *ctx, const char *name, Macro **out_macro);
+
+/* helpers (defined later) */
+static inline bool is_ident_start(char c);
+static inline bool is_ident_char(char c);
+static inline char *string_steal(String *s);
+static bool list_contains_cstr(List *list, const char *s);
 
 /* 创建宏定义 - name 会被 dict entry 引用，Macro 内部不单独存储 name */
 static Macro *macro_create(const char *name, MacroType type, const char *body)
@@ -274,6 +282,16 @@ static bool should_skip(PPContext *ctx)
     return false;
 }
 
+/* 检查父级条件块是否正在跳过（不包含栈顶自身） */
+static bool should_skip_parent(PPContext *ctx)
+{
+    if (!ctx || !ctx->cond_stack) return false;
+    for (CondState *s = ctx->cond_stack->next; s; s = s->next) {
+        if (!s->active) return true;
+    }
+    return false;
+}
+
 /* 进入条件块 */
 static void cond_push(PPContext *ctx, bool active)
 {
@@ -300,6 +318,406 @@ static void cond_else(PPContext *ctx)
     if (!s) return;
     s->active = !s->taken;
     s->taken = true;
+}
+
+/* ===== #if/#elif 常量表达式求值 ===== */
+typedef enum {
+    PP_TOK_END,
+    PP_TOK_NUM,
+    PP_TOK_IDENT,
+    PP_TOK_OP,
+} PPExprTokType;
+
+typedef struct {
+    PPExprTokType type;
+    long num;
+    char ident[128];
+    char op[3];
+} PPExprTok;
+
+typedef struct {
+    const char *p;
+    PPExprTok cur;
+    PPContext *ctx;
+} PPExprLexer;
+
+static void pp_expr_next(PPExprLexer *lx)
+{
+    const char *p = lx->p;
+    while (*p && isspace((unsigned char)*p)) p++;
+
+    lx->cur.type = PP_TOK_END;
+    lx->cur.num = 0;
+    lx->cur.ident[0] = '\0';
+    lx->cur.op[0] = '\0';
+
+    if (!*p) {
+        lx->p = p;
+        lx->cur.type = PP_TOK_END;
+        return;
+    }
+
+    if (isdigit((unsigned char)*p)) {
+        char *endp = NULL;
+        long v = strtol(p, &endp, 0);
+        lx->cur.type = PP_TOK_NUM;
+        lx->cur.num = v;
+        lx->p = endp;
+        return;
+    }
+
+    if (is_ident_start(*p)) {
+        int i = 0;
+        while (*p && is_ident_char(*p) && i < (int)sizeof(lx->cur.ident) - 1) {
+            lx->cur.ident[i++] = *p++;
+        }
+        lx->cur.ident[i] = '\0';
+        lx->cur.type = PP_TOK_IDENT;
+        lx->p = p;
+        return;
+    }
+
+    /* 多字符运算符 */
+    if ((p[0] == '|' && p[1] == '|') || (p[0] == '&' && p[1] == '&') ||
+        (p[0] == '<' && p[1] == '<') || (p[0] == '>' && p[1] == '>') ||
+        (p[0] == '<' && p[1] == '=') || (p[0] == '>' && p[1] == '=') ||
+        (p[0] == '=' && p[1] == '=') || (p[0] == '!' && p[1] == '=')) {
+        lx->cur.type = PP_TOK_OP;
+        lx->cur.op[0] = p[0];
+        lx->cur.op[1] = p[1];
+        lx->cur.op[2] = '\0';
+        lx->p = p + 2;
+        return;
+    }
+
+    /* 单字符运算符/括号 */
+    lx->cur.type = PP_TOK_OP;
+    lx->cur.op[0] = *p;
+    lx->cur.op[1] = '\0';
+    lx->p = p + 1;
+}
+
+static bool pp_tok_is_op(PPExprLexer *lx, const char *op)
+{
+    return lx->cur.type == PP_TOK_OP && strcmp(lx->cur.op, op) == 0;
+}
+
+static long pp_parse_expr(PPExprLexer *lx);
+
+static long pp_parse_primary(PPExprLexer *lx)
+{
+    if (lx->cur.type == PP_TOK_NUM) {
+        long v = lx->cur.num;
+        pp_expr_next(lx);
+        return v;
+    }
+
+    if (lx->cur.type == PP_TOK_IDENT && strcmp(lx->cur.ident, "defined") == 0) {
+        /* defined X / defined(X) */
+        pp_expr_next(lx);
+        bool paren = false;
+        if (pp_tok_is_op(lx, "(")) {
+            paren = true;
+            pp_expr_next(lx);
+        }
+        if (lx->cur.type != PP_TOK_IDENT) {
+            error("Expected identifier after defined");
+        }
+        bool v = is_pp_macro(lx->ctx, lx->cur.ident);
+        pp_expr_next(lx);
+        if (paren) {
+            if (!pp_tok_is_op(lx, ")")) error("Expected ')' after defined(...)");
+            pp_expr_next(lx);
+        }
+        return v ? 1 : 0;
+    }
+
+    if (lx->cur.type == PP_TOK_IDENT) {
+        /* 未定义标识符按 0 处理（宏在预展开阶段会被替换掉） */
+        pp_expr_next(lx);
+        return 0;
+    }
+
+    if (pp_tok_is_op(lx, "(")) {
+        pp_expr_next(lx);
+        long v = pp_parse_expr(lx);
+        if (!pp_tok_is_op(lx, ")")) error("Expected ')' in #if expression");
+        pp_expr_next(lx);
+        return v;
+    }
+
+    error("Unexpected token in #if expression");
+    return 0;
+}
+
+static long pp_parse_unary(PPExprLexer *lx)
+{
+    if (pp_tok_is_op(lx, "+")) { pp_expr_next(lx); return +pp_parse_unary(lx); }
+    if (pp_tok_is_op(lx, "-")) { pp_expr_next(lx); return -pp_parse_unary(lx); }
+    if (pp_tok_is_op(lx, "!")) { pp_expr_next(lx); return !pp_parse_unary(lx); }
+    if (pp_tok_is_op(lx, "~")) { pp_expr_next(lx); return ~pp_parse_unary(lx); }
+    return pp_parse_primary(lx);
+}
+
+static long pp_parse_mul(PPExprLexer *lx)
+{
+    long v = pp_parse_unary(lx);
+    while (pp_tok_is_op(lx, "*") || pp_tok_is_op(lx, "/") || pp_tok_is_op(lx, "%")) {
+        char op0 = lx->cur.op[0];
+        pp_expr_next(lx);
+        long r = pp_parse_unary(lx);
+        if (op0 == '*') v = v * r;
+        else if (op0 == '/') {
+            if (r == 0) error("Division by zero in #if expression");
+            v = v / r;
+        } else {
+            if (r == 0) error("Modulo by zero in #if expression");
+            v = v % r;
+        }
+    }
+    return v;
+}
+
+static long pp_parse_add(PPExprLexer *lx)
+{
+    long v = pp_parse_mul(lx);
+    while (pp_tok_is_op(lx, "+") || pp_tok_is_op(lx, "-")) {
+        char op0 = lx->cur.op[0];
+        pp_expr_next(lx);
+        long r = pp_parse_mul(lx);
+        v = (op0 == '+') ? (v + r) : (v - r);
+    }
+    return v;
+}
+
+static long pp_parse_shift(PPExprLexer *lx)
+{
+    long v = pp_parse_add(lx);
+    while (pp_tok_is_op(lx, "<<") || pp_tok_is_op(lx, ">>")) {
+        bool is_shl = (lx->cur.op[0] == '<');
+        pp_expr_next(lx);
+        long r = pp_parse_add(lx);
+        v = is_shl ? (v << r) : (v >> r);
+    }
+    return v;
+}
+
+static long pp_parse_rel(PPExprLexer *lx)
+{
+    long v = pp_parse_shift(lx);
+    while (pp_tok_is_op(lx, "<") || pp_tok_is_op(lx, ">") || pp_tok_is_op(lx, "<=") || pp_tok_is_op(lx, ">=")) {
+        char op1 = lx->cur.op[0];
+        bool eq = (lx->cur.op[1] == '=');
+        pp_expr_next(lx);
+        long r = pp_parse_shift(lx);
+        if (op1 == '<') v = eq ? (v <= r) : (v < r);
+        else v = eq ? (v >= r) : (v > r);
+        v = v ? 1 : 0;
+    }
+    return v;
+}
+
+static long pp_parse_eq(PPExprLexer *lx)
+{
+    long v = pp_parse_rel(lx);
+    while (pp_tok_is_op(lx, "==") || pp_tok_is_op(lx, "!=")) {
+        bool neq = (lx->cur.op[0] == '!');
+        pp_expr_next(lx);
+        long r = pp_parse_rel(lx);
+        v = neq ? (v != r) : (v == r);
+        v = v ? 1 : 0;
+    }
+    return v;
+}
+
+static long pp_parse_bitand(PPExprLexer *lx)
+{
+    long v = pp_parse_eq(lx);
+    while (pp_tok_is_op(lx, "&")) {
+        pp_expr_next(lx);
+        long r = pp_parse_eq(lx);
+        v = v & r;
+    }
+    return v;
+}
+
+static long pp_parse_bitxor(PPExprLexer *lx)
+{
+    long v = pp_parse_bitand(lx);
+    while (pp_tok_is_op(lx, "^")) {
+        pp_expr_next(lx);
+        long r = pp_parse_bitand(lx);
+        v = v ^ r;
+    }
+    return v;
+}
+
+static long pp_parse_bitor(PPExprLexer *lx)
+{
+    long v = pp_parse_bitxor(lx);
+    while (pp_tok_is_op(lx, "|")) {
+        pp_expr_next(lx);
+        long r = pp_parse_bitxor(lx);
+        v = v | r;
+    }
+    return v;
+}
+
+static long pp_parse_logand(PPExprLexer *lx)
+{
+    long v = pp_parse_bitor(lx);
+    while (pp_tok_is_op(lx, "&&")) {
+        pp_expr_next(lx);
+        long r = pp_parse_bitor(lx);
+        v = (v && r) ? 1 : 0;
+    }
+    return v;
+}
+
+static long pp_parse_logor(PPExprLexer *lx)
+{
+    long v = pp_parse_logand(lx);
+    while (pp_tok_is_op(lx, "||")) {
+        pp_expr_next(lx);
+        long r = pp_parse_logand(lx);
+        v = (v || r) ? 1 : 0;
+    }
+    return v;
+}
+
+static long pp_parse_expr(PPExprLexer *lx)
+{
+    return pp_parse_logor(lx);
+}
+
+static char *pp_expand_macros_for_if(PPContext *ctx, const char *args, List *expanding, int depth)
+{
+    if (!args) return strdup("");
+    if (depth > 32) return strdup(args);
+
+    String out = make_string();
+    const char *p = args;
+    bool expecting_defined_operand = false;
+
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+
+        if (is_ident_start(*p)) {
+            int len = 0;
+            char *ident = pp_get_ident(p, &len);
+            if (!ident) break;
+
+            if (strcmp(ident, "defined") == 0) {
+                string_appendf(&out, "defined ");
+                expecting_defined_operand = true;
+                free(ident);
+                p += len;
+                continue;
+            }
+
+            if (expecting_defined_operand) {
+                string_appendf(&out, "%s ", ident);
+                expecting_defined_operand = false;
+                free(ident);
+                p += len;
+                continue;
+            }
+
+            if (list_contains_cstr(expanding, ident)) {
+                string_appendf(&out, "%s ", ident);
+                free(ident);
+                p += len;
+                continue;
+            }
+
+            Macro *m = get_pp_macro(ctx, ident);
+            if (m && m->type == MACRO_OBJ) {
+                List *next_expanding = make_list();
+                for (Iter it = list_iter(expanding); !iter_end(it);) {
+                    char *v = iter_next(&it);
+                    list_push(next_expanding, strdup(v));
+                }
+                list_push(next_expanding, strdup(ident));
+
+                const char *body = m->body ? m->body : "";
+                const char *b = skip_space(body);
+                if (!*b) {
+                    string_appendf(&out, "0 ");
+                } else {
+                    char *expanded_body = pp_expand_macros_for_if(ctx, body, next_expanding, depth + 1);
+                    string_appendf(&out, "( %s ) ", expanded_body);
+                    free(expanded_body);
+                }
+
+                list_free(next_expanding);
+                free(next_expanding);
+            } else {
+                string_appendf(&out, "%s ", ident);
+            }
+
+            free(ident);
+            p += len;
+            continue;
+        }
+
+        /* 操作符/括号 */
+        if (p[0] == '(') {
+            string_appendf(&out, "( ");
+            if (expecting_defined_operand) {
+                /* defined( ... ) 仍在等待 ident */
+            }
+            p++;
+            continue;
+        }
+        if (p[0] == ')') {
+            string_appendf(&out, ") ");
+            p++;
+            continue;
+        }
+
+        /* 多字符运算符优先 */
+        if ((p[0] == '|' && p[1] == '|') || (p[0] == '&' && p[1] == '&') ||
+            (p[0] == '<' && p[1] == '<') || (p[0] == '>' && p[1] == '>') ||
+            (p[0] == '<' && p[1] == '=') || (p[0] == '>' && p[1] == '=') ||
+            (p[0] == '=' && p[1] == '=') || (p[0] == '!' && p[1] == '=')) {
+            string_appendf(&out, "%c%c ", p[0], p[1]);
+            p += 2;
+            continue;
+        }
+
+        if (isdigit((unsigned char)*p)) {
+            char *endp = NULL;
+            long v = strtol(p, &endp, 0);
+            string_appendf(&out, "%ld ", v);
+            p = endp;
+            continue;
+        }
+
+        /* 单字符 */
+        string_appendf(&out, "%c ", *p);
+        p++;
+    }
+
+    return string_steal(&out);
+}
+
+static long pp_eval_if_expr(PPContext *ctx, const char *args)
+{
+    List *expanding = make_list();
+    char *expanded = pp_expand_macros_for_if(ctx, args, expanding, 0);
+    list_free(expanding);
+    free(expanding);
+
+    PPExprLexer lx = {.p = expanded, .ctx = ctx};
+    pp_expr_next(&lx);
+    long v = pp_parse_expr(&lx);
+    if (lx.cur.type != PP_TOK_END) {
+        /* 允许尾随空白，但不允许额外 token */
+        error("Trailing tokens in #if expression: '%s'", expanded);
+    }
+    free(expanded);
+    return v;
 }
 
 /* 打开文件 */
@@ -964,16 +1382,62 @@ static bool handle_ifdef(PPContext *ctx, const char *args, bool is_ifndef)
     return true;
 }
 
+/* 处理#if */
+static bool handle_if(PPContext *ctx, const char *args)
+{
+    long v = pp_eval_if_expr(ctx, args);
+    bool active = (v != 0);
+    cond_push(ctx, active && !should_skip(ctx));
+    return true;
+}
+
+/* 处理#elif */
+static bool handle_elif(PPContext *ctx, const char *args)
+{
+    if (!ctx->cond_stack) {
+        error("#elif without #if");
+        return false;
+    }
+
+    CondState *s = ctx->cond_stack;
+    if (s->taken) {
+        s->active = false;
+        return true;
+    }
+
+    if (should_skip_parent(ctx)) {
+        s->active = false;
+        return true;
+    }
+
+    long v = pp_eval_if_expr(ctx, args);
+    s->active = (v != 0);
+    if (s->active) s->taken = true;
+    return true;
+}
+
 /* 处理#else */
 static bool handle_else(PPContext *ctx, const char *args)
 {
+    if (!ctx->cond_stack) {
+        error("#else without #if");
+        return false;
+    }
     cond_else(ctx);
+    /* 外层不激活时，#else 也不能激活 */
+    if (should_skip_parent(ctx)) {
+        ctx->cond_stack->active = false;
+    }
     return true;
 }
 
 /* 处理#endif */
 static bool handle_endif(PPContext *ctx, const char *args)
 {
+    if (!ctx->cond_stack) {
+        error("#endif without #if");
+        return false;
+    }
     cond_pop(ctx);
     return true;
 }
@@ -1004,6 +1468,10 @@ static bool handle_directive(PPContext *ctx, const char *line)
         if (!should_skip(ctx)) {
             handle_undef(ctx, args);
         }
+    } else if (strcmp(directive, "if") == 0) {
+        handle_if(ctx, args);
+    } else if (strcmp(directive, "elif") == 0) {
+        handle_elif(ctx, args);
     } else if (strcmp(directive, "ifdef") == 0) {
         handle_ifdef(ctx, args, false);
     } else if (strcmp(directive, "ifndef") == 0) {
