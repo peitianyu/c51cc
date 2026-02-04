@@ -1,7 +1,5 @@
 #include "c51_gen.h"
 
-extern ObjFile *c51_link(List *objs);
-
 /* === Entry point === */
 ObjFile *c51_gen_from_ssa(void *ssa)
 {
@@ -145,7 +143,7 @@ ObjFile *c51_gen_from_ssa(void *ssa)
             list_push(objs, aobj);
         }
 
-        ObjFile *out = c51_link(objs);
+        ObjFile *out = obj_link(objs);
 
         /* 输入 objs 的生命周期到此结束 */
         for (Iter oit = list_iter(objs); !iter_end(oit);) {
@@ -167,43 +165,40 @@ ObjFile *c51_gen_from_ssa(void *ssa)
 #ifdef MINITEST_IMPLEMENTATION
 #include "../minitest.h"
 
-TEST(test, c51_gen) {
-    char infile[256];
-    printf("file path for C51 gen test: ");
-    if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
-        puts("open fail"), exit(1);
-
-    /* 避免下一行 asm 输出粘连在提示后面 */
-    fflush(stdout);
-    putchar('\n');
-
-    set_current_filename(infile);
+static ObjFile *compile_one(const char *path) {
+    freopen(path, "r", stdin);
+    set_current_filename(path);
 
     SSABuild *b = ssa_build_create();
-    List *toplevels = read_toplevels();
-    for (Iter i = list_iter(toplevels); !iter_end(i);) {
-        Ast *v = iter_next(&i);
-        printf("ast %s\n", ast_to_string(v));
-        ssa_convert_ast(b, v);
-    }
-
+    List *tops = read_toplevels();
+    for (Iter i = list_iter(tops); !iter_end(i);)
+        ssa_convert_ast(b, iter_next(&i));
     ssa_optimize(b->unit, OPT_O1);
-
-    ObjFile *obj = c51_gen_from_ssa(b->unit);
-    Section *code_sec = NULL;
-    for (Iter it = list_iter(obj->sections); !iter_end(it);) {
-        Section *sec = iter_next(&it);
-        if (sec && sec->kind == SEC_CODE) { code_sec = sec; break; }
-    }
-    if (code_sec && code_sec->asminstrs) {
-        for (Iter it = list_iter(code_sec->asminstrs); !iter_end(it);)
-            (void)iter_next(&it);
-    }
-    c51_write_asm(stdout, obj);
-
-    objfile_free(obj);
+    ssa_print(stdout, b->unit);
+    ObjFile *o = c51_gen_from_ssa(b->unit);
     ssa_build_destroy(b);
     list_free(strings);
     list_free(ctypes);
+    return o;
+}
+
+TEST(test, c51_gen) {
+    char f[256];
+    fgets(f, sizeof f, stdin);
+    *strchr(f, '\n') = 0;
+    c51_write_asm(stdout, compile_one(f));
+}
+
+TEST(test, c51_link) {
+    char f[256];
+    List *o = make_list();
+    while (fgets(f, sizeof f, stdin)) {
+        *strchr(f, '\n') = 0;
+        if (!*f) break;
+        list_push(o, compile_one(f));
+    }
+    ObjFile *out = obj_link(o);
+    c51_write_asm(stdout, out);
+    c51_write_hex(stdout, out);
 }
 #endif

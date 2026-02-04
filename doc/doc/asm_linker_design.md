@@ -184,14 +184,14 @@ ObjFile 示例（JSON）：
 9) 【已完成】链接器：段布局 + 重定位回填 + 输出 ASM/HEX。
 
 ### 9.1 测试约定
-- c51_gen/c51_link 的测试通过输入源码文件路径进行验证（参考 ssa_pass）。
+- c51_gen/obj_link 的测试通过输入源码文件路径进行验证（参考 ssa_pass）。
 - 测试直接输出 ASM/HEX 到 stdout 便于前端查看。
 
 ### 9.2 实现单（逐项推进）
 1) 【已完成】真实机器码编码：为核心指令建立 8051 opcode/寻址模式表，并替换占位 `.db`。
-  - 测试：运行 c51_gen/c51_link，验证 ASM 与 HEX。
+  - 测试：运行 c51_gen/obj_link，验证 ASM 与 HEX。
 2) 【已完成】线性扫描寄存器分配：live interval + spill 到 DATA 栈，处理间接寻址约束。
-  - 测试：构造高寄存器压力样例并运行 c51_gen/c51_link。
+  - 测试：构造高寄存器压力样例并运行 c51_gen/obj_link。
 3) 【已完成】调用约定完善：参数溢出到栈、caller-save、返回值协议。
   - 测试：函数多参数/嵌套调用样例。
 4) 【已完成】有符号比较与位移降级：补齐 `LT/LE/GT/GE` 的符号语义与算术右移。
@@ -210,7 +210,7 @@ ObjFile 示例（JSON）：
 ### 9.3 测试指令（当前约定）
 测试指令参考: wsl -d test bash -lc "set -e; cd /mnt/d/ws/test/C51CC; printf '2\ntest/test_c51.c\n' | ./build.sh" 
 - c51_gen：输入源码路径后选择测试编号 1。
-- c51_link：输入源码路径后选择测试编号 2。
+- obj_link：输入源码路径后选择测试编号 2。
 - 示例：test/test_all.c 或 test/test_c51.c。
 - 完整样例：wsl -d test bash -lc "set -e; cd /mnt/d/ws/test/C51CC; printf '2\ntest/test_c51_full.c\n' | ./build.sh"
 - 多文件输入：依次输入多个源码路径，以空行结束。
@@ -241,7 +241,7 @@ ObjFile 示例（JSON）：
   - 打印器：从 ObjFile 输出可回读的 ASM（含段、可见性、标签、数据）。
   - 不负责：链接时布局与回填。
 
-- c51_link.c：链接器
+- obj_link.c：链接器
   - 输入：多个 ObjFile。
   - 负责：段合并与布局、符号最终地址、重定位回填、HEX 输出。
   - 依赖：c51_obj 的基础结构与收集接口。
