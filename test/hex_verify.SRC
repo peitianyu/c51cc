@@ -1,0 +1,227 @@
+; hex_verify.SRC generated from: hex_verify.c
+; COMPILER INVOKED BY:
+;        C:\Keil_v5\C51\BIN\C51.exe hex_verify.c SRC
+
+$NOMOD51
+
+NAME	HEX_VERIFY
+
+P1	DATA	090H
+TI	BIT	098H.1
+SBUF	DATA	099H
+SCON	DATA	098H
+TMOD	DATA	089H
+TH1	DATA	08DH
+TL1	DATA	08BH
+TR1	DATA	08EH
+?PR?_putc?HEX_VERIFY SEGMENT CODE 
+?PR?_puts?HEX_VERIFY SEGMENT CODE 
+?DT?_puts?HEX_VERIFY SEGMENT DATA OVERLAYABLE 
+?PR?uart_init?HEX_VERIFY                 SEGMENT CODE 
+?PR?delay?HEX_VERIFY SEGMENT CODE 
+?PR?main?HEX_VERIFY  SEGMENT CODE 
+?CO?HEX_VERIFY       SEGMENT CODE 
+	EXTRN	CODE (?C?CLDPTR)
+	EXTRN	CODE (?C_STARTUP)
+	PUBLIC	main
+	PUBLIC	delay
+	PUBLIC	uart_init
+	PUBLIC	_puts
+	PUBLIC	_putc
+
+	RSEG  ?DT?_puts?HEX_VERIFY
+?_puts?BYTE:
+          s?141:   DS   3
+
+	RSEG  ?CO?HEX_VERIFY
+?SC_0:
+	DB  'h' ,'e' ,'l' ,'l' ,'o' ,' ' ,'C' ,'5' ,'1' ,000H
+
+; sfr P1 = 0x90;
+; sfr  SCON  = 0x98;
+; sbit  TI    = 0x99;
+; sfr  SBUF  = 0x99;
+; sfr  TMOD  = 0x89;
+; sfr  TH1   = 0x8D;
+; sfr  TL1   = 0x8B;
+; sfr  TR1   = 0x8E;
+; 
+; 
+; void putc(char c)
+
+	RSEG  ?PR?_putc?HEX_VERIFY
+_putc:
+			; SOURCE LINE # 11
+;---- Variable 'c?040' assigned to Register 'R7' ----
+; {
+			; SOURCE LINE # 12
+;     SBUF = c;
+			; SOURCE LINE # 13
+	MOV  	SBUF,R7
+?C0001:
+;     while (!TI);     
+			; SOURCE LINE # 14
+	JNB  	TI,?C0001
+;     TI = 0;
+			; SOURCE LINE # 15
+	CLR  	TI
+; }
+			; SOURCE LINE # 16
+	RET  	
+; END OF _putc
+
+; 
+; void puts(char *s)
+
+	RSEG  ?PR?_puts?HEX_VERIFY
+_puts:
+	USING	0
+			; SOURCE LINE # 18
+	MOV  	s?141,R3
+	MOV  	s?141+01H,R2
+	MOV  	s?141+02H,R1
+; {
+			; SOURCE LINE # 19
+?C0004:
+;     while (*s) putc(*s++);
+			; SOURCE LINE # 20
+	MOV  	R3,s?141
+	MOV  	R2,s?141+01H
+	MOV  	R1,s?141+02H
+	LCALL	?C?CLDPTR
+	JZ   	?C0006
+	INC  	s?141+02H
+	MOV  	A,s?141+02H
+	JNZ  	?C0020
+	INC  	s?141+01H
+?C0020:
+	DEC  	A
+	MOV  	R1,A
+	LCALL	?C?CLDPTR
+	MOV  	R7,A
+	LCALL	_putc
+	SJMP 	?C0004
+; }
+			; SOURCE LINE # 21
+?C0006:
+	RET  	
+; END OF _puts
+
+; 
+; void uart_init(void)
+
+	RSEG  ?PR?uart_init?HEX_VERIFY
+uart_init:
+			; SOURCE LINE # 23
+; {
+			; SOURCE LINE # 24
+;     TMOD |= 0x20;      
+			; SOURCE LINE # 25
+	ORL  	TMOD,#020H
+;     TH1 = TL1 = 0xFD;
+			; SOURCE LINE # 26
+	MOV  	TL1,#0FDH
+	MOV  	TH1,#0FDH
+;     TR1 = 1;           
+			; SOURCE LINE # 27
+	MOV  	TR1,#01H
+;     SCON = 0x50;      
+			; SOURCE LINE # 28
+	MOV  	SCON,#050H
+; }
+			; SOURCE LINE # 29
+	RET  	
+; END OF uart_init
+
+; 
+; void delay()
+
+	RSEG  ?PR?delay?HEX_VERIFY
+delay:
+	USING	0
+			; SOURCE LINE # 31
+; {
+			; SOURCE LINE # 32
+;     int i, j;
+; 
+;     for (i=0; i<1000; i++)
+			; SOURCE LINE # 35
+;---- Variable 'i?342' assigned to Register 'R6/R7' ----
+	CLR  	A
+	MOV  	R7,A
+	MOV  	R6,A
+?C0008:
+;     for (j=0; j<500; j++);
+			; SOURCE LINE # 36
+;---- Variable 'j?343' assigned to Register 'R4/R5' ----
+	CLR  	A
+	MOV  	R5,A
+	MOV  	R4,A
+?C0011:
+	INC  	R5
+	CJNE 	R5,#00H,?C0021
+	INC  	R4
+?C0021:
+	CJNE 	R4,#01H,?C0011
+	CJNE 	R5,#0F4H,?C0011
+?C0010:
+	INC  	R7
+	CJNE 	R7,#00H,?C0022
+	INC  	R6
+?C0022:
+	CJNE 	R6,#03H,?C0008
+	CJNE 	R7,#0E8H,?C0008
+; }
+			; SOURCE LINE # 37
+?C0014:
+	RET  	
+; END OF delay
+
+; 
+; void main(void)
+
+	RSEG  ?PR?main?HEX_VERIFY
+main:
+	USING	0
+			; SOURCE LINE # 39
+; {
+			; SOURCE LINE # 40
+;     uart_init();
+			; SOURCE LINE # 41
+	LCALL	uart_init
+;     puts("hello C51");
+			; SOURCE LINE # 42
+	MOV  	R3,#0FFH
+	MOV  	R2,#HIGH (?SC_0)
+	MOV  	R1,#LOW (?SC_0)
+	LCALL	_puts
+; 
+;     P1 = 0x00;
+			; SOURCE LINE # 44
+	CLR  	A
+	MOV  	P1,A
+?C0015:
+; 
+;     while (1)
+			; SOURCE LINE # 46
+;     {
+			; SOURCE LINE # 47
+;         P1 = 0x00;
+			; SOURCE LINE # 48
+	CLR  	A
+	MOV  	P1,A
+;         delay();
+			; SOURCE LINE # 49
+	LCALL	delay
+;         P1 = 0xff;
+			; SOURCE LINE # 50
+	MOV  	P1,#0FFH
+;         delay();
+			; SOURCE LINE # 51
+	LCALL	delay
+;     }
+			; SOURCE LINE # 52
+	SJMP 	?C0015
+; END OF main
+
+	END
