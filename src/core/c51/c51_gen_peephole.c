@@ -221,6 +221,7 @@ void peephole_section_asminstrs(Section *sec)
             if (reg_eq(op, "add")) {
                 AsmInstr *inc = gen_instr_new("inc");
                 gen_instr_add_arg(inc, "A");
+                gen_instr_copy_ssa(inc, cur);
                 list_push(out, inc);
             }
             free_asminstr(cur); continue;
@@ -238,6 +239,7 @@ void peephole_section_asminstrs(Section *sec)
             if (inv) {
                 AsmInstr *j = gen_instr_new(inv);
                 gen_instr_add_arg(j, list_get(nxt->args, 0));
+                gen_instr_copy_ssa(j, cur);
                 list_push(out, j);
                 free_asminstr(cur); free_asminstr(nxt); ++i; continue;
             }
@@ -251,6 +253,7 @@ void peephole_section_asminstrs(Section *sec)
             reg_eq(list_get(cur->args, 2), list_get(nnxt->args, 0))) {
             AsmInstr *j = gen_instr_new("jz");
             gen_instr_add_arg(j, list_get(nxt->args, 0));
+            gen_instr_copy_ssa(j, cur);
             list_push(out, j);
             free_asminstr(cur); free_asminstr(nxt); ++i; continue;
         }

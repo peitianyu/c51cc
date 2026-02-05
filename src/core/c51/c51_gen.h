@@ -32,6 +32,7 @@ extern Dict *g_val_type;
 extern Dict *g_v16_map;
 extern int g_v16_next;
 extern int g_lower_id;
+extern char *g_pending_ssa;
 
 /* === Core utilities === */
 void *gen_alloc(size_t size);
@@ -41,6 +42,9 @@ char *gen_strdup(const char *s);
 const char *vreg(ValueName v);
 AsmInstr *gen_instr_new(const char *op);
 void gen_instr_add_arg(AsmInstr *ins, const char *arg);
+void gen_instr_copy_ssa(AsmInstr *dst, const AsmInstr *src);
+void gen_set_pending_ssa(char *ssa);
+void gen_clear_pending_ssa(void);
 void emit_ins0(Section *sec, const char *op);
 void emit_ins1(Section *sec, const char *op, const char *a0);
 void emit_ins2(Section *sec, const char *op, const char *a0, const char *a1);

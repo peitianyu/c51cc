@@ -64,6 +64,7 @@ typedef struct {
 typedef struct {
 	char *op;
 	List *args; /* List<char*> */
+	char *ssa;  /* SSA comment (optional) */
 } AsmInstr;
 
 typedef struct {

@@ -224,6 +224,7 @@ static AsmInstr *asm_instr_new(const char *op)
     AsmInstr *ins = asm_alloc(sizeof(AsmInstr));
     ins->op = asm_strdup(op);
     ins->args = make_list();
+    ins->ssa = NULL;
     return ins;
 }
 
@@ -586,6 +587,9 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
                         fprintf(fp, "%s%s", first ? "" : ", ", arg ? arg : "");
                         first = 0;
                     }
+                }
+                if (ins->ssa && ins->ssa[0] != '\0') {
+                    fprintf(fp, " ; %s", ins->ssa);
                 }
                 fprintf(fp, "\n");
                 printed_any = true;

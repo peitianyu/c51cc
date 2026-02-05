@@ -1,5 +1,35 @@
 #include "c51_gen.h"
 
+char *g_pending_ssa = NULL;
+
+void gen_set_pending_ssa(char *ssa)
+{
+    if (g_pending_ssa) {
+        free(g_pending_ssa);
+    }
+    g_pending_ssa = ssa;
+}
+
+void gen_clear_pending_ssa(void)
+{
+    if (g_pending_ssa) {
+        free(g_pending_ssa);
+        g_pending_ssa = NULL;
+    }
+}
+
+void gen_instr_copy_ssa(AsmInstr *dst, const AsmInstr *src)
+{
+    if (!dst) return;
+    if (dst->ssa) {
+        free(dst->ssa);
+        dst->ssa = NULL;
+    }
+    if (src && src->ssa) {
+        dst->ssa = gen_strdup(src->ssa);
+    }
+}
+
 /* === Asm instruction builders === */
 const char *vreg(ValueName v)
 {
@@ -15,6 +45,7 @@ AsmInstr *gen_instr_new(const char *op)
     AsmInstr *ins = gen_alloc(sizeof(AsmInstr));
     ins->op = gen_strdup(op);
     ins->args = make_list();
+    ins->ssa = NULL;
     return ins;
 }
 
@@ -27,6 +58,10 @@ void gen_instr_add_arg(AsmInstr *ins, const char *arg)
 void emit_ins0(Section *sec, const char *op)
 {
     AsmInstr *ins = gen_instr_new(op);
+    if (g_pending_ssa) {
+        ins->ssa = g_pending_ssa;
+        g_pending_ssa = NULL;
+    }
     list_push(sec->asminstrs, ins);
 }
 
@@ -34,6 +69,10 @@ void emit_ins1(Section *sec, const char *op, const char *a0)
 {
     AsmInstr *ins = gen_instr_new(op);
     gen_instr_add_arg(ins, a0);
+    if (g_pending_ssa) {
+        ins->ssa = g_pending_ssa;
+        g_pending_ssa = NULL;
+    }
     list_push(sec->asminstrs, ins);
 }
 
@@ -42,6 +81,10 @@ void emit_ins2(Section *sec, const char *op, const char *a0, const char *a1)
     AsmInstr *ins = gen_instr_new(op);
     gen_instr_add_arg(ins, a0);
     gen_instr_add_arg(ins, a1);
+    if (g_pending_ssa) {
+        ins->ssa = g_pending_ssa;
+        g_pending_ssa = NULL;
+    }
     list_push(sec->asminstrs, ins);
 }
 
@@ -51,6 +94,10 @@ void emit_ins3(Section *sec, const char *op, const char *a0, const char *a1, con
     gen_instr_add_arg(ins, a0);
     gen_instr_add_arg(ins, a1);
     gen_instr_add_arg(ins, a2);
+    if (g_pending_ssa) {
+        ins->ssa = g_pending_ssa;
+        g_pending_ssa = NULL;
+    }
     list_push(sec->asminstrs, ins);
 }
 
@@ -68,6 +115,7 @@ void free_asminstr(AsmInstr *ins)
         free(ins->args);
     }
     free(ins->op);
+    free(ins->ssa);
     free(ins);
 }
 

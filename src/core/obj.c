@@ -44,6 +44,7 @@ static void free_section(Section *sec)
                 free(ins->args);
             }
             free(ins->op);
+            free(ins->ssa);
             free(ins);
         }
         free(sec->asminstrs);

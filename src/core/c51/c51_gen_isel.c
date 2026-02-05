@@ -29,6 +29,285 @@ static void strip_comment_inplace(char *s)
     }
 }
 
+static const char *addrspace_str(Ctype *type)
+{
+    if (!type) return NULL;
+    int data = get_attr(type->attr).ctype_data;
+    switch (data) {
+    case 1: return "data";
+    case 2: return "idata";
+    case 3: return "pdata";
+    case 4: return "xdata";
+    case 5: return "edata";
+    case 6: return "code";
+    default: return NULL;
+    }
+}
+
+static void fmt_block_label(const char *lbl, char *out, size_t n)
+{
+    if (!out || n == 0) return;
+    if (lbl && strncmp(lbl, "block", 5) == 0) {
+        int id = atoi(lbl + 5);
+        snprintf(out, n, "b%d", id);
+    } else {
+        snprintf(out, n, "%s", lbl ? lbl : "<null>");
+    }
+}
+
+static bool get_arg_val(const Instr *ins, int idx, ValueName *out)
+{
+    if (!ins || !ins->args || idx < 0 || idx >= ins->args->len) return false;
+    ValueName *p = list_get(ins->args, idx);
+    if (!p) return false;
+    if (out) *out = *p;
+    return true;
+}
+
+static const char *get_label_at(const Instr *ins, int idx)
+{
+    if (!ins || !ins->labels || idx < 0 || idx >= ins->labels->len) return NULL;
+    return (const char *)list_get(ins->labels, idx);
+}
+
+static bool has_imm_tag(const Instr *ins)
+{
+    const char *tag = get_label_at(ins, 0);
+    return tag && strcmp(tag, "imm") == 0;
+}
+
+static char *format_ssa_instr(const Instr *ins)
+{
+    if (!ins) return NULL;
+    char buf[512];
+    size_t off = 0;
+    if (ins->dest > 0)
+        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "v%d = ", ins->dest);
+
+    switch (ins->op) {
+    case IROP_NOP:
+        snprintf(buf, sizeof(buf), "nop");
+        break;
+    case IROP_PARAM: {
+        const char *pname = get_label_at(ins, 0);
+        snprintf(buf + off, sizeof(buf) - off, "param %s", pname ? pname : "<null>");
+        break;
+    }
+    case IROP_CONST:
+        snprintf(buf + off, sizeof(buf) - off, "const %ld", (long)ins->imm.ival);
+        break;
+    case IROP_NEG: {
+        ValueName a;
+        if (get_arg_val(ins, 0, &a))
+            snprintf(buf + off, sizeof(buf) - off, "neg v%d", a);
+        else
+            snprintf(buf + off, sizeof(buf) - off, "neg <null>");
+        break;
+    }
+    case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
+    case IROP_AND: case IROP_OR: case IROP_XOR: {
+        const char *op_str = (ins->op == IROP_ADD) ? "add" :
+                             (ins->op == IROP_SUB) ? "sub" :
+                             (ins->op == IROP_MUL) ? "mul" :
+                             (ins->op == IROP_DIV) ? "div" :
+                             (ins->op == IROP_MOD) ? "mod" :
+                             (ins->op == IROP_AND) ? "and" :
+                             (ins->op == IROP_OR)  ? "or"  : "xor";
+        ValueName a, b;
+        if (get_arg_val(ins, 0, &a))
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
+        else
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
+        if (has_imm_tag(ins)) {
+            snprintf(buf + off, sizeof(buf) - off, ", const %ld", (long)ins->imm.ival);
+            break;
+        }
+        if (get_arg_val(ins, 1, &b))
+            snprintf(buf + off, sizeof(buf) - off, ", v%d", b);
+        break;
+    }
+    case IROP_NOT: case IROP_LNOT: {
+        const char *op_str = (ins->op == IROP_NOT) ? "not" : "lnot";
+        ValueName a;
+        if (get_arg_val(ins, 0, &a))
+            snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
+        else
+            snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
+        break;
+    }
+    case IROP_SHL: case IROP_SHR: {
+        const char *op_str = (ins->op == IROP_SHL) ? "shl" : "shr";
+        ValueName a, b;
+        if (get_arg_val(ins, 0, &a))
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
+        else
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
+        if (has_imm_tag(ins)) {
+            snprintf(buf + off, sizeof(buf) - off, ", const %ld", (long)ins->imm.ival);
+            break;
+        }
+        if (get_arg_val(ins, 1, &b))
+            snprintf(buf + off, sizeof(buf) - off, ", v%d", b);
+        break;
+    }
+    case IROP_EQ: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: case IROP_NE: {
+        const char *op_str = (ins->op == IROP_EQ) ? "eq" :
+                             (ins->op == IROP_LT) ? "lt" :
+                             (ins->op == IROP_GT) ? "gt" :
+                             (ins->op == IROP_LE) ? "le" :
+                             (ins->op == IROP_GE) ? "ge" : "ne";
+        ValueName a, b;
+        if (get_arg_val(ins, 0, &a))
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
+        else
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
+        if (has_imm_tag(ins)) {
+            snprintf(buf + off, sizeof(buf) - off, ", const %ld", (long)ins->imm.ival);
+            break;
+        }
+        if (get_arg_val(ins, 1, &b))
+            snprintf(buf + off, sizeof(buf) - off, ", v%d", b);
+        break;
+    }
+    case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT:
+    case IROP_BITCAST: case IROP_INTTOPTR: case IROP_PTRTOINT: {
+        const char *op_str = (ins->op == IROP_TRUNC) ? "trunc" :
+                             (ins->op == IROP_ZEXT) ? "zext" :
+                             (ins->op == IROP_SEXT) ? "sext" :
+                             (ins->op == IROP_BITCAST) ? "bitcast" :
+                             (ins->op == IROP_INTTOPTR) ? "inttoptr" : "ptrtoint";
+        ValueName a;
+        if (get_arg_val(ins, 0, &a))
+            snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
+        else
+            snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
+        break;
+    }
+    case IROP_OFFSET: {
+        ValueName a1, a2;
+        if (get_arg_val(ins, 0, &a1) && get_arg_val(ins, 1, &a2))
+            snprintf(buf + off, sizeof(buf) - off, "offset v%d, v%d, #%ld", a1, a2, (long)ins->imm.ival);
+        else
+            snprintf(buf + off, sizeof(buf) - off, "offset <null>");
+        break;
+    }
+    case IROP_SELECT: {
+        ValueName c, t, f;
+        if (get_arg_val(ins, 0, &c) && get_arg_val(ins, 1, &t) && get_arg_val(ins, 2, &f))
+            snprintf(buf + off, sizeof(buf) - off, "select v%d, v%d, v%d", c, t, f);
+        else
+            snprintf(buf + off, sizeof(buf) - off, "select <null>");
+        break;
+    }
+    case IROP_ASM: {
+        const char *t = get_label_at(ins, 0);
+        snprintf(buf + off, sizeof(buf) - off, "asm \"%s\"", t ? t : "");
+        break;
+    }
+    case IROP_LOAD: {
+        ValueName p;
+        if (get_arg_val(ins, 0, &p))
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "load v%d", p);
+        else
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "load <null>");
+        const char *s = addrspace_str(ins->mem_type);
+        if (s)
+            snprintf(buf + off, sizeof(buf) - off, " @%s", s);
+        break;
+    }
+    case IROP_STORE: {
+        const char *label = get_label_at(ins, 0);
+        if (label && label[0] == '@') {
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "store %s, const %ld", label, (long)ins->imm.ival);
+        } else {
+            ValueName p, v;
+            if (get_arg_val(ins, 0, &p) && get_arg_val(ins, 1, &v))
+                off += (size_t)snprintf(buf + off, sizeof(buf) - off, "store v%d, v%d", p, v);
+            else
+                off += (size_t)snprintf(buf + off, sizeof(buf) - off, "store <null>");
+        }
+        {
+            const char *s = addrspace_str(ins->mem_type);
+            if (s)
+                snprintf(buf + off, sizeof(buf) - off, " @%s", s);
+        }
+        break;
+    }
+    case IROP_ADDR: {
+        const char *label = get_label_at(ins, 0);
+        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "addr @%s", label ? label : "<null>");
+        {
+            const char *s = addrspace_str(ins->mem_type);
+            if (s)
+                snprintf(buf + off, sizeof(buf) - off, " @%s", s);
+        }
+        break;
+    }
+    case IROP_PHI: {
+        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "phi ");
+        bool first = true;
+        for (int k = 0; ins->args && k < ins->args->len; ++k) {
+            ValueName v = 0;
+            if (!get_arg_val(ins, k, &v)) continue;
+            if (v == ins->dest) continue;
+            const char *lbl = get_label_at(ins, k);
+            char bbuf[32];
+            fmt_block_label(lbl, bbuf, sizeof(bbuf));
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s[v%d, %s]", first ? "" : ", ", v, bbuf);
+            first = false;
+        }
+        break;
+    }
+    case IROP_JMP: {
+        char bbuf[32];
+        fmt_block_label(get_label_at(ins, 0), bbuf, sizeof(bbuf));
+        snprintf(buf + off, sizeof(buf) - off, "jmp %s", bbuf);
+        break;
+    }
+    case IROP_BR: {
+        ValueName c;
+        char b1[32], b2[32];
+        fmt_block_label(get_label_at(ins, 0), b1, sizeof(b1));
+        fmt_block_label(get_label_at(ins, 1), b2, sizeof(b2));
+        if (get_arg_val(ins, 0, &c))
+            snprintf(buf + off, sizeof(buf) - off, "br v%d, %s, %s", c, b1, b2);
+        else
+            snprintf(buf + off, sizeof(buf) - off, "br <null>, %s, %s", b1, b2);
+        break;
+    }
+    case IROP_CALL: {
+        const char *fname = get_label_at(ins, 0);
+        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "call @%s(", fname ? fname : "<null>");
+        for (int k = 0; ins->args && k < ins->args->len; ++k) {
+            ValueName v;
+            if (!get_arg_val(ins, k, &v)) continue;
+            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s v%d", (k == 0) ? "" : ",", v);
+        }
+        snprintf(buf + off, sizeof(buf) - off, ")");
+        break;
+    }
+    case IROP_RET: {
+        if (ins->args && ins->args->len > 0) {
+            ValueName v;
+            if (get_arg_val(ins, 0, &v))
+                snprintf(buf + off, sizeof(buf) - off, "ret v%d", v);
+            else
+                snprintf(buf + off, sizeof(buf) - off, "ret <null>");
+        } else if (has_imm_tag(ins)) {
+            snprintf(buf + off, sizeof(buf) - off, "ret const %ld", (long)ins->imm.ival);
+        } else {
+            snprintf(buf + off, sizeof(buf) - off, "ret");
+        }
+        break;
+    }
+    default:
+        snprintf(buf + off, sizeof(buf) - off, "op%d", (int)ins->op);
+        break;
+    }
+
+    return gen_strdup(buf);
+}
+
 static void emit_inline_asm_text(Section *sec, const char *text)
 {
     if (!sec || !text) return;
@@ -115,6 +394,9 @@ static void emit_inline_asm_text(Section *sec, const char *text)
 void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
 {
     if (!ins) return;
+    if (ins->op != IROP_NOP) {
+        gen_set_pending_ssa(format_ssa_instr(ins));
+    }
     char buf[64];
     const char *func_name = func ? func->name : NULL;
     if (ins->dest > 0 && ins->type) {
@@ -123,10 +405,12 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
 
     switch (ins->op) {
     case IROP_NOP:
+        gen_clear_pending_ssa();
         return;
     case IROP_ASM: {
         const char *t = (ins->labels && ins->labels->len > 0) ? (char *)list_get(ins->labels, 0) : NULL;
         emit_inline_asm_text(sec, t);
+        gen_clear_pending_ssa();
         return;
     }
     case IROP_PARAM:
@@ -168,6 +452,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                 }
             }
         }
+        gen_clear_pending_ssa();
         return;
     case IROP_CONST:
         if (ins->type && ins->type->size >= 2) {
@@ -918,6 +1203,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                 }
             }
         }
+        gen_clear_pending_ssa();
         return; 
     }
     case IROP_OFFSET: {
@@ -945,6 +1231,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             emit_ins2(sec, "add", "A", "r6");
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
         }
+        gen_clear_pending_ssa();
         return;
     }
     case IROP_LOAD:
@@ -1306,8 +1593,12 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         }
         break;
     case IROP_PHI:
+        gen_clear_pending_ssa();
         return;
     default:
+        gen_clear_pending_ssa();
         return;
     }
+
+    gen_clear_pending_ssa();
 }

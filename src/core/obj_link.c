@@ -189,6 +189,7 @@ ObjFile *obj_link(List *objs)
                     AsmInstr *copy = link_alloc(sizeof(AsmInstr));
                     copy->op = link_strdup(ins->op);
                     copy->args = make_list();
+                    copy->ssa = ins->ssa ? link_strdup(ins->ssa) : NULL;
                     if (ins->args) {
                         for (Iter ait2 = list_iter(ins->args); !iter_end(ait2);) {
                             char *arg = iter_next(&ait2);

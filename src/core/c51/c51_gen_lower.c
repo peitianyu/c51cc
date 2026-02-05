@@ -229,6 +229,7 @@ void lower_section_asminstrs(Section *sec)
                 AsmInstr *i1 = gen_instr_new("mov");
                 gen_instr_add_arg(i1, "A");
                 gen_instr_add_arg(i1, src);
+                gen_instr_copy_ssa(i1, ins);
                 list_push(out, i1);
 
                 AsmInstr *i2 = gen_instr_new("mov");
@@ -243,6 +244,7 @@ void lower_section_asminstrs(Section *sec)
                 AsmInstr *i1 = gen_instr_new("mov");
                 gen_instr_add_arg(i1, "A");
                 gen_instr_add_arg(i1, src);
+                gen_instr_copy_ssa(i1, ins);
                 list_push(out, i1);
 
                 AsmInstr *i2 = gen_instr_new("mov");
