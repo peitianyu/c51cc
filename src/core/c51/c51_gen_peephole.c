@@ -18,6 +18,47 @@ static int reg_no(const char *s)
 static unsigned reg_mask(const char *arg)
 { return reg_bit(reg_no(arg)); }
 
+static bool is_plus_one(const char *base, const char *s)
+{
+    if (!base || !s) return false;
+    size_t blen = strlen(base);
+    if (strncmp(s, base, blen) != 0) return false;
+    return !strcmp(s + blen, "+1");
+}
+
+static bool is_control_barrier(const char *op)
+{
+    if (!op) return false;
+    if (!strcmp(op, ".label")) return true;
+    if (!strcmp(op, "lcall") || !strcmp(op, "acall") ||
+        !strcmp(op, "ret") || !strcmp(op, "reti")) return true;
+    return op[0] == 'j';
+}
+
+static void update_last_imm(const AsmInstr *ins, int *valid, int *value)
+{
+    if (!ins || !ins->op || !ins->args) return;
+    if (is_control_barrier(ins->op)) {
+        for (int r = 0; r < 8; ++r) valid[r] = 0;
+        return;
+    }
+
+    const char *a0 = ins->args->len > 0 ? list_get(ins->args, 0) : NULL;
+    const char *a1 = ins->args->len > 1 ? list_get(ins->args, 1) : NULL;
+    int imm = 0;
+    int rd = a0 ? parse_reg_rn(a0) : -1;
+    if (!strcmp(ins->op, "mov") && rd >= 0 && a1 && parse_immediate(a1, &imm)) {
+        valid[rd] = 1;
+        value[rd] = imm;
+        return;
+    }
+
+    unsigned def = 0, use = 0;
+    reg_use_def(ins, &use, &def);
+    for (int r = 0; r < 8; ++r)
+        if (def & reg_bit(r)) valid[r] = 0;
+}
+
 /* ---------- 1. 指令语义：use/def 集合 ---------- */
 void reg_use_def(const AsmInstr *ins, unsigned *use, unsigned *def)
 {
@@ -127,28 +168,34 @@ void shrink_call_saves(Section *sec)
             }
         }
 
-        /* 向后找 pop（按 r7…r0 顺序）*/
-        int pos = -1;
-        for (int j = i + 1; j < n; ++j) {
-            AsmInstr *p = list_get(sec->asminstrs, j);
-            if (!p || !p->op) continue;
-            if (!strcmp(p->op, "pop") && p->args && p->args->len == 1
-                && parse_reg_rn(list_get(p->args, 0)) == 7) {
-                pop[7] = pos = j; break;
-            }
-            if (!strcmp(p->op, ".label")) break;
+        /* 向后找 pop（按最大寄存器号递减）*/
+        int max_r = -1;
+        for (int r = 7; r >= 0; --r) {
+            if (push[r] >= 0) { max_r = r; break; }
         }
-        if (pos >= 0)
-            for (int r = 6; r >= 0; --r)
-                for (int j = pos + 1; j < n; ++j) {
-                    AsmInstr *p = list_get(sec->asminstrs, j);
-                    if (!p || !p->op) continue;
-                    if (!strcmp(p->op, "pop") && p->args && p->args->len == 1
-                        && parse_reg_rn(list_get(p->args, 0)) == r) {
-                        pop[r] = j; pos = j; break;
-                    }
-                    if (!strcmp(p->op, ".label")) break;
+        int pos = -1;
+        if (max_r >= 0) {
+            for (int j = i + 1; j < n; ++j) {
+                AsmInstr *p = list_get(sec->asminstrs, j);
+                if (!p || !p->op) continue;
+                if (!strcmp(p->op, "pop") && p->args && p->args->len == 1
+                    && parse_reg_rn(list_get(p->args, 0)) == max_r) {
+                    pop[max_r] = pos = j; break;
                 }
+                if (!strcmp(p->op, ".label")) break;
+            }
+            if (pos >= 0)
+                for (int r = max_r - 1; r >= 0; --r)
+                    for (int j = pos + 1; j < n; ++j) {
+                        AsmInstr *p = list_get(sec->asminstrs, j);
+                        if (!p || !p->op) continue;
+                        if (!strcmp(p->op, "pop") && p->args && p->args->len == 1
+                            && parse_reg_rn(list_get(p->args, 0)) == r) {
+                            pop[r] = j; pos = j; break;
+                        }
+                        if (!strcmp(p->op, ".label")) break;
+                    }
+        }
 
         /* 如果寄存器不 live 且 push/pop 都找到了，就删掉它们 */
         for (int r = 0; r < 8; ++r)
@@ -159,6 +206,108 @@ void shrink_call_saves(Section *sec)
                 list_set(sec->asminstrs, pop[r], NULL);
             }
     }
+}
+
+/* ---------- 3. 清理未使用标签 ---------- */
+void remove_unused_labels(Section *sec)
+{
+    if (!sec || !sec->asminstrs || sec->asminstrs->len == 0) return;
+
+    Dict *label_used = make_dict(NULL);
+
+    /* 合并连续空标签：L1: L2: → 将对 L1 的引用改为 L2 */
+    Dict *alias = make_dict(NULL);
+    for (int i = 0; i + 1 < sec->asminstrs->len; ++i) {
+        AsmInstr *cur = list_get(sec->asminstrs, i);
+        AsmInstr *nxt = list_get(sec->asminstrs, i + 1);
+        if (!cur || !nxt || !cur->op || !nxt->op) continue;
+        if (!strcmp(cur->op, ".label") && !strcmp(nxt->op, ".label") &&
+            cur->args && cur->args->len >= 1 && nxt->args && nxt->args->len >= 1) {
+            const char *l1 = list_get(cur->args, 0);
+            const char *l2 = list_get(nxt->args, 0);
+            if (l1 && l2 && strcmp(l1, l2) != 0) {
+                dict_put(alias, gen_strdup(l1), gen_strdup(l2));
+            }
+        }
+    }
+
+    if (alias->list && alias->list->len > 0) {
+        for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+            AsmInstr *ins = iter_next(&it);
+            if (!ins || !ins->op || !ins->args) continue;
+            if (!strcmp(ins->op, ".label")) continue;
+            for (int i = 0; i < ins->args->len; ++i) {
+                const char *arg = list_get(ins->args, i);
+                const char *cur = arg;
+                const char *next = NULL;
+                while (cur && (next = (const char *)dict_get(alias, (char *)cur))) {
+                    cur = next;
+                }
+                if (cur && arg && cur != arg) {
+                    list_set(ins->args, i, gen_strdup(cur));
+                    free((void *)arg);
+                }
+            }
+        }
+    }
+
+    for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+        AsmInstr *ins = iter_next(&it);
+        if (!ins || !ins->op || !ins->args) continue;
+        if (!strcmp(ins->op, ".label") && ins->args->len >= 1) {
+            const char *lbl = list_get(ins->args, 0);
+            if (lbl) {
+                int *used = gen_alloc(sizeof(int));
+                *used = 0;
+                dict_put(label_used, gen_strdup(lbl), used);
+            }
+        }
+    }
+
+    for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+        AsmInstr *ins = iter_next(&it);
+        if (!ins || !ins->op || !ins->args) continue;
+        if (!strcmp(ins->op, ".label")) continue;
+        for (Iter ait = list_iter(ins->args); !iter_end(ait);) {
+            const char *arg = iter_next(&ait);
+            if (!arg) continue;
+            int *used = (int *)dict_get(label_used, (char *)arg);
+            if (used) *used = 1;
+        }
+    }
+
+    List *out = make_list();
+    for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+        AsmInstr *ins = iter_next(&it);
+        if (!ins || !ins->op || !ins->args) {
+            list_push(out, ins);
+            continue;
+        }
+        if (!strcmp(ins->op, ".label") && ins->args->len >= 1) {
+            const char *lbl = list_get(ins->args, 0);
+            int *used = (int *)dict_get(label_used, (char *)lbl);
+            if (lbl && lbl[0] == 'L' && used && *used == 0) {
+                free_asminstr(ins);
+                continue;
+            }
+        }
+        list_push(out, ins);
+    }
+
+    for (Iter it = list_iter(label_used->list); !iter_end(it);) {
+        DictEntry *e = iter_next(&it);
+        if (e) { free(e->key); free(e->val); }
+    }
+    dict_clear(label_used);
+
+    for (Iter it = list_iter(alias->list); !iter_end(it);) {
+        DictEntry *e = iter_next(&it);
+        if (e) { free(e->key); free(e->val); }
+    }
+    dict_clear(alias);
+
+    free(sec->asminstrs);
+    sec->asminstrs = out;
 }
 
 /* ---------- 3. 窥孔主入口 ---------- */
@@ -176,6 +325,8 @@ void peephole_section_asminstrs(Section *sec)
 {
     if (!sec || !sec->asminstrs) return;
     List *out = make_list();
+    int last_imm_valid[8] = {0};
+    int last_imm_value[8] = {0};
 
     for (int i = 0; i < sec->asminstrs->len; ++i) {
         AsmInstr *cur  = list_get(sec->asminstrs, i);
@@ -186,6 +337,17 @@ void peephole_section_asminstrs(Section *sec)
         const char *op = cur->op;
         const char *a0 = cur->args && cur->args->len > 0 ? list_get(cur->args, 0) : NULL;
         const char *a1 = cur->args && cur->args->len > 1 ? list_get(cur->args, 1) : NULL;
+        int imm = 0;
+
+        /* 冗余立即数装载（同一基本块内） */
+        if (reg_eq(op, "mov") && a0 && a1) {
+            int rd = parse_reg_rn(a0);
+            if (rd >= 0 && parse_immediate(a1, &imm)) {
+                if (last_imm_valid[rd] && last_imm_value[rd] == imm) {
+                    free_asminstr(cur); continue;
+                }
+            }
+        }
 
         /* (1) 跳到下一条 label 的跳转 */
         if ((reg_eq(op, "sjmp") || reg_eq(op, "ljmp") ||
@@ -205,7 +367,6 @@ void peephole_section_asminstrs(Section *sec)
         }
 
         /* (3) 对 A 的无效 ALU 立即数操作 */
-        int imm;
         if ((reg_eq(op, "anl") || reg_eq(op, "orl") || reg_eq(op, "xrl")) &&
             a0 && reg_eq(a0, "A") && a1 && parse_immediate(a1, &imm)) {
             if ((reg_eq(op, "anl") && (imm & 0xFF) == 0xFF) ||
@@ -222,9 +383,31 @@ void peephole_section_asminstrs(Section *sec)
                 AsmInstr *inc = gen_instr_new("inc");
                 gen_instr_add_arg(inc, "A");
                 gen_instr_copy_ssa(inc, cur);
+                update_last_imm(inc, last_imm_valid, last_imm_value);
                 list_push(out, inc);
             }
             free_asminstr(cur); continue;
+        }
+
+        /* (4.5) mov direct, rN / [mov direct+1, rM] / mov A, direct → mov A, rN */
+        if (reg_eq(op, "mov") && cur->args && cur->args->len >= 2 && a0 && a1 &&
+            parse_reg_rn(a1) >= 0 && parse_reg_rn(a0) < 0 && a0[0] != '@') {
+            if (nxt && reg_eq(nxt->op, "mov") && nxt->args && nxt->args->len >= 2) {
+                const char *ndst = list_get(nxt->args, 0);
+                const char *nsrc = list_get(nxt->args, 1);
+                if (reg_eq(ndst, "A") && reg_eq(nsrc, a0)) {
+                    list_set(nxt->args, 1, gen_strdup(a1));
+                    free((void*)nsrc);
+                } else if (nnxt && reg_eq(nnxt->op, "mov") && nnxt->args && nnxt->args->len >= 2 &&
+                           ndst && is_plus_one(a0, ndst)) {
+                    const char *n2dst = list_get(nnxt->args, 0);
+                    const char *n2src = list_get(nnxt->args, 1);
+                    if (reg_eq(n2dst, "A") && reg_eq(n2src, a0)) {
+                        list_set(nnxt->args, 1, gen_strdup(a1));
+                        free((void*)n2src);
+                    }
+                }
+            }
         }
 
         /* (5) jcc L / sjmp M / L:  → 反向条件到 M */
@@ -240,6 +423,7 @@ void peephole_section_asminstrs(Section *sec)
                 AsmInstr *j = gen_instr_new(inv);
                 gen_instr_add_arg(j, list_get(nxt->args, 0));
                 gen_instr_copy_ssa(j, cur);
+                update_last_imm(j, last_imm_valid, last_imm_value);
                 list_push(out, j);
                 free_asminstr(cur); free_asminstr(nxt); ++i; continue;
             }
@@ -254,6 +438,7 @@ void peephole_section_asminstrs(Section *sec)
             AsmInstr *j = gen_instr_new("jz");
             gen_instr_add_arg(j, list_get(nxt->args, 0));
             gen_instr_copy_ssa(j, cur);
+            update_last_imm(j, last_imm_valid, last_imm_value);
             list_push(out, j);
             free_asminstr(cur); free_asminstr(nxt); ++i; continue;
         }
@@ -272,6 +457,7 @@ void peephole_section_asminstrs(Section *sec)
                 reg_eq(nsrc, "A") && parse_reg_rn(ndst) >= 0) {
                 char buf[16]; snprintf(buf, sizeof(buf), "#%d", imm);
                 list_set(nxt->args, 1, gen_strdup(buf)); free((void*)nsrc);
+                update_last_imm(nxt, last_imm_valid, last_imm_value);
                 list_push(out, nxt); free_asminstr(cur); ++i; continue;
             }
             /* mov r,#imm / mov A,r → mov A,#imm */
@@ -279,6 +465,7 @@ void peephole_section_asminstrs(Section *sec)
                 reg_eq(ndst, "A") && reg_eq(nsrc, a0)) {
                 char buf[16]; snprintf(buf, sizeof(buf), "#%d", imm);
                 list_set(nxt->args, 1, gen_strdup(buf)); free((void*)nsrc);
+                update_last_imm(nxt, last_imm_valid, last_imm_value);
                 list_push(out, nxt); free_asminstr(cur); ++i; continue;
             }
             /* 冗余中转寄存器消除 */
@@ -299,11 +486,13 @@ void peephole_section_asminstrs(Section *sec)
                 reg_eq(na0, "A") && parse_immediate(na1, &imm)) {
                 char buf[16]; snprintf(buf, sizeof(buf), "#%d", imm);
                 list_set(cur->args, 1, gen_strdup(buf)); free((void*)a1);
+                update_last_imm(cur, last_imm_valid, last_imm_value);
                 list_push(out, cur); free_asminstr(nxt); ++i; continue;
             }
         }
 
         /* 默认保留 */
+        update_last_imm(cur, last_imm_valid, last_imm_value);
         list_push(out, cur);
     }
 

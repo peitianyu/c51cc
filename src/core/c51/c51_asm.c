@@ -522,7 +522,11 @@ static void write_symbol_visibility(FILE *fp, const ObjFile *obj)
         if (!sym || !sym->name) continue;
         // SFR: section == -2, 输出 .equ 定义
         if (sym->section == -2) {
-            fprintf(fp, ".equ %s, 0x%02X\n", sym->name, sym->value & 0xFF);
+            if (sym->flags & SYM_FLAG_BIT) {
+                fprintf(fp, ".equ %s, 0x%02X\n", sym->name, sym->value & 0xFF);
+            } else {
+                fprintf(fp, ".equ %s, 0x%02X\n", sym->name, sym->value & 0xFF);
+            }
         } else {
             if (sym->flags & SYM_FLAG_GLOBAL)
                 fprintf(fp, ".global %s\n", sym->name);

@@ -188,6 +188,22 @@ static List *preds_remove(List *preds, Block *rem) {
     return dst;
 }
 
+static void replace_term_target(Block *pred, int old_id, int new_id) {
+    if (!pred || !pred->instrs || pred->instrs->len == 0) return;
+    Instr *term = (Instr *)list_get(pred->instrs, pred->instrs->len - 1);
+    if (!term || !term->labels) return;
+    for (int k = 0; k < term->labels->len; ++k) {
+        char *lbl = (char *)list_get(term->labels, k);
+        if (!lbl) continue;
+        int tid = -1;
+        if (sscanf(lbl, "block%d", &tid) == 1 && tid == old_id) {
+            char *rep = pass_alloc(32);
+            snprintf(rep, 32, "block%d", new_id);
+            list_set(term->labels, k, rep);
+        }
+    }
+}
+
 /*---------- 指令属性 ----------*/
 static bool is_volatile_mem(const Instr *i) {
     if (!i || !i->mem_type) return false;
@@ -195,11 +211,11 @@ static bool is_volatile_mem(const Instr *i) {
     return a.ctype_volatile || a.ctype_register;
 }
 
-// store->load 转发只屏蔽 volatile（不屏蔽 register），用于测试时的SSA简化
+// store->load 转发：屏蔽 volatile 与 register（SFR/SBIT）
 static bool is_volatile_for_forwarding(const Instr *i) {
     if (!i || !i->mem_type) return false;
     CtypeAttr a = get_attr(i->mem_type->attr);
-    return a.ctype_volatile;
+    return a.ctype_volatile || a.ctype_register;
 }
 
 static bool is_pure_instr(const Instr *i) {
@@ -1559,6 +1575,46 @@ static bool pass_entry_param_sink(Func *f, Stats *s) {
     return true;
 }
 
+/*---------- 空块消除（空块视为fallthrough到下一个块） ----------*/
+static bool pass_empty_block_elim(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks) return false;
+
+    for (int i = 0; i < f->blocks->len; ++i) {
+        Block *b = list_get(f->blocks, i);
+        if (!b || b == f->entry) continue;
+        bool has_phi = b->phis && b->phis->len > 0;
+        bool has_instrs = b->instrs && b->instrs->len > 0;
+        if (has_phi || has_instrs) continue;
+
+        if (!b->preds || b->preds->len != 1) continue;
+        Block *pred = (Block *)list_get(b->preds, 0);
+        if (!pred || pred == b) continue;
+
+        Block *succ = NULL;
+        for (int j = i + 1; j < f->blocks->len; ++j) {
+            Block *n = list_get(f->blocks, j);
+            if (n) { succ = n; break; }
+        }
+        if (!succ || succ == b) continue;
+
+        replace_term_target(pred, b->id, succ->id);
+
+        if (succ->preds) succ->preds = preds_remove(succ->preds, b);
+        list_unique_push(succ->preds, pred, block_ptr_eq);
+        replace_phi_pred_label(succ, b->id, pred->id);
+
+        b->preds = make_list();
+        b->phis = make_list();
+        b->instrs = make_list();
+
+        s->rm++;
+        changed = true;
+    }
+
+    return changed;
+}
+
 /*---------- 统一迭代框架 ----------*/
 void ssa_optimize_func(Func *f, int level) {
     if (!f || level == OPT_O0) return;
@@ -1579,6 +1635,10 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_entry_jmp_elim(f, &st);
         changed |= pass_entry_param_sink(f, &st);
         rebuild_preds(f);
+        if (pass_empty_block_elim(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
         changed |= pass_phi(f, &st);
         changed |= pass_store_cleanup(f, &st);
         changed |= pass_binop_const_inline(f, &st);

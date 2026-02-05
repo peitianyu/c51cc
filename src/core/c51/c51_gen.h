@@ -31,6 +31,7 @@ extern Dict *g_mmio_map;
 extern Dict *g_val_type;
 extern Dict *g_v16_map;
 extern int g_v16_next;
+extern char *g_v16_base_label;
 extern int g_lower_id;
 extern char *g_pending_ssa;
 
@@ -77,6 +78,7 @@ void reg_use_def(const AsmInstr *ins, unsigned *use, unsigned *def);
 void shrink_call_saves(Section *sec);
 const char *invert_jcc(const char *op);
 void peephole_section_asminstrs(Section *sec);
+void remove_unused_labels(Section *sec);
 
 /* === Symbol helpers === */
 Symbol *find_symbol_by_name(ObjFile *obj, const char *name);
@@ -129,6 +131,7 @@ int v16_addr(ValueName v);
 bool is_v16_value(ValueName v);
 void fmt_direct(char *buf, size_t n, int addr);
 void emit_set_v16(Section *sec, int addr, int val);
+void fmt_v16_direct(char *buf, size_t n, int addr);
 
 /* === Data space === */
 int data_space_kind(Ctype *type);

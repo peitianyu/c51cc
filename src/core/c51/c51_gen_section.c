@@ -29,9 +29,11 @@ void emit_global_data(ObjFile *obj, GlobalVar *g)
     if (!g || !g->name) return;
     if (is_register_mmio(g->type)) {
         if (g->has_init) {
-            mmio_map_put(g->name, (int)g->init_value, is_register_bit(g->type));
+            bool is_bit = is_register_bit(g->type);
+            mmio_map_put(g->name, (int)g->init_value, is_bit);
             // 为 SFR 添加符号，section=-2 表示 SFR，value 为地址
-            objfile_add_symbol(obj, g->name, SYM_DATA, -2, (int)g->init_value, 1, SYM_FLAG_GLOBAL);
+            unsigned flags = SYM_FLAG_GLOBAL | (is_bit ? SYM_FLAG_BIT : 0);
+            objfile_add_symbol(obj, g->name, SYM_DATA, -2, (int)g->init_value, 1, flags);
         }
         return;
     }

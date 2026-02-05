@@ -33,7 +33,11 @@ ObjFile *c51_gen_from_ssa(void *ssa)
         g_const_map = make_dict(NULL);
         g_val_type = make_dict(NULL);
         g_v16_map = make_dict(NULL);
-        g_v16_next = 0x70;
+        g_v16_next = 0;
+        if (g_v16_base_label) { free(g_v16_base_label); g_v16_base_label = NULL; }
+        char v16_label[128];
+        snprintf(v16_label, sizeof v16_label, "__v16_%s", f->name);
+        g_v16_base_label = gen_strdup(v16_label);
 
         char sec_name[128];
         snprintf(sec_name, sizeof sec_name, ".text.%s", f->name);
@@ -43,6 +47,13 @@ ObjFile *c51_gen_from_ssa(void *ssa)
                           section_index_from_ptr(obj, sec),
                           0, 0, SYM_FLAG_GLOBAL);
         emit_label(sec, f->name);
+
+        if (!f->is_interrupt) {
+            char ubuf[8];
+            int bank = (f->bank_id >= 0) ? f->bank_id : 0;
+            snprintf(ubuf, sizeof ubuf, "%d", bank);
+            emit_ins1(sec, ".using", ubuf);
+        }
 
         /* 中断函数特殊处理 */
         if (f->is_interrupt) {
@@ -59,14 +70,37 @@ ObjFile *c51_gen_from_ssa(void *ssa)
             emit_frame_prologue(sec, f->stack_size);
 
         /* 基本块 */
+        Block *last_block = NULL;
         for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
             Block *b = iter_next(&bit);
             if (!b) continue;
+            last_block = b;
             char label[64];
             snprintf(label, sizeof label, "L%s_%u", f->name, b->id);
             emit_label(sec, label);
             for (Iter it = list_iter(b->instrs); !iter_end(it);)
                 emit_instr(sec, iter_next(&it), f, b);
+        }
+        
+        /* 如果函数没有显式返回，添加 ret */
+        if (last_block) {
+            bool has_ret = false;
+            for (Iter it = list_iter(last_block->instrs); !iter_end(it);) {
+                Instr *ins = iter_next(&it);
+                if (ins && ins->op == IROP_RET) {
+                    has_ret = true;
+                    break;
+                }
+            }
+            if (!has_ret) {
+                if (f->stack_size > 0) emit_frame_epilogue(sec, f->stack_size);
+                if (f->is_interrupt) {
+                    emit_interrupt_epilogue(sec);
+                    emit_ins0(sec, "reti");
+                } else {
+                    emit_ins0(sec, "ret");
+                }
+            }
         }
 
         /* 后端流水线 */
@@ -74,13 +108,26 @@ ObjFile *c51_gen_from_ssa(void *ssa)
         lower_section_asminstrs(sec);
         shrink_call_saves(sec);
         peephole_section_asminstrs(sec);
+        remove_unused_labels(sec);
         fixup_short_jumps(sec);
         encode_section_bytes(obj, sec);
+
+        if (g_v16_next > 0 && g_v16_base_label) {
+            char v16_sec[128];
+            snprintf(v16_sec, sizeof v16_sec, ".data.v16.%s", f->name);
+            Section *dsec = get_or_create_section(obj, v16_sec, SEC_DATA);
+            int offset = dsec->bytes_len;
+            section_append_zeros(dsec, g_v16_next);
+            objfile_add_symbol(obj, g_v16_base_label, SYM_DATA,
+                              section_index_from_ptr(obj, dsec),
+                              offset, g_v16_next, SYM_FLAG_LOCAL);
+        }
 
         /* 函数级字典统一释放 */
         dict_free_kv(g_addr_map);  g_addr_map = NULL;
         dict_free_kv(g_const_map); g_const_map = NULL;
         dict_free_kv(g_v16_map);   g_v16_map   = NULL;
+        if (g_v16_base_label) { free(g_v16_base_label); g_v16_base_label = NULL; }
         if (g_val_type) {           /* 只释放 key */
             for (Iter it = list_iter(g_val_type->list); !iter_end(it);) {
                 DictEntry *e = iter_next(&it);
@@ -124,7 +171,6 @@ ObjFile *c51_gen_from_ssa(void *ssa)
 
         ObjFile *out = obj_link(objs);
 
-        /* 清理输入对象列表（已深 free）*/
         for (ListNode *n = objs->head; n; n = n->next) n->elem = NULL;
         list_free(objs); free(objs);
 
@@ -143,10 +189,14 @@ static ObjFile *compile_one(const char *path) {
 
     SSABuild *b = ssa_build_create();
     List *tops = read_toplevels();
-    for (Iter i = list_iter(tops); !iter_end(i);)
-        ssa_convert_ast(b, iter_next(&i));
+    for (Iter i = list_iter(tops); !iter_end(i);) {
+        Ast *t = iter_next(&i);
+        printf("ast: %s\n", ast_to_string(t));
+        ssa_convert_ast(b, t);
+    }
+        
     ssa_optimize(b->unit, OPT_O1);
-    // ssa_print(stdout, b->unit);
+    ssa_print(stdout, b->unit);
     ObjFile *o = c51_gen_from_ssa(b->unit);
     ssa_build_destroy(b);
     list_free(strings);

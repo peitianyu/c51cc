@@ -31,7 +31,8 @@ typedef enum {
 enum {
 	SYM_FLAG_GLOBAL = 1 << 0,
 	SYM_FLAG_EXTERN = 1 << 1,
-	SYM_FLAG_LOCAL  = 1 << 2
+	SYM_FLAG_LOCAL  = 1 << 2,
+	SYM_FLAG_BIT    = 1 << 3
 };
 
 typedef struct {

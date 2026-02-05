@@ -1,4 +1,5 @@
 #include "c51_gen.h"
+#include <ctype.h>
 
 char *g_pending_ssa = NULL;
 
@@ -240,8 +241,13 @@ char *new_label(const char *prefix)
 const char *map_block_label(const char *func_name, const char *label)
 {
     if (!label) return "<null>";
+    int id = -1;
     if (strncmp(label, "block", 5) == 0) {
-        int id = atoi(label + 5);
+        id = atoi(label + 5);
+    } else if (label[0] == 'b' && isdigit((unsigned char)label[1])) {
+        id = atoi(label + 1);
+    }
+    if (id >= 0) {
         static char buf[96];
         snprintf(buf, sizeof(buf), "L%s_%d", func_name ? func_name : "fn", id);
         return buf;
@@ -295,8 +301,11 @@ Block *find_block_by_label(Func *f, const char *label)
 {
     if (!f || !label) return NULL;
     int id = -1;
-    if (strncmp(label, "block", 5) == 0)
+    if (strncmp(label, "block", 5) == 0) {
         id = atoi(label + 5);
+    } else if (label[0] == 'b' && isdigit((unsigned char)label[1])) {
+        id = atoi(label + 1);
+    }
     if (id < 0) return NULL;
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);

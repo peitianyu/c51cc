@@ -29,9 +29,7 @@ void addr_map_put(ValueName v, const char *label, Ctype *mem_type)
     struct AddrInfo *info = gen_alloc(sizeof(struct AddrInfo));
     MmioInfo *mmio = mmio_map_get(label);
     if (mmio) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "0x%02X", mmio->addr & 0xFF);
-        info->label = gen_strdup(buf);
+        info->label = gen_strdup(label);
     } else {
         info->label = label;
     }
@@ -120,16 +118,26 @@ void fmt_direct(char *buf, size_t n, int addr)
     snprintf(buf, n, "0x%02X", addr & 0xFF);
 }
 
+void fmt_v16_direct(char *buf, size_t n, int addr)
+{
+    if (g_v16_base_label && g_v16_base_label[0]) {
+        if (addr == 0) snprintf(buf, n, "%s", g_v16_base_label);
+        else snprintf(buf, n, "%s+%d", g_v16_base_label, addr);
+    } else {
+        fmt_direct(buf, n, addr);
+    }
+}
+
 void emit_set_v16(Section *sec, int addr, int val)
 {
     char buf[16];
     snprintf(buf, sizeof(buf), "#%d", val & 0xFF);
-    char dst0[16];
-    fmt_direct(dst0, sizeof(dst0), addr);
+    char dst0[64];
+    fmt_v16_direct(dst0, sizeof(dst0), addr);
     emit_ins2(sec, "mov", dst0, buf);
     snprintf(buf, sizeof(buf), "#%d", (val >> 8) & 0xFF);
-    char dst1[16];
-    fmt_direct(dst1, sizeof(dst1), addr + 1);
+    char dst1[64];
+    fmt_v16_direct(dst1, sizeof(dst1), addr + 1);
     emit_ins2(sec, "mov", dst1, buf);
 }
 
@@ -164,7 +172,7 @@ void emit_phi_moves_for_edge(Section *sec, Func *func, Block *from, const char *
     if (!to || !to->phis) return;
 
     char from_label[32];
-    snprintf(from_label, sizeof(from_label), "block%u", from->id);
+    snprintf(from_label, sizeof(from_label), "block%d", from->id);
 
     for (Iter pit = list_iter(to->phis); !iter_end(pit);) {
         Instr *phi = iter_next(&pit);
@@ -189,16 +197,42 @@ void emit_phi_moves_for_edge(Section *sec, Func *func, Block *from, const char *
         }
 
         if (src_val == 0 || phi->dest == src_val) continue;
+
+        int phi_size = 1;
         Ctype *pt = phi->type ? phi->type : val_type_get(phi->dest);
-        int size = pt ? pt->size : val_size(src_val);
-        if (size >= 2 || is_v16_value(phi->dest) || is_v16_value(src_val)) {
+        if (pt) {
+            phi_size = pt->size;
+        } else if (phi->args) {
+            for (int k = 0; k < phi->args->len; ++k) {
+                ValueName *arg = list_get(phi->args, k);
+                if (!arg) continue;
+                if (is_v16_value(*arg) || val_size(*arg) >= 2) {
+                    phi_size = 2;
+                    break;
+                }
+            }
+        }
+
+        int cval = 0;
+        if (const_map_get(src_val, &cval)) {
+            if (phi_size >= 2 || is_v16_value(phi->dest)) {
+                emit_set_v16(sec, v16_addr(phi->dest), cval);
+            } else {
+                char ibuf[16];
+                snprintf(ibuf, sizeof(ibuf), "#%d", cval & 0xFF);
+                emit_ins2(sec, "mov", vreg(phi->dest), ibuf);
+            }
+            continue;
+        }
+
+        if (phi_size >= 2 || is_v16_value(phi->dest) || is_v16_value(src_val)) {
             int dst = v16_addr(phi->dest);
             int src = v16_addr(src_val);
-            char d0[16], d1[16], s0[16], s1[16];
-            fmt_direct(d0, sizeof(d0), dst);
-            fmt_direct(d1, sizeof(d1), dst + 1);
-            fmt_direct(s0, sizeof(s0), src);
-            fmt_direct(s1, sizeof(s1), src + 1);
+            char d0[64], d1[64], s0[64], s1[64];
+            fmt_v16_direct(d0, sizeof(d0), dst);
+            fmt_v16_direct(d1, sizeof(d1), dst + 1);
+            fmt_v16_direct(s0, sizeof(s0), src);
+            fmt_v16_direct(s1, sizeof(s1), src + 1);
             emit_ins2(sec, "mov", d0, s0);
             emit_ins2(sec, "mov", d1, s1);
         } else {
@@ -217,6 +251,16 @@ void lower_section_asminstrs(Section *sec)
         if (!ins || !ins->op) {
             list_push(out, ins);
             continue;
+        }
+        if ((!strcmp(ins->op, "push") || !strcmp(ins->op, "pop")) && ins->args && ins->args->len == 1) {
+            char *arg = list_get(ins->args, 0);
+            int r = parse_reg_rn(arg);
+            if (r >= 0) {
+                char buf[8];
+                snprintf(buf, sizeof(buf), "ar%d", r);
+                list_set(ins->args, 0, gen_strdup(buf));
+                free(arg);
+            }
         }
         if (!strcmp(ins->op, "mov") && ins->args && ins->args->len == 2) {
             char *dst = list_get(ins->args, 0);

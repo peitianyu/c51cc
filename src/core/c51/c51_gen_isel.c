@@ -1,6 +1,7 @@
 #include "c51_gen.h"
 #include <ctype.h>
 
+/* ========== 基础工具函数 ========== */
 static void trim_ws_inplace(char *s)
 {
     if (!s) return;
@@ -15,41 +16,30 @@ static void trim_ws_inplace(char *s)
 static void strip_comment_inplace(char *s)
 {
     if (!s) return;
-    /* 仅支持 ; 和 // 注释（不要把 # 视作注释，因为立即数会用到 #） */
     char *sc = strchr(s, ';');
     if (sc) *sc = '\0';
 
-    char *p = s;
-    while (p && *p) {
+    for (char *p = s; *p; p++) {
         if (p[0] == '/' && p[1] == '/') {
             *p = '\0';
             break;
         }
-        p++;
     }
 }
 
 static const char *addrspace_str(Ctype *type)
 {
     if (!type) return NULL;
+    static const char *spaces[] = {NULL, "data", "idata", "pdata", "xdata", "edata", "code"};
     int data = get_attr(type->attr).ctype_data;
-    switch (data) {
-    case 1: return "data";
-    case 2: return "idata";
-    case 3: return "pdata";
-    case 4: return "xdata";
-    case 5: return "edata";
-    case 6: return "code";
-    default: return NULL;
-    }
+    return (data >= 1 && data <= 6) ? spaces[data] : NULL;
 }
 
 static void fmt_block_label(const char *lbl, char *out, size_t n)
 {
     if (!out || n == 0) return;
     if (lbl && strncmp(lbl, "block", 5) == 0) {
-        int id = atoi(lbl + 5);
-        snprintf(out, n, "b%d", id);
+        snprintf(out, n, "b%d", atoi(lbl + 5));
     } else {
         snprintf(out, n, "%s", lbl ? lbl : "<null>");
     }
@@ -59,9 +49,8 @@ static bool get_arg_val(const Instr *ins, int idx, ValueName *out)
 {
     if (!ins || !ins->args || idx < 0 || idx >= ins->args->len) return false;
     ValueName *p = list_get(ins->args, idx);
-    if (!p) return false;
-    if (out) *out = *p;
-    return true;
+    if (p && out) *out = *p;
+    return p != NULL;
 }
 
 static const char *get_label_at(const Instr *ins, int idx)
@@ -76,13 +65,233 @@ static bool has_imm_tag(const Instr *ins)
     return tag && strcmp(tag, "imm") == 0;
 }
 
+static Instr *find_def_instr(Func *f, ValueName v)
+{
+    if (!f || v == 0) return NULL;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i && i->dest == v) return i;
+        }
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr *p = iter_next(&jt);
+            if (p && p->dest == v) return p;
+        }
+    }
+    return NULL;
+}
+
+typedef struct {
+    bool valid;
+    ValueName dest;
+    IrOp op;
+    ValueName a;
+    ValueName b;
+    bool is_signed;
+    bool is_16;
+} PendingCmp;
+
+static PendingCmp g_pending_cmp;
+
+static int count_value_uses(Func *f, ValueName v)
+{
+    int cnt = 0;
+    if (!f || v == 0) return 0;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        if (b->instrs) {
+            for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || !i->args) continue;
+                for (int k = 0; k < i->args->len; ++k) {
+                    ValueName *arg = list_get(i->args, k);
+                    if (arg && *arg == v) cnt++;
+                }
+            }
+        }
+        if (b->phis) {
+            for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+                Instr *p = iter_next(&jt);
+                if (!p || !p->args) continue;
+                for (int k = 0; k < p->args->len; ++k) {
+                    ValueName *arg = list_get(p->args, k);
+                    if (arg && *arg == v) cnt++;
+                }
+            }
+        }
+    }
+    return cnt;
+}
+
+static bool cmp_used_by_next_br(Func *f, Block *blk, Instr *cmp, Instr **out_br)
+{
+    if (!f || !blk || !cmp || !blk->instrs) return false;
+    if (cmp->dest <= 0 || count_value_uses(f, cmp->dest) != 1) return false;
+    for (int i = 0; i < blk->instrs->len; ++i) {
+        Instr *cur = list_get(blk->instrs, i);
+        if (cur != cmp) continue;
+        if (i + 1 >= blk->instrs->len) return false;
+        Instr *nxt = list_get(blk->instrs, i + 1);
+        if (!nxt || nxt->op != IROP_BR || !nxt->args || nxt->args->len < 1) return false;
+        ValueName *c = list_get(nxt->args, 0);
+        if (!c || *c != cmp->dest) return false;
+        if (out_br) *out_br = nxt;
+        return true;
+    }
+    return false;
+}
+
+/* ========== 16位操作辅助 ========== */
+
+typedef struct { char lo[64], hi[64]; } AddrPair;
+
+static void fmt_addr_pair(AddrPair *p, int addr)
+{
+    fmt_v16_direct(p->lo, sizeof(p->lo), addr);
+    fmt_v16_direct(p->hi, sizeof(p->hi), addr + 1);
+}
+
+static void emit_mov16(Section *sec, int dst_addr, int src_addr)
+{
+    AddrPair d, s;
+    fmt_addr_pair(&d, dst_addr);
+    fmt_addr_pair(&s, src_addr);
+    emit_ins2(sec, "mov", "A", s.lo);
+    emit_ins2(sec, "mov", d.lo, "A");
+    emit_ins2(sec, "mov", "A", s.hi);
+    emit_ins2(sec, "mov", d.hi, "A");
+}
+
+static void emit_load_imm16(Section *sec, int dst_addr, int val)
+{
+    AddrPair d;
+    fmt_addr_pair(&d, dst_addr);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "#%d", val & 0xFF);
+    emit_ins2(sec, "mov", d.lo, buf);
+    snprintf(buf, sizeof(buf), "#%d", (val >> 8) & 0xFF);
+    emit_ins2(sec, "mov", d.hi, buf);
+}
+
+/* ========== 比较操作辅助 ========== */
+
+typedef enum { CMP_LT, CMP_LE, CMP_GT, CMP_GE } CmpKind;
+
+static const char *cmp_jmp_true(CmpKind k, bool sign)
+{
+    (void)sign; // signed handled separately
+    switch (k) {
+        case CMP_LT: return "jc";
+        case CMP_LE: return "jc";  // 或 jz，需组合
+        case CMP_GT: return "jnc"; // 且非零
+        case CMP_GE: return "jnc";
+    }
+    return "";
+}
+
+static void emit_cmp_branch(Section *sec, CmpKind kind, 
+                           const char *l_true, const char *l_false, 
+                           bool is_signed, bool include_eq)
+{
+    if (is_signed) {
+        char *l_same = new_label("cmp_same");
+        emit_ins2(sec, "mov", "A", "r6");
+        emit_ins2(sec, "xrl", "A", "r7");
+        emit_ins2(sec, "anl", "A", "#0x80");
+        emit_ins1(sec, "jz", l_same);
+        // 符号不同：r6<0 则 LT，否则 GT
+        emit_ins2(sec, "mov", "A", "r6");
+        emit_ins2(sec, "anl", "A", "#0x80");
+        bool jump_if_neg = (kind == CMP_LT || kind == CMP_LE);
+        emit_ins1(sec, jump_if_neg ? "jnz" : "jz", 
+                 jump_if_neg ? l_true : l_false);
+        emit_ins1(sec, "sjmp", jump_if_neg ? l_false : l_true);
+        emit_label(sec, l_same);
+        free(l_same);
+    }
+    
+    emit_ins2(sec, "mov", "A", "r6");
+    emit_ins1(sec, "clr", "C");
+    emit_ins2(sec, "subb", "A", "r7");
+    
+    if (kind == CMP_LT) {
+        emit_ins1(sec, "jc", l_true);
+    } else if (kind == CMP_LE) {
+        emit_ins1(sec, "jc", l_true);
+        if (include_eq) emit_ins1(sec, "jz", l_true);
+    } else if (kind == CMP_GT) {
+        emit_ins1(sec, "jc", l_false);
+        if (!include_eq) emit_ins1(sec, "jz", l_false);
+        else emit_ins1(sec, "sjmp", l_true);
+    } else { // GE
+        emit_ins1(sec, "jnc", l_true);
+    }
+}
+
+/* ========== SSA格式化 ========== */
+
+static const char *irop_str(IrOp op)
+{
+    switch (op) {
+        case IROP_NOP: return "nop";
+        case IROP_ADD: return "add";
+        case IROP_SUB: return "sub";
+        case IROP_MUL: return "mul";
+        case IROP_DIV: return "div";
+        case IROP_MOD: return "mod";
+        case IROP_AND: return "and";
+        case IROP_OR:  return "or";
+        case IROP_XOR: return "xor";
+        case IROP_SHL: return "shl";
+        case IROP_SHR: return "shr";
+        case IROP_NOT: return "not";
+        case IROP_LNOT: return "lnot";
+        case IROP_NEG: return "neg";
+        case IROP_EQ: return "eq";
+        case IROP_NE: return "ne";
+        case IROP_LT: return "lt";
+        case IROP_GT: return "gt";
+        case IROP_LE: return "le";
+        case IROP_GE: return "ge";
+        case IROP_TRUNC: return "trunc";
+        case IROP_ZEXT: return "zext";
+        case IROP_SEXT: return "sext";
+        case IROP_BITCAST: return "bitcast";
+        case IROP_INTTOPTR: return "inttoptr";
+        case IROP_PTRTOINT: return "ptrtoint";
+        default: return NULL;
+    }
+}
+
 static char *format_ssa_instr(const Instr *ins)
 {
     if (!ins) return NULL;
     char buf[512];
     size_t off = 0;
-    if (ins->dest > 0)
-        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "v%d = ", ins->dest);
+    
+    if (ins->dest > 0 && ins->op != IROP_PARAM)
+        off += snprintf(buf + off, sizeof(buf) - off, "v%d = ", ins->dest);
+
+    const char *op_str = irop_str(ins->op);
+    
+    // 处理带立即数的二元操作
+    #define FMT_BINOP_IMM() do { \
+        ValueName a; \
+        if (get_arg_val(ins, 0, &a)) \
+            off += snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a); \
+        else \
+            off += snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str); \
+        if (has_imm_tag(ins)) { \
+            snprintf(buf + off, sizeof(buf) - off, ", const %ld", (long)ins->imm.ival); \
+            return gen_strdup(buf); \
+        } \
+        ValueName b; \
+        if (get_arg_val(ins, 1, &b)) \
+            snprintf(buf + off, sizeof(buf) - off, ", v%d", b); \
+    } while(0)
 
     switch (ins->op) {
     case IROP_NOP:
@@ -90,7 +299,10 @@ static char *format_ssa_instr(const Instr *ins)
         break;
     case IROP_PARAM: {
         const char *pname = get_label_at(ins, 0);
-        snprintf(buf + off, sizeof(buf) - off, "param %s", pname ? pname : "<null>");
+        if (ins->dest > 0)
+            snprintf(buf + off, sizeof(buf) - off, "param %s -> v%d", pname ? pname : "<null>", ins->dest);
+        else
+            snprintf(buf + off, sizeof(buf) - off, "param %s", pname ? pname : "<null>");
         break;
     }
     case IROP_CONST:
@@ -105,29 +317,12 @@ static char *format_ssa_instr(const Instr *ins)
         break;
     }
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
-    case IROP_AND: case IROP_OR: case IROP_XOR: {
-        const char *op_str = (ins->op == IROP_ADD) ? "add" :
-                             (ins->op == IROP_SUB) ? "sub" :
-                             (ins->op == IROP_MUL) ? "mul" :
-                             (ins->op == IROP_DIV) ? "div" :
-                             (ins->op == IROP_MOD) ? "mod" :
-                             (ins->op == IROP_AND) ? "and" :
-                             (ins->op == IROP_OR)  ? "or"  : "xor";
-        ValueName a, b;
-        if (get_arg_val(ins, 0, &a))
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
-        else
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
-        if (has_imm_tag(ins)) {
-            snprintf(buf + off, sizeof(buf) - off, ", const %ld", (long)ins->imm.ival);
-            break;
-        }
-        if (get_arg_val(ins, 1, &b))
-            snprintf(buf + off, sizeof(buf) - off, ", v%d", b);
+    case IROP_AND: case IROP_OR: case IROP_XOR:
+    case IROP_SHL: case IROP_SHR:
+    case IROP_EQ: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: case IROP_NE:
+        FMT_BINOP_IMM();
         break;
-    }
     case IROP_NOT: case IROP_LNOT: {
-        const char *op_str = (ins->op == IROP_NOT) ? "not" : "lnot";
         ValueName a;
         if (get_arg_val(ins, 0, &a))
             snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
@@ -135,47 +330,8 @@ static char *format_ssa_instr(const Instr *ins)
             snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
         break;
     }
-    case IROP_SHL: case IROP_SHR: {
-        const char *op_str = (ins->op == IROP_SHL) ? "shl" : "shr";
-        ValueName a, b;
-        if (get_arg_val(ins, 0, &a))
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
-        else
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
-        if (has_imm_tag(ins)) {
-            snprintf(buf + off, sizeof(buf) - off, ", const %ld", (long)ins->imm.ival);
-            break;
-        }
-        if (get_arg_val(ins, 1, &b))
-            snprintf(buf + off, sizeof(buf) - off, ", v%d", b);
-        break;
-    }
-    case IROP_EQ: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: case IROP_NE: {
-        const char *op_str = (ins->op == IROP_EQ) ? "eq" :
-                             (ins->op == IROP_LT) ? "lt" :
-                             (ins->op == IROP_GT) ? "gt" :
-                             (ins->op == IROP_LE) ? "le" :
-                             (ins->op == IROP_GE) ? "ge" : "ne";
-        ValueName a, b;
-        if (get_arg_val(ins, 0, &a))
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
-        else
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s <null>", op_str);
-        if (has_imm_tag(ins)) {
-            snprintf(buf + off, sizeof(buf) - off, ", const %ld", (long)ins->imm.ival);
-            break;
-        }
-        if (get_arg_val(ins, 1, &b))
-            snprintf(buf + off, sizeof(buf) - off, ", v%d", b);
-        break;
-    }
     case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT:
     case IROP_BITCAST: case IROP_INTTOPTR: case IROP_PTRTOINT: {
-        const char *op_str = (ins->op == IROP_TRUNC) ? "trunc" :
-                             (ins->op == IROP_ZEXT) ? "zext" :
-                             (ins->op == IROP_SEXT) ? "sext" :
-                             (ins->op == IROP_BITCAST) ? "bitcast" :
-                             (ins->op == IROP_INTTOPTR) ? "inttoptr" : "ptrtoint";
         ValueName a;
         if (get_arg_val(ins, 0, &a))
             snprintf(buf + off, sizeof(buf) - off, "%s v%d", op_str, a);
@@ -186,7 +342,8 @@ static char *format_ssa_instr(const Instr *ins)
     case IROP_OFFSET: {
         ValueName a1, a2;
         if (get_arg_val(ins, 0, &a1) && get_arg_val(ins, 1, &a2))
-            snprintf(buf + off, sizeof(buf) - off, "offset v%d, v%d, #%ld", a1, a2, (long)ins->imm.ival);
+            snprintf(buf + off, sizeof(buf) - off, "offset v%d, v%d, #%ld", 
+                    a1, a2, (long)ins->imm.ival);
         else
             snprintf(buf + off, sizeof(buf) - off, "offset <null>");
         break;
@@ -207,53 +364,47 @@ static char *format_ssa_instr(const Instr *ins)
     case IROP_LOAD: {
         ValueName p;
         if (get_arg_val(ins, 0, &p))
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "load v%d", p);
+            off += snprintf(buf + off, sizeof(buf) - off, "load v%d", p);
         else
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "load <null>");
+            off += snprintf(buf + off, sizeof(buf) - off, "load <null>");
         const char *s = addrspace_str(ins->mem_type);
-        if (s)
-            snprintf(buf + off, sizeof(buf) - off, " @%s", s);
+        if (s) snprintf(buf + off, sizeof(buf) - off, " @%s", s);
         break;
     }
     case IROP_STORE: {
         const char *label = get_label_at(ins, 0);
         if (label && label[0] == '@') {
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "store %s, const %ld", label, (long)ins->imm.ival);
+            snprintf(buf + off, sizeof(buf) - off, "store %s, const %ld", 
+                    label, (long)ins->imm.ival);
         } else {
             ValueName p, v;
             if (get_arg_val(ins, 0, &p) && get_arg_val(ins, 1, &v))
-                off += (size_t)snprintf(buf + off, sizeof(buf) - off, "store v%d, v%d", p, v);
+                off += snprintf(buf + off, sizeof(buf) - off, "store v%d, v%d", p, v);
             else
-                off += (size_t)snprintf(buf + off, sizeof(buf) - off, "store <null>");
+                off += snprintf(buf + off, sizeof(buf) - off, "store <null>");
         }
-        {
-            const char *s = addrspace_str(ins->mem_type);
-            if (s)
-                snprintf(buf + off, sizeof(buf) - off, " @%s", s);
-        }
+        const char *s = addrspace_str(ins->mem_type);
+        if (s) snprintf(buf + off, sizeof(buf) - off, " @%s", s);
         break;
     }
     case IROP_ADDR: {
         const char *label = get_label_at(ins, 0);
-        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "addr @%s", label ? label : "<null>");
-        {
-            const char *s = addrspace_str(ins->mem_type);
-            if (s)
-                snprintf(buf + off, sizeof(buf) - off, " @%s", s);
-        }
+        off += snprintf(buf + off, sizeof(buf) - off, "addr @%s", label ? label : "<null>");
+        const char *s = addrspace_str(ins->mem_type);
+        if (s) snprintf(buf + off, sizeof(buf) - off, " @%s", s);
         break;
     }
     case IROP_PHI: {
-        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "phi ");
+        off += snprintf(buf + off, sizeof(buf) - off, "phi ");
         bool first = true;
         for (int k = 0; ins->args && k < ins->args->len; ++k) {
             ValueName v = 0;
-            if (!get_arg_val(ins, k, &v)) continue;
-            if (v == ins->dest) continue;
+            if (!get_arg_val(ins, k, &v) || v == ins->dest) continue;
             const char *lbl = get_label_at(ins, k);
             char bbuf[32];
             fmt_block_label(lbl, bbuf, sizeof(bbuf));
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s[v%d, %s]", first ? "" : ", ", v, bbuf);
+            off += snprintf(buf + off, sizeof(buf) - off, "%s[v%d, %s]", 
+                           first ? "" : ", ", v, bbuf);
             first = false;
         }
         break;
@@ -277,11 +428,11 @@ static char *format_ssa_instr(const Instr *ins)
     }
     case IROP_CALL: {
         const char *fname = get_label_at(ins, 0);
-        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "call @%s(", fname ? fname : "<null>");
+        off += snprintf(buf + off, sizeof(buf) - off, "call @%s(", fname ? fname : "<null>");
         for (int k = 0; ins->args && k < ins->args->len; ++k) {
             ValueName v;
-            if (!get_arg_val(ins, k, &v)) continue;
-            off += (size_t)snprintf(buf + off, sizeof(buf) - off, "%s v%d", (k == 0) ? "" : ",", v);
+            if (get_arg_val(ins, k, &v))
+                off += snprintf(buf + off, sizeof(buf) - off, "%s v%d", k ? "," : "", v);
         }
         snprintf(buf + off, sizeof(buf) - off, ")");
         break;
@@ -304,9 +455,12 @@ static char *format_ssa_instr(const Instr *ins)
         snprintf(buf + off, sizeof(buf) - off, "op%d", (int)ins->op);
         break;
     }
+    #undef FMT_BINOP_IMM
 
     return gen_strdup(buf);
 }
+
+/* ========== 内联汇编 ========== */
 
 static void emit_inline_asm_text(Section *sec, const char *text)
 {
@@ -326,71 +480,555 @@ static void emit_inline_asm_text(Section *sec, const char *text)
 
         strip_comment_inplace(linebuf);
         trim_ws_inplace(linebuf);
-        if (linebuf[0] == '\0') continue;
+        if (!linebuf[0]) continue;
 
-        /* label: */
         size_t l = strlen(linebuf);
         if (l > 1 && linebuf[l - 1] == ':') {
             linebuf[l - 1] = '\0';
             trim_ws_inplace(linebuf);
-            if (linebuf[0] != '\0') emit_label(sec, linebuf);
+            if (linebuf[0]) emit_label(sec, linebuf);
             continue;
         }
 
-        /* 仅支持最小内联 asm：普通指令、以及 .label <name> */
         if (linebuf[0] == '.') {
             if (!strncmp(linebuf, ".label", 6) && isspace((unsigned char)linebuf[6])) {
                 char *name = linebuf + 6;
                 trim_ws_inplace(name);
-                if (name[0] != '\0') emit_label(sec, name);
+                if (name[0]) emit_label(sec, name);
                 continue;
             }
             fprintf(stderr, "inline asm: unsupported directive: %s\n", linebuf);
             exit(1);
         }
 
-        /* op [arg0[, arg1[, arg2]]] */
-        char *sp = linebuf;
-        char *op = sp;
+        char *sp = linebuf, *op = sp;
         while (*sp && !isspace((unsigned char)*sp)) sp++;
         if (*sp) *sp++ = '\0';
-        trim_ws_inplace(op);
         trim_ws_inplace(sp);
 
         char *args[3] = {0};
         int argc = 0;
-        while (sp && *sp && argc < 3) {
+        while (*sp && argc < 3) {
             char *comma = strchr(sp, ',');
             if (comma) *comma = '\0';
             trim_ws_inplace(sp);
             if (*sp) args[argc++] = sp;
             if (!comma) break;
             sp = comma + 1;
-            trim_ws_inplace(sp);
         }
 
-        if (argc == 0) emit_ins0(sec, op);
-        else if (argc == 1) emit_ins1(sec, op, args[0]);
-        else if (argc == 2) emit_ins2(sec, op, args[0], args[1]);
-        else if (argc == 3) emit_ins3(sec, op, args[0], args[1], args[2]);
-        else {
-            fprintf(stderr, "inline asm: too many operands: %s\n", linebuf);
-            exit(1);
+        switch (argc) {
+            case 0: emit_ins0(sec, op); break;
+            case 1: emit_ins1(sec, op, args[0]); break;
+            case 2: emit_ins2(sec, op, args[0], args[1]); break;
+            case 3: emit_ins3(sec, op, args[0], args[1], args[2]); break;
+            default:
+                fprintf(stderr, "inline asm: too many operands: %s\n", linebuf);
+                exit(1);
         }
     }
 }
 
-    static bool instr_has_imm(const Instr *ins, int *out) {
-        if (!ins || !ins->labels || ins->labels->len < 1) return false;
-        char *tag = (char *)list_get(ins->labels, 0);
-        if (tag && strcmp(tag, "imm") == 0) {
-            if (out) *out = (int)ins->imm.ival;
-            return true;
-        }
-        return false;
+/* ========== 指令选择辅助 ========== */
+
+static bool instr_has_imm(const Instr *ins, int *out) {
+    if (!ins || !ins->labels || ins->labels->len < 1) return false;
+    char *tag = (char *)list_get(ins->labels, 0);
+    if (tag && strcmp(tag, "imm") == 0) {
+        if (out) *out = (int)ins->imm.ival;
+        return true;
+    }
+    return false;
+}
+
+static void fmt_imm8(char *buf, size_t n, int v)
+{
+    snprintf(buf, n, "#%d", v & 0xFF);
+}
+
+static void emit_binop8(Section *sec, Instr *ins, const char *op, bool clr_carry)
+{
+    ValueName a = *(ValueName *)list_get(ins->args, 0);
+    int imm = 0;
+    emit_ins2(sec, "mov", "A", vreg(a));
+    if (clr_carry) emit_ins1(sec, "clr", "C");
+    if (instr_has_imm(ins, &imm)) {
+        char ibuf[16];
+        fmt_imm8(ibuf, sizeof(ibuf), imm);
+        emit_ins2(sec, op, "A", ibuf);
+    } else {
+        ValueName b = *(ValueName *)list_get(ins->args, 1);
+        emit_ins2(sec, op, "A", vreg(b));
+    }
+    emit_ins2(sec, "mov", vreg(ins->dest), "A");
+}
+
+static void emit_load_b_imm_or_reg(Section *sec, Instr *ins)
+{
+    int imm = 0;
+    if (instr_has_imm(ins, &imm)) {
+        char ibuf[16];
+        fmt_imm8(ibuf, sizeof(ibuf), imm);
+        emit_ins2(sec, "mov", "B", ibuf);
+    } else {
+        ValueName b = *(ValueName *)list_get(ins->args, 1);
+        emit_ins2(sec, "mov", "B", vreg(b));
+    }
+}
+
+static void emit_promote_to_v16(Section *sec, ValueName v, AddrPair *out)
+{
+    bool need_promote = !(is_v16_value(v) || val_size(v) >= 2);
+    int addr = v16_addr(v);
+    fmt_addr_pair(out, addr);
+    if (!need_promote) return;
+
+    int cval = 0;
+    Ctype *vt = val_type_get(v);
+    bool signed_ext = is_signed_type(vt);
+    if (const_map_get(v, &cval)) {
+        int low = cval & 0xFF;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "#%d", low);
+        emit_ins2(sec, "mov", out->lo, buf);
+        snprintf(buf, sizeof(buf), "#%d", signed_ext && (low & 0x80) ? 0xFF : 0x00);
+        emit_ins2(sec, "mov", out->hi, buf);
+        return;
     }
 
-/* === Instruction selection === */
+    emit_ins2(sec, "mov", "A", vreg(v));
+    emit_ins2(sec, "mov", out->lo, "A");
+    if (signed_ext) {
+        char *l_pos = new_label("v16_pos");
+        char *l_end = new_label("v16_end");
+        emit_ins2(sec, "anl", "A", "#0x80");
+        emit_ins1(sec, "jz", l_pos);
+        emit_ins2(sec, "mov", out->hi, "#255");
+        emit_ins1(sec, "sjmp", l_end);
+        emit_label(sec, l_pos);
+        emit_ins2(sec, "mov", out->hi, "#0");
+        emit_label(sec, l_end);
+        free(l_pos); free(l_end);
+    } else {
+        emit_ins2(sec, "mov", out->hi, "#0");
+    }
+}
+
+/* 通用16位加减法 */
+static void emit_addsub16(Section *sec, Instr *ins, bool is_sub)
+{
+    ValueName a = *(ValueName *)list_get(ins->args, 0);
+    ValueName b = *(ValueName *)list_get(ins->args, 1);
+    AddrPair pa, pb, pd;
+    int imm_a = 0, imm_b = 0;
+    bool a_const = const_map_get(a, &imm_a);
+    bool b_const = const_map_get(b, &imm_b);
+    if (a_const && b_const) {
+        int res = is_sub ? (imm_a - imm_b) : (imm_a + imm_b);
+        emit_load_imm16(sec, v16_addr(ins->dest), res);
+        if (g_const_map) const_map_put(ins->dest, res);
+        return;
+    }
+    if (!is_sub && a_const && !b_const) {
+        ValueName tmpv = a; a = b; b = tmpv;
+        int tmpi = imm_a; imm_a = imm_b; imm_b = tmpi;
+        bool tmpc = a_const; a_const = b_const; b_const = tmpc;
+    }
+    if (a_const && is_sub) {
+        emit_promote_to_v16(sec, b, &pb);
+        fmt_addr_pair(&pd, v16_addr(ins->dest));
+        emit_ins1(sec, "clr", "C");
+        {
+            char ibuf[16];
+            fmt_imm8(ibuf, sizeof(ibuf), imm_a);
+            emit_ins2(sec, "mov", "A", ibuf);
+            emit_ins2(sec, "subb", "A", pb.lo);
+        }
+        emit_ins2(sec, "mov", pd.lo, "A");
+        {
+            char ibuf[16];
+            fmt_imm8(ibuf, sizeof(ibuf), imm_a >> 8);
+            emit_ins2(sec, "mov", "A", ibuf);
+            emit_ins2(sec, "subb", "A", pb.hi);
+        }
+        emit_ins2(sec, "mov", pd.hi, "A");
+        return;
+    }
+
+    emit_promote_to_v16(sec, a, &pa);
+    if (!b_const) emit_promote_to_v16(sec, b, &pb);
+    fmt_addr_pair(&pd, v16_addr(ins->dest));
+    
+    if (is_sub) emit_ins1(sec, "clr", "C");
+    emit_ins2(sec, "mov", "A", pa.lo);
+    if (b_const) {
+        char ibuf[16];
+        fmt_imm8(ibuf, sizeof(ibuf), imm_b);
+        emit_ins2(sec, is_sub ? "subb" : "add", "A", ibuf);
+    } else {
+        emit_ins2(sec, is_sub ? "subb" : "add", "A", pb.lo);
+    }
+    emit_ins2(sec, "mov", pd.lo, "A");
+    emit_ins2(sec, "mov", "A", pa.hi);
+    if (b_const) {
+        char ibuf[16];
+        fmt_imm8(ibuf, sizeof(ibuf), imm_b >> 8);
+        emit_ins2(sec, is_sub ? "subb" : "addc", "A", ibuf);
+    } else {
+        emit_ins2(sec, is_sub ? "subb" : "addc", "A", pb.hi);
+    }
+    emit_ins2(sec, "mov", pd.hi, "A");
+}
+
+/* 通用比较操作（8位） */
+static void emit_cmp8(Section *sec, CmpKind kind, bool is_signed, 
+                     ValueName a, ValueName b, ValueName dest)
+{
+    char *l_true = new_label("cmp_true");
+    char *l_false = new_label("cmp_false");
+    char *l_end = new_label("cmp_end");
+    
+    emit_ins2(sec, "mov", "r6", vreg(a));
+    emit_ins2(sec, "mov", "r7", vreg(b));
+    
+    emit_cmp_branch(sec, kind, l_true, l_false, is_signed, kind == CMP_LE);
+    
+    emit_label(sec, l_false);
+    emit_ins2(sec, "mov", vreg(dest), "#0");
+    emit_ins1(sec, "sjmp", l_end);
+    emit_label(sec, l_true);
+    emit_ins2(sec, "mov", vreg(dest), "#1");
+    emit_label(sec, l_end);
+    
+    free(l_true); free(l_false); free(l_end);
+}
+
+static void emit_cmp8_branch(Section *sec, CmpKind kind, bool is_signed,
+                             ValueName a, ValueName b,
+                             const char *l_true, const char *l_false)
+{
+    emit_ins2(sec, "mov", "r6", vreg(a));
+    emit_ins2(sec, "mov", "r7", vreg(b));
+    emit_cmp_branch(sec, kind, l_true, l_false, is_signed, kind == CMP_LE);
+}
+
+static void fmt_v16_operand_byte(ValueName v, int byte, char *out, size_t n);
+
+/* 通用比较操作（16位） */
+static void emit_cmp16(Section *sec, CmpKind kind, bool is_signed,
+                       ValueName a, ValueName b, ValueName dest)
+{
+    char *l_true = new_label("cmp_true");
+    char *l_false = new_label("cmp_false");
+    char *l_end = new_label("cmp_end");
+    char *l_same = NULL;
+    char a_hi[32], a_lo[32], b_hi[32], b_lo[32];
+
+    /* 尝试常量优化 */
+    int cval = 0;
+    if (const_map_get(b, &cval)) {
+        /* b 是常量，检查是否可以用 CJNE 优化 */
+        /* 对于 16 位，使用 CJNE 比较 */
+        fmt_v16_operand_byte(a, 1, a_hi, sizeof(a_hi));
+        fmt_v16_operand_byte(a, 0, a_lo, sizeof(a_lo));
+        
+        int c_hi = (cval >> 8) & 0xFF;
+        int c_lo = cval & 0xFF;
+        
+        /* 高字节比较 */
+        char *l_check_lo = new_label("cmp_lo");
+        char *l_cmp_done = new_label("cmp_done");
+        
+        emit_ins2(sec, "mov", "A", a_hi);
+        char hi_buf[16];
+        snprintf(hi_buf, sizeof(hi_buf), "#%d", c_hi);
+        emit_ins3(sec, "cjne", "A", hi_buf, l_check_lo);
+        /* 高字节相等，比较低字节 */
+        emit_ins2(sec, "mov", "A", a_lo);
+        char lo_buf[16];
+        snprintf(lo_buf, sizeof(lo_buf), "#%d", c_lo);
+        emit_ins3(sec, "cjne", "A", lo_buf, l_check_lo);
+        /* 完全相等 */
+        if (kind == CMP_LT || kind == CMP_GT) {
+            emit_ins2(sec, "mov", vreg(dest), "#0");  /* LT/GT 不相等为假 */
+        } else {
+            emit_ins2(sec, "mov", vreg(dest), "#1");  /* LE/GE 相等为真 */
+        }
+        emit_ins1(sec, "sjmp", l_end);
+        
+        /* 高字节或低字节不等 */
+        emit_label(sec, l_check_lo);
+        /* CJNE 后 C=1 表示 A < operand */
+        if (kind == CMP_LT || kind == CMP_LE) {
+            emit_ins1(sec, "jc", l_true);
+        } else {
+            emit_ins1(sec, "jc", l_false);
+        }
+        emit_ins1(sec, "sjmp", kind == CMP_LT || kind == CMP_LE ? l_false : l_true);
+        
+        emit_label(sec, l_true);
+        emit_ins2(sec, "mov", vreg(dest), "#1");
+        emit_ins1(sec, "sjmp", l_end);
+        emit_label(sec, l_false);
+        emit_ins2(sec, "mov", vreg(dest), "#0");
+        emit_label(sec, l_end);
+        
+        free(l_check_lo);
+        free(l_cmp_done);
+        free(l_true);
+        free(l_false);
+        free(l_end);
+        return;
+    }
+
+    fmt_v16_operand_byte(a, 1, a_hi, sizeof(a_hi));
+    fmt_v16_operand_byte(a, 0, a_lo, sizeof(a_lo));
+    fmt_v16_operand_byte(b, 1, b_hi, sizeof(b_hi));
+    fmt_v16_operand_byte(b, 0, b_lo, sizeof(b_lo));
+
+    if (is_signed) {
+        l_same = new_label("cmp_same");
+        emit_ins2(sec, "mov", "A", a_hi);
+        emit_ins2(sec, "xrl", "A", b_hi);
+        emit_ins2(sec, "anl", "A", "#0x80");
+        emit_ins1(sec, "jz", l_same);
+        emit_ins2(sec, "mov", "A", a_hi);
+        emit_ins2(sec, "anl", "A", "#0x80");
+        bool lt_like = (kind == CMP_LT || kind == CMP_LE);
+        emit_ins1(sec, lt_like ? "jnz" : "jz", l_true);
+        emit_ins1(sec, "sjmp", l_false);
+        emit_label(sec, l_same);
+        free(l_same);
+    }
+
+    emit_ins2(sec, "mov", "A", a_hi);
+    emit_ins1(sec, "clr", "C");
+    emit_ins2(sec, "subb", "A", b_hi);
+    if (kind == CMP_LT || kind == CMP_LE) {
+        emit_ins1(sec, "jc", l_true);
+        emit_ins1(sec, "jnz", l_false);
+    } else {
+        emit_ins1(sec, "jc", l_false);
+        emit_ins1(sec, "jnz", l_true);
+    }
+
+    emit_ins2(sec, "mov", "A", a_lo);
+    emit_ins1(sec, "clr", "C");
+    emit_ins2(sec, "subb", "A", b_lo);
+    if (kind == CMP_LT || kind == CMP_LE) {
+        emit_ins1(sec, "jc", l_true);
+        emit_ins1(sec, "jnz", l_false);
+    } else {
+        emit_ins1(sec, "jc", l_false);
+        emit_ins1(sec, "jnz", l_true);
+    }
+
+    emit_ins1(sec, "sjmp", (kind == CMP_LE || kind == CMP_GE) ? l_true : l_false);
+
+    emit_label(sec, l_false);
+    emit_ins2(sec, "mov", vreg(dest), "#0");
+    emit_ins1(sec, "sjmp", l_end);
+    emit_label(sec, l_true);
+    emit_ins2(sec, "mov", vreg(dest), "#1");
+    emit_label(sec, l_end);
+
+    free(l_true); free(l_false); free(l_end);
+}
+
+static void emit_cmp16_branch(Section *sec, CmpKind kind, bool is_signed,
+                              ValueName a, ValueName b,
+                              const char *l_true, const char *l_false)
+{
+    char *l_same = NULL;
+    char a_hi[32], a_lo[32], b_hi[32], b_lo[32];
+
+    int cval = 0;
+    if (const_map_get(b, &cval)) {
+        fmt_v16_operand_byte(a, 1, a_hi, sizeof(a_hi));
+        fmt_v16_operand_byte(a, 0, a_lo, sizeof(a_lo));
+
+        int c_hi = (cval >> 8) & 0xFF;
+        int c_lo = cval & 0xFF;
+
+        char *l_check_lo = new_label("cmp_lo");
+
+        emit_ins2(sec, "mov", "A", a_hi);
+        char hi_buf[16];
+        snprintf(hi_buf, sizeof(hi_buf), "#%d", c_hi);
+        emit_ins3(sec, "cjne", "A", hi_buf, l_check_lo);
+        emit_ins2(sec, "mov", "A", a_lo);
+        char lo_buf[16];
+        snprintf(lo_buf, sizeof(lo_buf), "#%d", c_lo);
+        emit_ins3(sec, "cjne", "A", lo_buf, l_check_lo);
+
+        emit_ins1(sec, "sjmp", (kind == CMP_LT || kind == CMP_GT) ? l_false : l_true);
+
+        emit_label(sec, l_check_lo);
+        if (kind == CMP_LT || kind == CMP_LE) {
+            emit_ins1(sec, "jc", l_true);
+            emit_ins1(sec, "sjmp", l_false);
+        } else {
+            emit_ins1(sec, "jc", l_false);
+            emit_ins1(sec, "sjmp", l_true);
+        }
+
+        free(l_check_lo);
+        return;
+    }
+
+    fmt_v16_operand_byte(a, 1, a_hi, sizeof(a_hi));
+    fmt_v16_operand_byte(a, 0, a_lo, sizeof(a_lo));
+    fmt_v16_operand_byte(b, 1, b_hi, sizeof(b_hi));
+    fmt_v16_operand_byte(b, 0, b_lo, sizeof(b_lo));
+
+    if (is_signed) {
+        l_same = new_label("cmp_same");
+        emit_ins2(sec, "mov", "A", a_hi);
+        emit_ins2(sec, "xrl", "A", b_hi);
+        emit_ins2(sec, "anl", "A", "#0x80");
+        emit_ins1(sec, "jz", l_same);
+        emit_ins2(sec, "mov", "A", a_hi);
+        emit_ins2(sec, "anl", "A", "#0x80");
+        bool lt_like = (kind == CMP_LT || kind == CMP_LE);
+        emit_ins1(sec, lt_like ? "jnz" : "jz", l_true);
+        emit_ins1(sec, "sjmp", l_false);
+        emit_label(sec, l_same);
+        free(l_same);
+    }
+
+    emit_ins2(sec, "mov", "A", a_hi);
+    emit_ins1(sec, "clr", "C");
+    emit_ins2(sec, "subb", "A", b_hi);
+    if (kind == CMP_LT || kind == CMP_LE) {
+        emit_ins1(sec, "jc", l_true);
+        emit_ins1(sec, "jnz", l_false);
+    } else {
+        emit_ins1(sec, "jc", l_false);
+        emit_ins1(sec, "jnz", l_true);
+    }
+
+    emit_ins2(sec, "mov", "A", a_lo);
+    emit_ins1(sec, "clr", "C");
+    emit_ins2(sec, "subb", "A", b_lo);
+    if (kind == CMP_LT || kind == CMP_LE) {
+        emit_ins1(sec, "jc", l_true);
+        emit_ins1(sec, "jnz", l_false);
+    } else {
+        emit_ins1(sec, "jc", l_false);
+        emit_ins1(sec, "jnz", l_true);
+    }
+
+    emit_ins1(sec, "sjmp", (kind == CMP_LE || kind == CMP_GE) ? l_true : l_false);
+}
+
+static void emit_eqne8_branch(Section *sec, bool is_ne, ValueName a, ValueName b,
+                              const char *l_true, const char *l_false)
+{
+    int cval = 0;
+    bool b_const = const_map_get(b, &cval);
+    bool a_const = !b_const && const_map_get(a, &cval);
+    ValueName other = a_const ? b : a;
+    emit_ins2(sec, "mov", "A", vreg(other));
+    if (a_const || b_const) {
+        char ibuf[16];
+        fmt_imm8(ibuf, sizeof(ibuf), cval);
+        emit_ins3(sec, "cjne", "A", ibuf, is_ne ? l_true : l_false);
+    } else {
+        emit_ins3(sec, "cjne", "A", vreg(b), is_ne ? l_true : l_false);
+    }
+    emit_ins1(sec, "sjmp", is_ne ? l_false : l_true);
+}
+
+static void emit_eqne16_branch(Section *sec, bool is_ne, ValueName a, ValueName b,
+                               const char *l_true, const char *l_false)
+{
+    char a_hi[32], a_lo[32], b_hi[32], b_lo[32];
+    char *l_ne = new_label("cmp_ne");
+
+    fmt_v16_operand_byte(a, 1, a_hi, sizeof(a_hi));
+    fmt_v16_operand_byte(a, 0, a_lo, sizeof(a_lo));
+    fmt_v16_operand_byte(b, 1, b_hi, sizeof(b_hi));
+    fmt_v16_operand_byte(b, 0, b_lo, sizeof(b_lo));
+
+    emit_ins2(sec, "mov", "A", a_hi);
+    emit_ins3(sec, "cjne", "A", b_hi, l_ne);
+    emit_ins2(sec, "mov", "A", a_lo);
+    emit_ins3(sec, "cjne", "A", b_lo, l_ne);
+
+    emit_ins1(sec, "sjmp", is_ne ? l_false : l_true);
+    emit_label(sec, l_ne);
+    emit_ins1(sec, "sjmp", is_ne ? l_true : l_false);
+
+    free(l_ne);
+}
+
+static void fmt_v16_operand_byte(ValueName v, int byte, char *out, size_t n)
+{
+    int cv = 0;
+    if (const_map_get(v, &cv)) {
+        fmt_imm8(out, n, (cv >> (byte * 8)) & 0xFF);
+    } else {
+        AddrPair p; fmt_addr_pair(&p, v16_addr(v));
+        snprintf(out, n, "%s", byte == 0 ? p.lo : p.hi);
+    }
+}
+
+/* 通用16位相等/不等比较 */
+static void emit_eqne16_check_zero(Section *sec, ValueName v, bool is_a, 
+                                    bool a_is_zero, bool b_is_zero,
+                                    ValueName a, ValueName b,
+                                    char *l_hit)
+{
+    char v_hi[32], v_lo[32], o_hi[32], o_lo[32];
+    
+    if ((is_a ? a_is_zero : b_is_zero) && val_size(v) < 2) {
+        emit_ins2(sec, "mov", "A", vreg(v));
+        emit_ins3(sec, "cjne", "A", "#0", l_hit);
+    } else {
+        if ((is_a ? b_is_zero : a_is_zero)) {
+            fmt_v16_operand_byte(v, 1, v_hi, sizeof(v_hi));
+            fmt_v16_operand_byte(v, 0, v_lo, sizeof(v_lo));
+            emit_ins2(sec, "mov", "A", v_hi);
+            emit_ins3(sec, "cjne", "A", "#0", l_hit);
+            emit_ins2(sec, "mov", "A", v_lo);
+            emit_ins3(sec, "cjne", "A", "#0", l_hit);
+        } else {
+            fmt_v16_operand_byte(v, 1, v_hi, sizeof(v_hi));
+            fmt_v16_operand_byte(v, 0, v_lo, sizeof(v_lo));
+            fmt_v16_operand_byte(is_a ? b : a, 1, o_hi, sizeof(o_hi));
+            fmt_v16_operand_byte(is_a ? b : a, 0, o_lo, sizeof(o_lo));
+            emit_ins2(sec, "mov", "A", v_hi);
+            emit_ins3(sec, "cjne", "A", o_hi, l_hit);
+            emit_ins2(sec, "mov", "A", v_lo);
+            emit_ins3(sec, "cjne", "A", o_lo, l_hit);
+        }
+    }
+}
+
+static void emit_eqne16(Section *sec, Instr *ins, bool is_ne)
+{
+    ValueName a = *(ValueName *)list_get(ins->args, 0);
+    ValueName b = *(ValueName *)list_get(ins->args, 1);
+    char *l_hit = new_label(is_ne ? "ne_hit" : "eq_hit");
+    char *l_end = new_label(is_ne ? "ne_end" : "eq_end");
+    
+    int imm = 0;
+    bool b_is_zero = const_map_get(b, &imm) && imm == 0;
+    bool a_is_zero = const_map_get(a, &imm) && imm == 0;
+    
+    emit_eqne16_check_zero(sec, a, true, a_is_zero, b_is_zero, a, b, l_hit);
+    
+    emit_ins2(sec, "mov", vreg(ins->dest), is_ne ? "#0" : "#1");
+    emit_ins1(sec, "sjmp", l_end);
+    emit_label(sec, l_hit);
+    emit_ins2(sec, "mov", vreg(ins->dest), is_ne ? "#1" : "#0");
+    emit_label(sec, l_end);
+    
+    free(l_hit); free(l_end);
+}
+
+/* ========== 主指令选择 ========== */
+
 void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
 {
     if (!ins) return;
@@ -403,280 +1041,115 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         val_type_put(ins->dest, ins->type);
     }
 
+    #define IS_16BIT() (ins->type && ins->type->size >= 2)
+    #define GET_ARG(n) (*(ValueName *)list_get(ins->args, (n)))
+    #define VREG(n) vreg(GET_ARG(n))
+
     switch (ins->op) {
     case IROP_NOP:
         gen_clear_pending_ssa();
         return;
+        
     case IROP_ASM: {
-        const char *t = (ins->labels && ins->labels->len > 0) ? (char *)list_get(ins->labels, 0) : NULL;
+        const char *t = get_label_at(ins, 0);
         emit_inline_asm_text(sec, t);
         gen_clear_pending_ssa();
         return;
     }
-    case IROP_PARAM:
-        if (ins->labels && ins->labels->len > 0) {
-            char *pname = list_get(ins->labels, 0);
-            Ctype *pt = NULL;
-            int byte_off = param_byte_offset(func, pname, &pt);
-            int size = pt ? pt->size : (ins->type ? ins->type->size : 1);
-            if (byte_off < 0) {
-                int idx = param_index(func, pname);
-                if (idx >= 0) byte_off = (size >= 2) ? idx * 2 : idx;
+    
+    case IROP_PARAM: {
+        const char *pname = get_label_at(ins, 0);
+        if (!pname) break;
+        Ctype *pt = NULL;
+        int byte_off = param_byte_offset(func, pname, &pt);
+        int size = pt ? pt->size : (ins->type ? ins->type->size : 1);
+        if (byte_off < 0) {
+            int idx = param_index(func, pname);
+            if (idx >= 0) byte_off = (size >= 2) ? idx * 2 : idx;
+        }
+        
+        bool use_stack = (byte_off >= 3);
+        int stack_off = 2 + (byte_off - 3);
+        
+        if (size >= 2) {
+            int addr = v16_addr(ins->dest);
+            for (int b = 0; b < 2; ++b) {
+                int byte_idx = byte_off + b;
+                if (byte_idx < 3) {
+                    char regbuf[8], dst[64];
+                    snprintf(regbuf, sizeof(regbuf), "r%d", 1 + byte_idx);
+                    fmt_v16_direct(dst, sizeof(dst), addr + b);
+                    emit_ins2(sec, "mov", dst, regbuf);
+                } else if (use_stack) {
+                    emit_load_stack_param_to_direct(sec, 2 + (byte_idx - 3), addr + b, func && func->stack_size > 0);
+                }
             }
-            if (size >= 2) {
-                int addr = v16_addr(ins->dest);
-                if (byte_off >= 0 && byte_off + 1 < 8) {
-                    char reglo[8];
-                    char reghi[8];
-                    snprintf(reglo, sizeof(reglo), "r%d", 7 - byte_off);
-                    snprintf(reghi, sizeof(reghi), "r%d", 7 - (byte_off + 1));
-                    char dst0[16];
-                    char dst1[16];
-                    fmt_direct(dst0, sizeof(dst0), addr);
-                    fmt_direct(dst1, sizeof(dst1), addr + 1);
-                    emit_ins2(sec, "mov", dst0, reglo);
-                    emit_ins2(sec, "mov", dst1, reghi);
-                } else if (byte_off >= 8) {
-                    int offset = 2 + (byte_off - 8);
-                    emit_load_stack_param_to_direct(sec, offset, addr, func && func->stack_size > 0);
-                    emit_load_stack_param_to_direct(sec, offset + 1, addr + 1, func && func->stack_size > 0);
-                }
-            } else {
-                if (byte_off >= 0 && byte_off < 8) {
-                    char regbuf[8];
-                    snprintf(regbuf, sizeof(regbuf), "r%d", 7 - byte_off);
-                    emit_ins2(sec, "mov", vreg(ins->dest), regbuf);
-                } else if (byte_off >= 8) {
-                    int offset = 2 + (byte_off - 8);
-                    emit_load_stack_param(sec, offset, vreg(ins->dest), func && func->stack_size > 0);
-                }
+        } else {
+            if (!use_stack && byte_off >= 0 && byte_off < 3) {
+                char regbuf[8];
+                snprintf(regbuf, sizeof(regbuf), "r%d", 1 + byte_off);
+                emit_ins2(sec, "mov", vreg(ins->dest), regbuf);
+            } else if (use_stack) {
+                emit_load_stack_param(sec, stack_off, vreg(ins->dest), func && func->stack_size > 0);
             }
         }
         gen_clear_pending_ssa();
         return;
+    }
+    
     case IROP_CONST:
-        if (ins->type && ins->type->size >= 2) {
-            int addr = v16_addr(ins->dest);
-            char dst0[16];
-            char dst1[16];
-            fmt_direct(dst0, sizeof(dst0), addr);
-            fmt_direct(dst1, sizeof(dst1), addr + 1);
-            
-            snprintf(buf, sizeof(buf), "#%d", (int)(ins->imm.ival & 0xFF));
-            emit_ins2(sec, "mov", dst0, buf);
-            
-            snprintf(buf, sizeof(buf), "#%d", (int)((ins->imm.ival >> 8) & 0xFF));
-            emit_ins2(sec, "mov", dst1, buf);
-            
-            if (g_const_map)
-                const_map_put(ins->dest, (int)ins->imm.ival);
+        if (IS_16BIT()) {
+            if (g_const_map) const_map_put(ins->dest, (int)ins->imm.ival);
         } else {
-            if (g_const_map)
-                const_map_put(ins->dest, (int)ins->imm.ival);
+            if (g_const_map) const_map_put(ins->dest, (int)ins->imm.ival);
         }
         break;
-    case IROP_ADD:
-        if (ins->type && ins->type->size >= 2) {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            ValueName b = *(ValueName *)list_get(ins->args, 1);
-            int da = v16_addr(a);
-            int db = v16_addr(b);
-            int dd = v16_addr(ins->dest);
-            char a0[16], a1[16], b0[16], b1[16], d0[16], d1[16];
-            fmt_direct(a0, sizeof(a0), da);
-            fmt_direct(a1, sizeof(a1), da + 1);
-            fmt_direct(b0, sizeof(b0), db);
-            fmt_direct(b1, sizeof(b1), db + 1);
-            fmt_direct(d0, sizeof(d0), dd);
-            fmt_direct(d1, sizeof(d1), dd + 1);
-            emit_ins2(sec, "mov", "A", a0);
-            emit_ins2(sec, "add", "A", b0);
-            emit_ins2(sec, "mov", d0, "A");
-            emit_ins2(sec, "mov", "A", a1);
-            emit_ins2(sec, "addc", "A", b1);
-            emit_ins2(sec, "mov", d1, "A");
-        } else {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            int imm = 0;
-            if (instr_has_imm(ins, &imm)) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
-                emit_ins2(sec, "mov", "A", vreg(a));
-                emit_ins2(sec, "add", "A", ibuf);
-            } else {
-                ValueName b = *(ValueName *)list_get(ins->args, 1);
-                emit_ins2(sec, "mov", "A", vreg(a));
-                emit_ins2(sec, "add", "A", vreg(b));
-            }
-            emit_ins2(sec, "mov", vreg(ins->dest), "A");
-        }
-        break;
-    case IROP_SUB:
-        if (ins->type && ins->type->size >= 2) {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            ValueName b = *(ValueName *)list_get(ins->args, 1);
-            int da = v16_addr(a);
-            int db = v16_addr(b);
-            int dd = v16_addr(ins->dest);
-            char a0[16], a1[16], b0[16], b1[16], d0[16], d1[16];
-            fmt_direct(a0, sizeof(a0), da);
-            fmt_direct(a1, sizeof(a1), da + 1);
-            fmt_direct(b0, sizeof(b0), db);
-            fmt_direct(b1, sizeof(b1), db + 1);
-            fmt_direct(d0, sizeof(d0), dd);
-            fmt_direct(d1, sizeof(d1), dd + 1);
-            emit_ins1(sec, "clr", "C");
-            emit_ins2(sec, "mov", "A", a0);
-            emit_ins2(sec, "subb", "A", b0);
-            emit_ins2(sec, "mov", d0, "A");
-            emit_ins2(sec, "mov", "A", a1);
-            emit_ins2(sec, "subb", "A", b1);
-            emit_ins2(sec, "mov", d1, "A");
-        } else {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            int imm = 0;
-            emit_ins2(sec, "mov", "A", vreg(a));
-            emit_ins1(sec, "clr", "C");
-            if (instr_has_imm(ins, &imm)) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
-                emit_ins2(sec, "subb", "A", ibuf);
-            } else {
-                ValueName b = *(ValueName *)list_get(ins->args, 1);
-                emit_ins2(sec, "subb", "A", vreg(b));
-            }
-            emit_ins2(sec, "mov", vreg(ins->dest), "A");
-        }
-        break;
-    case IROP_MUL:
-        {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            int imm = 0;
-            if (instr_has_imm(ins, &imm)) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
-                emit_ins2(sec, "mov", "B", ibuf);
-            } else {
-                ValueName b = *(ValueName *)list_get(ins->args, 1);
-                emit_ins2(sec, "mov", "B", vreg(b));
-            }
-            emit_ins2(sec, "mov", "A", vreg(a));
-        }
-        emit_ins1(sec, "mul", "AB");
-        emit_ins2(sec, "mov", vreg(ins->dest), "A");
-        break;
-    case IROP_DIV:
-        {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            int imm = 0;
-            if (instr_has_imm(ins, &imm)) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
-                emit_ins2(sec, "mov", "B", ibuf);
-            } else {
-                ValueName b = *(ValueName *)list_get(ins->args, 1);
-                emit_ins2(sec, "mov", "B", vreg(b));
-            }
-            emit_ins2(sec, "mov", "A", vreg(a));
-        }
-        emit_ins1(sec, "div", "AB");
-        emit_ins2(sec, "mov", vreg(ins->dest), "A");
-        break;
-    case IROP_MOD:
-        {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            int imm = 0;
-            if (instr_has_imm(ins, &imm)) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
-                emit_ins2(sec, "mov", "B", ibuf);
-            } else {
-                ValueName b = *(ValueName *)list_get(ins->args, 1);
-                emit_ins2(sec, "mov", "B", vreg(b));
-            }
-            emit_ins2(sec, "mov", "A", vreg(a));
-        }
-        emit_ins1(sec, "div", "AB");
-        emit_ins2(sec, "mov", vreg(ins->dest), "B");
-        break;
-    case IROP_AND:
-        {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            int imm = 0;
-            emit_ins2(sec, "mov", "A", vreg(a));
-            if (instr_has_imm(ins, &imm)) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
-                emit_ins2(sec, "anl", "A", ibuf);
-            } else {
-                ValueName b = *(ValueName *)list_get(ins->args, 1);
-                emit_ins2(sec, "anl", "A", vreg(b));
-            }
-        }
-        emit_ins2(sec, "mov", vreg(ins->dest), "A");
-        break;
-    case IROP_OR:
-        {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            int imm = 0;
-            emit_ins2(sec, "mov", "A", vreg(a));
-            if (instr_has_imm(ins, &imm)) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
-                emit_ins2(sec, "orl", "A", ibuf);
-            } else {
-                ValueName b = *(ValueName *)list_get(ins->args, 1);
-                emit_ins2(sec, "orl", "A", vreg(b));
-            }
-        }
-        emit_ins2(sec, "mov", vreg(ins->dest), "A");
-        break;
-    case IROP_XOR:
-        {
-            ValueName a = *(ValueName *)list_get(ins->args, 0);
-            int imm = 0;
-            emit_ins2(sec, "mov", "A", vreg(a));
-            if (instr_has_imm(ins, &imm)) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", imm & 0xFF);
-                emit_ins2(sec, "xrl", "A", ibuf);
-            } else {
-                ValueName b = *(ValueName *)list_get(ins->args, 1);
-                emit_ins2(sec, "xrl", "A", vreg(b));
-            }
-        }
-        emit_ins2(sec, "mov", vreg(ins->dest), "A");
-        break;
-    case IROP_SHL: {
-        ValueName a = *(ValueName *)list_get(ins->args, 0);
-        int shift_cnt = 0;
-        bool b_is_const = instr_has_imm(ins, &shift_cnt);
-        ValueName b = 0;
-        if (!b_is_const) {
-            b = *(ValueName *)list_get(ins->args, 1);
-            b_is_const = const_map_get(b, &shift_cnt);
-        }
         
-        if (b_is_const && shift_cnt == 1) {
+    case IROP_ADD:
+        if (IS_16BIT()) emit_addsub16(sec, ins, false);
+        else emit_binop8(sec, ins, "add", false);
+        break;
+        
+    case IROP_SUB:
+        if (IS_16BIT()) emit_addsub16(sec, ins, true);
+        else emit_binop8(sec, ins, "subb", true);
+        break;
+        
+    case IROP_MUL:
+    case IROP_DIV:
+    case IROP_MOD: {
+        ValueName a = GET_ARG(0);
+        emit_load_b_imm_or_reg(sec, ins);
+        emit_ins2(sec, "mov", "A", vreg(a));
+        emit_ins1(sec, ins->op == IROP_MUL ? "mul" : "div", "AB");
+        emit_ins2(sec, "mov", vreg(ins->dest), 
+                 ins->op == IROP_MOD ? "B" : "A");
+        break;
+    }
+    
+    case IROP_AND: emit_binop8(sec, ins, "anl", false); break;
+    case IROP_OR:  emit_binop8(sec, ins, "orl", false); break;
+    case IROP_XOR: emit_binop8(sec, ins, "xrl", false); break;
+    
+    case IROP_SHL: {
+        ValueName a = GET_ARG(0);
+        int cnt = 0;
+        bool is_const = instr_has_imm(ins, &cnt) || 
+                       (!instr_has_imm(ins, &cnt) && const_map_get(GET_ARG(1), &cnt));
+        
+        if (is_const && cnt >= 1 && cnt <= 4) {
             emit_ins2(sec, "mov", "A", vreg(a));
-            emit_ins2(sec, "add", "A", "ACC");
-            emit_ins2(sec, "mov", vreg(ins->dest), "A");
-        } else if (b_is_const && shift_cnt > 0 && shift_cnt <= 4) {
-            emit_ins2(sec, "mov", "A", vreg(a));
-            for (int i = 0; i < shift_cnt; i++) {
-                emit_ins2(sec, "add", "A", "ACC");
-            }
+            for (int i = 0; i < cnt; i++) emit_ins2(sec, "add", "A", "ACC");
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
         } else {
             char *l_loop = new_label("shl_loop");
             char *l_end = new_label("shl_end");
             emit_ins2(sec, "mov", "A", vreg(a));
-            if (b_is_const) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", shift_cnt & 0xFF);
+            if (is_const) {
+                char ibuf[16]; fmt_imm8(ibuf, sizeof(ibuf), cnt);
                 emit_ins2(sec, "mov", "r7", ibuf);
             } else {
-                emit_ins2(sec, "mov", "r7", vreg(b));
+                emit_ins2(sec, "mov", "r7", VREG(1));
             }
             emit_ins3(sec, "cjne", "r7", "#0", l_loop);
             emit_ins1(sec, "sjmp", l_end);
@@ -684,87 +1157,51 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             emit_ins2(sec, "add", "A", "ACC");
             emit_ins2(sec, "djnz", "r7", l_loop);
             emit_label(sec, l_end);
-            free(l_loop);
-            free(l_end);
+            free(l_loop); free(l_end);
         }
         break;
     }
+    
     case IROP_SHR: {
-        ValueName a = *(ValueName *)list_get(ins->args, 0);
-        int shift_cnt = 0;
-        bool b_is_const = instr_has_imm(ins, &shift_cnt);
-        ValueName b = 0;
-        if (!b_is_const) {
-            b = *(ValueName *)list_get(ins->args, 1);
-            b_is_const = const_map_get(b, &shift_cnt);
-        }
-        bool is_signed = is_signed_type(ins->type);
+        ValueName a = GET_ARG(0);
+        int cnt = 0;
+        bool is_const = instr_has_imm(ins, &cnt) || 
+                       (!instr_has_imm(ins, &cnt) && const_map_get(GET_ARG(1), &cnt));
+        bool signed_shift = is_signed_type(ins->type);
         
-        if (b_is_const && !is_signed) {
-            if (shift_cnt == 1) {
-                emit_ins2(sec, "mov", "A", vreg(a));
+        if (is_const && !signed_shift) {
+            emit_ins2(sec, "mov", "A", vreg(a));
+            if (cnt == 1) {
                 emit_ins1(sec, "clr", "C");
                 emit_ins1(sec, "rrc", "A");
-                emit_ins2(sec, "mov", vreg(ins->dest), "A");
-            } else if (shift_cnt == 7) {
-                emit_ins2(sec, "mov", "A", vreg(a));
+            } else if (cnt == 4) {
+                emit_ins1(sec, "swap", "A");
+                emit_ins2(sec, "anl", "A", "#0x0F");
+            } else if (cnt == 7) {
                 emit_ins1(sec, "swap", "A");
                 emit_ins1(sec, "rrc", "A");
                 emit_ins1(sec, "rrc", "A");
                 emit_ins1(sec, "rrc", "A");
                 emit_ins2(sec, "anl", "A", "#0x01");
-                emit_ins2(sec, "mov", vreg(ins->dest), "A");
-            } else if (shift_cnt == 4) {
-                emit_ins2(sec, "mov", "A", vreg(a));
-                emit_ins1(sec, "swap", "A");
-                emit_ins2(sec, "anl", "A", "#0x0F");
-                emit_ins2(sec, "mov", vreg(ins->dest), "A");
-            } else if (shift_cnt > 0 && shift_cnt <= 4) {
-                emit_ins2(sec, "mov", "A", vreg(a));
-                for (int i = 0; i < shift_cnt; i++) {
-                    emit_ins1(sec, "clr", "C");
-                    emit_ins1(sec, "rrc", "A");
-                }
-                emit_ins2(sec, "mov", vreg(ins->dest), "A");
             } else {
-                emit_ins2(sec, "mov", "A", vreg(a));
-                for (int i = 0; i < shift_cnt; i++) {
+                for (int i = 0; i < cnt; i++) {
                     emit_ins1(sec, "clr", "C");
                     emit_ins1(sec, "rrc", "A");
                 }
-                emit_ins2(sec, "mov", vreg(ins->dest), "A");
-            }
-        } else if (b_is_const && is_signed) {
-            emit_ins2(sec, "mov", "A", vreg(a));
-            for (int i = 0; i < shift_cnt; i++) {
-                char *l_pos = new_label("shr_pos");
-                char *l_cont = new_label("shr_cont");
-                emit_ins2(sec, "mov", "r6", "A");
-                emit_ins2(sec, "anl", "A", "#0x80");
-                emit_ins1(sec, "jz", l_pos);
-                emit_ins2(sec, "mov", "A", "r6");
-                emit_ins1(sec, "clr", "C");
-                emit_ins1(sec, "rrc", "A");
-                emit_ins2(sec, "orl", "A", "#0x80");
-                emit_ins1(sec, "sjmp", l_cont);
-                emit_label(sec, l_pos);
-                emit_ins2(sec, "mov", "A", "r6");
-                emit_ins1(sec, "clr", "C");
-                emit_ins1(sec, "rrc", "A");
-                emit_label(sec, l_cont);
-                free(l_pos);
-                free(l_cont);
             }
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
         } else {
+            // 循环移位实现（带符号或无符号）
             char *l_loop = new_label("shr_loop");
             char *l_end = new_label("shr_end");
             emit_ins2(sec, "mov", "A", vreg(a));
-            emit_ins2(sec, "mov", "r7", vreg(b));
-            emit_ins3(sec, "cjne", "r7", "#0", l_loop);
-            emit_ins1(sec, "sjmp", l_end);
+            emit_ins2(sec, "mov", "r7", is_const ? (snprintf(buf, sizeof(buf), "#%d", cnt), buf) : vreg(GET_ARG(1)));
+            if (!is_const) {
+                emit_ins3(sec, "cjne", "r7", "#0", l_loop);
+                emit_ins1(sec, "sjmp", l_end);
+            }
             emit_label(sec, l_loop);
-            if (is_signed) {
+            if (signed_shift) {
                 char *l_pos = new_label("shr_pos");
                 char *l_cont = new_label("shr_cont");
                 emit_ins2(sec, "mov", "r6", "A");
@@ -780,8 +1217,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                 emit_ins1(sec, "clr", "C");
                 emit_ins1(sec, "rrc", "A");
                 emit_label(sec, l_cont);
-                free(l_pos);
-                free(l_cont);
+                free(l_pos); free(l_cont);
             } else {
                 emit_ins1(sec, "clr", "C");
                 emit_ins1(sec, "rrc", "A");
@@ -789,493 +1225,349 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             emit_ins2(sec, "djnz", "r7", l_loop);
             emit_label(sec, l_end);
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
-            free(l_loop);
-            free(l_end);
+            free(l_loop); free(l_end);
         }
         break;
     }
+    
     case IROP_NEG:
         emit_ins1(sec, "clr", "C");
         emit_ins2(sec, "mov", "A", "#0");
-        emit_ins2(sec, "subb", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
+        emit_ins2(sec, "subb", "A", VREG(0));
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
+        
     case IROP_NOT:
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
+        emit_ins2(sec, "mov", "A", VREG(0));
         emit_ins1(sec, "cpl", "A");
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
+        
     case IROP_TRUNC: {
-        /* Truncate integer to smaller size (currently: keep low byte) */
-        ValueName srcv = *(ValueName *)list_get(ins->args, 0);
-        int const_val = 0;
-        if (const_map_get(srcv, &const_val)) {
-            snprintf(buf, sizeof(buf), "#%d", const_val & 0xFF);
+        ValueName src = GET_ARG(0);
+        int val;
+        if (const_map_get(src, &val)) {
+            snprintf(buf, sizeof(buf), "#%d", val & 0xFF);
             emit_ins2(sec, "mov", vreg(ins->dest), buf);
-            if (g_const_map) const_map_put(ins->dest, const_val & 0xFF);
-        } else if (is_v16_value(srcv) || val_size(srcv) >= 2) {
-            int addr = v16_addr(srcv);
+            if (g_const_map) const_map_put(ins->dest, val & 0xFF);
+        } else if (is_v16_value(src) || val_size(src) >= 2) {
             char src0[16];
-            fmt_direct(src0, sizeof(src0), addr);
+            fmt_v16_direct(src0, sizeof(src0), v16_addr(src));
             emit_ins2(sec, "mov", "A", src0);
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
         } else {
-            emit_ins2(sec, "mov", vreg(ins->dest), vreg(srcv));
+            emit_ins2(sec, "mov", vreg(ins->dest), vreg(src));
         }
         break;
     }
+    
     case IROP_ZEXT: {
-        /* Zero-extend integer to larger size (currently: 8 -> 16) */
-        ValueName srcv = *(ValueName *)list_get(ins->args, 0);
-        int dst_addr = v16_addr(ins->dest);
-        char dst0[16], dst1[16];
-        fmt_direct(dst0, sizeof(dst0), dst_addr);
-        fmt_direct(dst1, sizeof(dst1), dst_addr + 1);
-
-        int const_val = 0;
-        if (const_map_get(srcv, &const_val)) {
-            snprintf(buf, sizeof(buf), "#%d", const_val & 0xFF);
-            emit_ins2(sec, "mov", dst0, buf);
-            emit_ins2(sec, "mov", dst1, "#0");
-            if (g_const_map) const_map_put(ins->dest, const_val & 0xFF);
-        } else if (is_v16_value(srcv) || val_size(srcv) >= 2) {
-            int src_addr = v16_addr(srcv);
-            char src0[16], src1[16];
-            fmt_direct(src0, sizeof(src0), src_addr);
-            fmt_direct(src1, sizeof(src1), src_addr + 1);
-            emit_ins2(sec, "mov", dst0, src0);
-            emit_ins2(sec, "mov", dst1, src1);
+        ValueName src = GET_ARG(0);
+        int dst = v16_addr(ins->dest);
+        AddrPair d; fmt_addr_pair(&d, dst);
+        int val;
+        
+        if (const_map_get(src, &val)) {
+            snprintf(buf, sizeof(buf), "#%d", val & 0xFF);
+            emit_ins2(sec, "mov", d.lo, buf);
+            emit_ins2(sec, "mov", d.hi, "#0");
+            if (g_const_map) const_map_put(ins->dest, val & 0xFF);
+        } else if (is_v16_value(src) || val_size(src) >= 2) {
+            emit_mov16(sec, dst, v16_addr(src));
         } else {
-            emit_ins2(sec, "mov", "A", vreg(srcv));
-            emit_ins2(sec, "mov", dst0, "A");
-            emit_ins2(sec, "mov", dst1, "#0");
+            emit_ins2(sec, "mov", "A", vreg(src));
+            emit_ins2(sec, "mov", d.lo, "A");
+            emit_ins2(sec, "mov", d.hi, "#0");
         }
         break;
     }
+    
     case IROP_SEXT: {
-        /* Sign-extend integer to larger size (currently: 8 -> 16) */
-        ValueName srcv = *(ValueName *)list_get(ins->args, 0);
-        int dst_addr = v16_addr(ins->dest);
-        char dst0[16], dst1[16];
-        fmt_direct(dst0, sizeof(dst0), dst_addr);
-        fmt_direct(dst1, sizeof(dst1), dst_addr + 1);
-
-        int const_val = 0;
-        if (const_map_get(srcv, &const_val)) {
-            int low = const_val & 0xFF;
-            int high = (low & 0x80) ? 0xFF : 0x00;
+        ValueName src = GET_ARG(0);
+        int dst = v16_addr(ins->dest);
+        AddrPair d; fmt_addr_pair(&d, dst);
+        int val;
+        
+        if (const_map_get(src, &val)) {
+            int low = val & 0xFF;
             snprintf(buf, sizeof(buf), "#%d", low);
-            emit_ins2(sec, "mov", dst0, buf);
-            snprintf(buf, sizeof(buf), "#%d", high);
-            emit_ins2(sec, "mov", dst1, buf);
-            if (g_const_map) const_map_put(ins->dest, (high << 8) | low);
-        } else if (is_v16_value(srcv) || val_size(srcv) >= 2) {
-            int src_addr = v16_addr(srcv);
-            char src0[16], src1[16];
-            fmt_direct(src0, sizeof(src0), src_addr);
-            fmt_direct(src1, sizeof(src1), src_addr + 1);
-            emit_ins2(sec, "mov", dst0, src0);
-            emit_ins2(sec, "mov", dst1, src1);
+            emit_ins2(sec, "mov", d.lo, buf);
+            snprintf(buf, sizeof(buf), "#%d", (low & 0x80) ? 0xFF : 0x00);
+            emit_ins2(sec, "mov", d.hi, buf);
+            if (g_const_map) const_map_put(ins->dest, ((low & 0x80) ? 0xFF00 : 0) | low);
+        } else if (is_v16_value(src) || val_size(src) >= 2) {
+            emit_mov16(sec, dst, v16_addr(src));
         } else {
             char *l_pos = new_label("sext_pos");
             char *l_end = new_label("sext_end");
-            emit_ins2(sec, "mov", "A", vreg(srcv));
-            emit_ins2(sec, "mov", dst0, "A");
+            emit_ins2(sec, "mov", "A", vreg(src));
+            emit_ins2(sec, "mov", d.lo, "A");
             emit_ins2(sec, "anl", "A", "#0x80");
             emit_ins1(sec, "jz", l_pos);
-            emit_ins2(sec, "mov", dst1, "#255");
+            emit_ins2(sec, "mov", d.hi, "#255");
             emit_ins1(sec, "sjmp", l_end);
             emit_label(sec, l_pos);
-            emit_ins2(sec, "mov", dst1, "#0");
+            emit_ins2(sec, "mov", d.hi, "#0");
             emit_label(sec, l_end);
-            free(l_pos);
-            free(l_end);
+            free(l_pos); free(l_end);
         }
         break;
     }
-    case IROP_EQ: {
-        ValueName a = *(ValueName *)list_get(ins->args, 0);
-        ValueName b = *(ValueName *)list_get(ins->args, 1);
-        if ((ins->type && ins->type->size >= 2) || val_size(a) >= 2 || val_size(b) >= 2) {
-            char *l_false = new_label("eq_false");
-            char *l_end = new_label("eq_end");
-            int imm = 0;
-            bool b_is_zero = const_map_get(b, &imm) && imm == 0;
-            bool a_is_zero = const_map_get(a, &imm) && imm == 0;
-
-            /* 对 0 的比较：允许直接用 8-bit 值判断，避免不必要的 v16 临时区读取 */
-            if (b_is_zero && val_size(a) < 2) {
-                emit_ins2(sec, "mov", "A", vreg(a));
-                emit_ins3(sec, "cjne", "A", "#0", l_false);
-            } else if (a_is_zero && val_size(b) < 2) {
-                emit_ins2(sec, "mov", "A", vreg(b));
-                emit_ins3(sec, "cjne", "A", "#0", l_false);
+    
+    case IROP_EQ:
+        if (cmp_used_by_next_br(func, cur_block, ins, NULL)) {
+            g_pending_cmp.valid = true;
+            g_pending_cmp.dest = ins->dest;
+            g_pending_cmp.op = ins->op;
+            g_pending_cmp.a = GET_ARG(0);
+            g_pending_cmp.b = GET_ARG(1);
+            g_pending_cmp.is_signed = is_signed_type(ins->type);
+            g_pending_cmp.is_16 = IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+                                 is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1));
+            break;
+        }
+        if (IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2)
+            emit_eqne16(sec, ins, false);
+        else {
+            char *l_f = new_label("eq_f"), *l_e = new_label("eq_e");
+            int cval = 0;
+            bool b_const = const_map_get(GET_ARG(1), &cval);
+            bool a_const = const_map_get(GET_ARG(0), &cval);
+            if (a_const || b_const) {
+                ValueName v = a_const ? GET_ARG(1) : GET_ARG(0);
+                char ibuf[16];
+                fmt_imm8(ibuf, sizeof(ibuf), cval);
+                emit_ins2(sec, "mov", "A", vreg(v));
+                emit_ins3(sec, "cjne", "A", ibuf, l_f);
             } else {
-                int da = v16_addr(a);
-                int db = v16_addr(b);
-                char a0[16], a1[16], b0[16], b1[16];
-                fmt_direct(a0, sizeof(a0), da);
-                fmt_direct(a1, sizeof(a1), da + 1);
-
-            if (b_is_zero) {
-                emit_ins2(sec, "mov", "A", a1);
-                emit_ins3(sec, "cjne", "A", "#0", l_false);
-                emit_ins2(sec, "mov", "A", a0);
-                emit_ins3(sec, "cjne", "A", "#0", l_false);
-            } else if (a_is_zero) {
-                fmt_direct(b0, sizeof(b0), db);
-                fmt_direct(b1, sizeof(b1), db + 1);
-                emit_ins2(sec, "mov", "A", b1);
-                emit_ins3(sec, "cjne", "A", "#0", l_false);
-                emit_ins2(sec, "mov", "A", b0);
-                emit_ins3(sec, "cjne", "A", "#0", l_false);
-            } else {
-                fmt_direct(b0, sizeof(b0), db);
-                fmt_direct(b1, sizeof(b1), db + 1);
-                emit_ins2(sec, "mov", "A", a1);
-                emit_ins3(sec, "cjne", "A", b1, l_false);
-                emit_ins2(sec, "mov", "A", a0);
-                emit_ins3(sec, "cjne", "A", b0, l_false);
-            }
+                emit_ins2(sec, "mov", "A", VREG(0));
+                emit_ins3(sec, "cjne", "A", VREG(1), l_f);
             }
             emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-            emit_ins1(sec, "sjmp", l_end);
-            emit_label(sec, l_false);
+            emit_ins1(sec, "sjmp", l_e);
+            emit_label(sec, l_f);
             emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-            emit_label(sec, l_end);
-            free(l_false);
-            free(l_end);
-        } else {
-            char *l_false = new_label("eq_false");
-            char *l_end = new_label("eq_end");
-            emit_ins2(sec, "mov", "A", vreg(a));
-            emit_ins3(sec, "cjne", "A", vreg(b), l_false);
-            emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-            emit_ins1(sec, "sjmp", l_end);
-            emit_label(sec, l_false);
-            emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-            emit_label(sec, l_end);
-            free(l_false);
-            free(l_end);
+            emit_label(sec, l_e);
+            free(l_f); free(l_e);
         }
         break;
-    }
-    case IROP_NE: {
-        ValueName a = *(ValueName *)list_get(ins->args, 0);
-        ValueName b = *(ValueName *)list_get(ins->args, 1);
-        if ((ins->type && ins->type->size >= 2) || val_size(a) >= 2 || val_size(b) >= 2) {
-            char *l_true = new_label("ne_true");
-            char *l_end = new_label("ne_end");
-            int imm = 0;
-            bool b_is_zero = const_map_get(b, &imm) && imm == 0;
-            bool a_is_zero = const_map_get(a, &imm) && imm == 0;
-
-            if (b_is_zero && val_size(a) < 2) {
-                emit_ins2(sec, "mov", "A", vreg(a));
-                emit_ins3(sec, "cjne", "A", "#0", l_true);
-            } else if (a_is_zero && val_size(b) < 2) {
-                emit_ins2(sec, "mov", "A", vreg(b));
-                emit_ins3(sec, "cjne", "A", "#0", l_true);
+        
+    case IROP_NE:
+        if (cmp_used_by_next_br(func, cur_block, ins, NULL)) {
+            g_pending_cmp.valid = true;
+            g_pending_cmp.dest = ins->dest;
+            g_pending_cmp.op = ins->op;
+            g_pending_cmp.a = GET_ARG(0);
+            g_pending_cmp.b = GET_ARG(1);
+            g_pending_cmp.is_signed = is_signed_type(ins->type);
+            g_pending_cmp.is_16 = IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+                                 is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1));
+            break;
+        }
+        if (IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2)
+            emit_eqne16(sec, ins, true);
+        else {
+            char *l_t = new_label("ne_t"), *l_e = new_label("ne_e");
+            int cval = 0;
+            bool b_const = const_map_get(GET_ARG(1), &cval);
+            bool a_const = const_map_get(GET_ARG(0), &cval);
+            if (a_const || b_const) {
+                ValueName v = a_const ? GET_ARG(1) : GET_ARG(0);
+                char ibuf[16];
+                fmt_imm8(ibuf, sizeof(ibuf), cval);
+                emit_ins2(sec, "mov", "A", vreg(v));
+                emit_ins3(sec, "cjne", "A", ibuf, l_t);
             } else {
-                int da = v16_addr(a);
-                int db = v16_addr(b);
-                char a0[16], a1[16], b0[16], b1[16];
-                fmt_direct(a0, sizeof(a0), da);
-                fmt_direct(a1, sizeof(a1), da + 1);
-
-            if (b_is_zero) {
-                emit_ins2(sec, "mov", "A", a1);
-                emit_ins3(sec, "cjne", "A", "#0", l_true);
-                emit_ins2(sec, "mov", "A", a0);
-                emit_ins3(sec, "cjne", "A", "#0", l_true);
-            } else if (a_is_zero) {
-                fmt_direct(b0, sizeof(b0), db);
-                fmt_direct(b1, sizeof(b1), db + 1);
-                emit_ins2(sec, "mov", "A", b1);
-                emit_ins3(sec, "cjne", "A", "#0", l_true);
-                emit_ins2(sec, "mov", "A", b0);
-                emit_ins3(sec, "cjne", "A", "#0", l_true);
-            } else {
-                fmt_direct(b0, sizeof(b0), db);
-                fmt_direct(b1, sizeof(b1), db + 1);
-                emit_ins2(sec, "mov", "A", a1);
-                emit_ins3(sec, "cjne", "A", b1, l_true);
-                emit_ins2(sec, "mov", "A", a0);
-                emit_ins3(sec, "cjne", "A", b0, l_true);
-            }
+                emit_ins2(sec, "mov", "A", VREG(0));
+                emit_ins3(sec, "cjne", "A", VREG(1), l_t);
             }
             emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-            emit_ins1(sec, "sjmp", l_end);
-            emit_label(sec, l_true);
+            emit_ins1(sec, "sjmp", l_e);
+            emit_label(sec, l_t);
             emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-            emit_label(sec, l_end);
-            free(l_true);
-            free(l_end);
-        } else {
-            char *l_true = new_label("ne_true");
-            char *l_end = new_label("ne_end");
-            emit_ins2(sec, "mov", "A", vreg(a));
-            emit_ins3(sec, "cjne", "A", vreg(b), l_true);
-            emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-            emit_ins1(sec, "sjmp", l_end);
-            emit_label(sec, l_true);
-            emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-            emit_label(sec, l_end);
-            free(l_true);
-            free(l_end);
+            emit_label(sec, l_e);
+            free(l_t); free(l_e);
         }
         break;
-    }
-    case IROP_LT: {
-        char *l_true = new_label("lt_true");
-        char *l_false = new_label("lt_false");
-        char *l_same = new_label("lt_same");
-        char *l_end = new_label("lt_end");
-        emit_ins2(sec, "mov", "r6", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "mov", "r7", vreg(*(ValueName *)list_get(ins->args, 1)));
-        if (is_signed_type(ins->type)) {
-            emit_ins2(sec, "mov", "A", "r6");
-            emit_ins2(sec, "xrl", "A", "r7");
-            emit_ins2(sec, "anl", "A", "#0x80");
-            emit_ins1(sec, "jz", l_same);
-            emit_ins2(sec, "mov", "A", "r6");
-            emit_ins2(sec, "anl", "A", "#0x80");
-            emit_ins1(sec, "jz", l_false);
-            emit_ins1(sec, "sjmp", l_true);
-            emit_label(sec, l_same);
+        
+    case IROP_LT:
+        if (cmp_used_by_next_br(func, cur_block, ins, NULL)) {
+            g_pending_cmp.valid = true;
+            g_pending_cmp.dest = ins->dest;
+            g_pending_cmp.op = ins->op;
+            g_pending_cmp.a = GET_ARG(0);
+            g_pending_cmp.b = GET_ARG(1);
+            g_pending_cmp.is_signed = is_signed_type(ins->type);
+            g_pending_cmp.is_16 = IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+                                 is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1));
+            break;
         }
-        emit_ins2(sec, "mov", "A", "r6");
-        emit_ins1(sec, "clr", "C");
-        emit_ins2(sec, "subb", "A", "r7");
-        emit_ins1(sec, "jc", l_true);
-        emit_label(sec, l_false);
-        emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-        emit_ins1(sec, "sjmp", l_end);
-        emit_label(sec, l_true);
-        emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-        emit_label(sec, l_end);
-        free(l_true);
-        free(l_false);
-        free(l_same);
-        free(l_end);
+        if (IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+            is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1)))
+            emit_cmp16(sec, CMP_LT, is_signed_type(ins->type), GET_ARG(0), GET_ARG(1), ins->dest);
+        else
+            emit_cmp8(sec, CMP_LT, is_signed_type(ins->type), GET_ARG(0), GET_ARG(1), ins->dest);
         break;
-    }
-    case IROP_LE: {
-        char *l_true = new_label("le_true");
-        char *l_false = new_label("le_false");
-        char *l_same = new_label("le_same");
-        char *l_end = new_label("le_end");
-        emit_ins2(sec, "mov", "r6", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "mov", "r7", vreg(*(ValueName *)list_get(ins->args, 1)));
-        if (is_signed_type(ins->type)) {
-            emit_ins2(sec, "mov", "A", "r6");
-            emit_ins2(sec, "xrl", "A", "r7");
-            emit_ins2(sec, "anl", "A", "#0x80");
-            emit_ins1(sec, "jz", l_same);
-            emit_ins2(sec, "mov", "A", "r6");
-            emit_ins2(sec, "anl", "A", "#0x80");
-            emit_ins1(sec, "jz", l_false);
-            emit_ins1(sec, "sjmp", l_true);
-            emit_label(sec, l_same);
+    case IROP_LE:
+        if (cmp_used_by_next_br(func, cur_block, ins, NULL)) {
+            g_pending_cmp.valid = true;
+            g_pending_cmp.dest = ins->dest;
+            g_pending_cmp.op = ins->op;
+            g_pending_cmp.a = GET_ARG(0);
+            g_pending_cmp.b = GET_ARG(1);
+            g_pending_cmp.is_signed = is_signed_type(ins->type);
+            g_pending_cmp.is_16 = IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+                                 is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1));
+            break;
         }
-        emit_ins2(sec, "mov", "A", "r6");
-        emit_ins1(sec, "clr", "C");
-        emit_ins2(sec, "subb", "A", "r7");
-        emit_ins1(sec, "jc", l_true);
-        emit_ins1(sec, "jz", l_true);
-        emit_label(sec, l_false);
-        emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-        emit_ins1(sec, "sjmp", l_end);
-        emit_label(sec, l_true);
-        emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-        emit_label(sec, l_end);
-        free(l_true);
-        free(l_false);
-        free(l_same);
-        free(l_end);
+        if (IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+            is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1)))
+            emit_cmp16(sec, CMP_LE, is_signed_type(ins->type), GET_ARG(0), GET_ARG(1), ins->dest);
+        else
+            emit_cmp8(sec, CMP_LE, is_signed_type(ins->type), GET_ARG(0), GET_ARG(1), ins->dest);
         break;
-    }
-    case IROP_GT: {
-        char *l_true = new_label("gt_true");
-        char *l_false = new_label("gt_false");
-        char *l_same = new_label("gt_same");
-        char *l_end = new_label("gt_end");
-        emit_ins2(sec, "mov", "r6", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "mov", "r7", vreg(*(ValueName *)list_get(ins->args, 1)));
-        if (is_signed_type(ins->type)) {
-            emit_ins2(sec, "mov", "A", "r6");
-            emit_ins2(sec, "xrl", "A", "r7");
-            emit_ins2(sec, "anl", "A", "#0x80");
-            emit_ins1(sec, "jz", l_same);
-            emit_ins2(sec, "mov", "A", "r6");
-            emit_ins2(sec, "anl", "A", "#0x80");
-            emit_ins1(sec, "jz", l_true);
-            emit_ins1(sec, "sjmp", l_false);
-            emit_label(sec, l_same);
+    case IROP_GT:
+        if (cmp_used_by_next_br(func, cur_block, ins, NULL)) {
+            g_pending_cmp.valid = true;
+            g_pending_cmp.dest = ins->dest;
+            g_pending_cmp.op = ins->op;
+            g_pending_cmp.a = GET_ARG(0);
+            g_pending_cmp.b = GET_ARG(1);
+            g_pending_cmp.is_signed = is_signed_type(ins->type);
+            g_pending_cmp.is_16 = IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+                                 is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1));
+            break;
         }
-        emit_ins2(sec, "mov", "A", "r6");
-        emit_ins1(sec, "clr", "C");
-        emit_ins2(sec, "subb", "A", "r7");
-        emit_ins1(sec, "jc", l_false);
-        emit_ins1(sec, "jz", l_false);
-        emit_label(sec, l_true);
-        emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-        emit_ins1(sec, "sjmp", l_end);
-        emit_label(sec, l_false);
-        emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-        emit_label(sec, l_end);
-        free(l_true);
-        free(l_false);
-        free(l_same);
-        free(l_end);
+        if (IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+            is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1)))
+            emit_cmp16(sec, CMP_GT, is_signed_type(ins->type), GET_ARG(0), GET_ARG(1), ins->dest);
+        else
+            emit_cmp8(sec, CMP_GT, is_signed_type(ins->type), GET_ARG(0), GET_ARG(1), ins->dest);
         break;
-    }
-    case IROP_GE: {
-        char *l_true = new_label("ge_true");
-        char *l_false = new_label("ge_false");
-        char *l_same = new_label("ge_same");
-        char *l_end = new_label("ge_end");
-        emit_ins2(sec, "mov", "r6", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins2(sec, "mov", "r7", vreg(*(ValueName *)list_get(ins->args, 1)));
-        if (is_signed_type(ins->type)) {
-            emit_ins2(sec, "mov", "A", "r6");
-            emit_ins2(sec, "xrl", "A", "r7");
-            emit_ins2(sec, "anl", "A", "#0x80");
-            emit_ins1(sec, "jz", l_same);
-            emit_ins2(sec, "mov", "A", "r6");
-            emit_ins2(sec, "anl", "A", "#0x80");
-            emit_ins1(sec, "jz", l_true);
-            emit_ins1(sec, "sjmp", l_false);
-            emit_label(sec, l_same);
+    case IROP_GE:
+        if (cmp_used_by_next_br(func, cur_block, ins, NULL)) {
+            g_pending_cmp.valid = true;
+            g_pending_cmp.dest = ins->dest;
+            g_pending_cmp.op = ins->op;
+            g_pending_cmp.a = GET_ARG(0);
+            g_pending_cmp.b = GET_ARG(1);
+            g_pending_cmp.is_signed = is_signed_type(ins->type);
+            g_pending_cmp.is_16 = IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+                                 is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1));
+            break;
         }
-        emit_ins2(sec, "mov", "A", "r6");
-        emit_ins1(sec, "clr", "C");
-        emit_ins2(sec, "subb", "A", "r7");
-        emit_ins1(sec, "jnc", l_true);
-        emit_label(sec, l_false);
-        emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-        emit_ins1(sec, "sjmp", l_end);
-        emit_label(sec, l_true);
-        emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-        emit_label(sec, l_end);
-        free(l_true);
-        free(l_false);
-        free(l_same);
-        free(l_end);
+        if (IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
+            is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1)))
+            emit_cmp16(sec, CMP_GE, is_signed_type(ins->type), GET_ARG(0), GET_ARG(1), ins->dest);
+        else
+            emit_cmp8(sec, CMP_GE, is_signed_type(ins->type), GET_ARG(0), GET_ARG(1), ins->dest);
         break;
-    }
+    
     case IROP_LNOT: {
-        char *l_true = new_label("lnot_true");
-        char *l_end = new_label("lnot_end");
-        emit_ins2(sec, "mov", "A", vreg(*(ValueName *)list_get(ins->args, 0)));
-        emit_ins1(sec, "jz", l_true);
+        char *l_t = new_label("lnot_t"), *l_e = new_label("lnot_e");
+        emit_ins2(sec, "mov", "A", VREG(0));
+        emit_ins1(sec, "jz", l_t);
         emit_ins2(sec, "mov", vreg(ins->dest), "#0");
-        emit_ins1(sec, "sjmp", l_end);
-        emit_label(sec, l_true);
+        emit_ins1(sec, "sjmp", l_e);
+        emit_label(sec, l_t);
         emit_ins2(sec, "mov", vreg(ins->dest), "#1");
-        emit_label(sec, l_end);
-        free(l_true);
-        free(l_end);
+        emit_label(sec, l_e);
+        free(l_t); free(l_e);
         break;
     }
+    
     case IROP_ADDR: {
-        if (ins->labels && ins->labels->len > 0) {
-            const char *name = list_get(ins->labels, 0);
-            int off = 0;
-            
-            if (func_stack_offset(func, name, &off)) {
-                char obuf[16];
-                emit_ins2(sec, "mov", "A", "0x2E");
-                snprintf(obuf, sizeof(obuf), "#%d", off + 1);
-                emit_ins2(sec, "add", "A", obuf);
-                emit_ins2(sec, "mov", vreg(ins->dest), "A");
-                
-                addr_map_put_stack(ins->dest, off, ins->mem_type);
-            } else {
-                MmioInfo *mmio = mmio_map_get(name);
-                
-                if (mmio) {
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "0x%02X", mmio->addr & 0xFF);
-                    addr_map_put(ins->dest, buf, ins->mem_type);
-                } else {
-                    addr_map_put(ins->dest, name, ins->mem_type);
-                }
-            }
-        }
-        gen_clear_pending_ssa();
-        return; 
-    }
-    case IROP_OFFSET: {
-        ValueName base = *(ValueName *)list_get(ins->args, 0);
-        ValueName idx = *(ValueName *)list_get(ins->args, 1);
-        int elem = (int)ins->imm.ival;
-        int cidx = 0;
-        if (const_map_get(idx, &cidx)) {
-            int off = cidx * elem;
+        const char *name = get_label_at(ins, 0);
+        if (!name) break;
+        int off;
+        if (func_stack_offset(func, name, &off)) {
             char obuf[16];
-            emit_ins2(sec, "mov", "A", vreg(base));
-            snprintf(obuf, sizeof(obuf), "#%d", off);
+            emit_ins2(sec, "mov", "A", "0x2E");
+            snprintf(obuf, sizeof(obuf), "#%d", off + 1);
             emit_ins2(sec, "add", "A", obuf);
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
+            addr_map_put_stack(ins->dest, off, ins->mem_type);
+        } else {
+            MmioInfo *mmio = mmio_map_get(name);
+            addr_map_put(ins->dest, mmio ? name : name, ins->mem_type);
+        }
+        gen_clear_pending_ssa();
+        return;
+    }
+    
+    case IROP_OFFSET: {
+        ValueName base = GET_ARG(0), idx = GET_ARG(1);
+        int elem = (int)ins->imm.ival, cidx;
+        emit_ins2(sec, "mov", "A", vreg(base));
+        if (const_map_get(idx, &cidx)) {
+            snprintf(buf, sizeof(buf), "#%d", cidx * elem);
+            emit_ins2(sec, "add", "A", buf);
         } else {
             emit_ins2(sec, "mov", "A", vreg(idx));
             if (elem != 1) {
-                char ebuf[16];
-                snprintf(ebuf, sizeof(ebuf), "#%d", elem);
-                emit_ins2(sec, "mov", "B", ebuf);
+                snprintf(buf, sizeof(buf), "#%d", elem);
+                emit_ins2(sec, "mov", "B", buf);
                 emit_ins1(sec, "mul", "AB");
             }
             emit_ins2(sec, "mov", "r6", "A");
             emit_ins2(sec, "mov", "A", vreg(base));
             emit_ins2(sec, "add", "A", "r6");
-            emit_ins2(sec, "mov", vreg(ins->dest), "A");
         }
+        emit_ins2(sec, "mov", vreg(ins->dest), "A");
         gen_clear_pending_ssa();
         return;
     }
-    case IROP_LOAD:
-    {
-        ValueName ptr = *(ValueName *)list_get(ins->args, 0);
+    
+    case IROP_LOAD: {
+        ValueName ptr = GET_ARG(0);
         struct AddrInfo *info = addr_map_get(ptr);
         Ctype *mtype = ins->mem_type ? ins->mem_type : (info ? info->mem_type : NULL);
         int space = data_space_kind(mtype);
+        
         if (info && info->is_stack) {
             emit_stack_addr(sec, info->stack_off);
             emit_ins2(sec, "mov", "A", "@r0");
-            emit_ins2(sec, "mov", vreg(ins->dest), "A");
-            break;
-        }
-        if (info && info->label && is_register_bit(mtype)) {
+        } else if (info && info->label && is_register_bit(mtype)) {
             emit_ins2(sec, "mov", "C", info->label);
             emit_ins2(sec, "mov", "A", "#0");
             emit_ins1(sec, "rlc", "A");
-            emit_ins2(sec, "mov", vreg(ins->dest), "A");
-            break;
-        }
-        if (info && info->label) {
-            if (space == 6) {
-                char imm[128];
-                snprintf(imm, sizeof(imm), "#%s", info->label);
-                emit_ins2(sec, "mov", "DPTR", imm);
+        } else if (info && info->label) {
+            if (space == 6) { // code
+                snprintf(buf, sizeof(buf), "#%s", info->label);
+                emit_ins2(sec, "mov", "DPTR", buf);
                 emit_ins2(sec, "mov", "A", "#0");
                 emit_ins2(sec, "movc", "A", "@A+DPTR");
-            } else if (space == 4 || space == 5) {
-                char imm[128];
-                snprintf(imm, sizeof(imm), "#%s", info->label);
-                emit_ins2(sec, "mov", "DPTR", imm);
+            } else if (space == 4 || space == 5) { // xdata/edata
+                snprintf(buf, sizeof(buf), "#%s", info->label);
+                emit_ins2(sec, "mov", "DPTR", buf);
                 emit_ins2(sec, "movx", "A", "@DPTR");
+            } else if (space == 2) { // idata
+                snprintf(buf, sizeof(buf), "#%s", info->label);
+                emit_ins2(sec, "mov", "r0", buf);
+                emit_ins2(sec, "mov", "A", "@r0");
             } else {
                 emit_ins2(sec, "mov", "A", info->label);
             }
         } else if (space == 6) {
-            emit_ins2(sec, "mov", "0x82", vreg(ptr));
-            emit_ins2(sec, "mov", "0x83", "#0");
+            if (is_v16_value(ptr) || val_size(ptr) >= 2) {
+                AddrPair p; fmt_addr_pair(&p, v16_addr(ptr));
+                emit_ins2(sec, "mov", "0x82", p.lo);
+                emit_ins2(sec, "mov", "0x83", p.hi);
+            } else {
+                emit_ins2(sec, "mov", "0x82", vreg(ptr));
+                emit_ins2(sec, "mov", "0x83", "#0");
+            }
             emit_ins2(sec, "mov", "A", "#0");
             emit_ins2(sec, "movc", "A", "@A+DPTR");
         } else if (space == 4 || space == 5) {
-            emit_ins2(sec, "mov", "0x82", vreg(ptr));
-            emit_ins2(sec, "mov", "0x83", "#0");
+            if (is_v16_value(ptr) || val_size(ptr) >= 2) {
+                AddrPair p; fmt_addr_pair(&p, v16_addr(ptr));
+                emit_ins2(sec, "mov", "0x82", p.lo);
+                emit_ins2(sec, "mov", "0x83", p.hi);
+            } else {
+                emit_ins2(sec, "mov", "0x82", vreg(ptr));
+                emit_ins2(sec, "mov", "0x83", "#0");
+            }
             emit_ins2(sec, "movx", "A", "@DPTR");
         } else {
             snprintf(buf, sizeof(buf), "@%s", vreg(ptr));
@@ -1284,306 +1576,355 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         emit_ins2(sec, "mov", vreg(ins->dest), "A");
         break;
     }
+    
     case IROP_STORE: {
-        // 检查是否是优化后的格式（args 为空，labels[0] 以 '@' 开头）
         if (!ins->args || ins->args->len == 0) {
-            // 优化后的 store @g, const
+            // 优化格式: store @g, const
             if (ins->labels && ins->labels->len > 0) {
                 char *label = (char*)list_get(ins->labels, 0);
-                int const_val = ins->imm.ival & 0xFF;
-                Ctype *mtype = ins->mem_type;
-                
-                // 去掉 '@' 前缀获取实际标签名
                 const char *varname = (label[0] == '@') ? label + 1 : label;
-                
-                if (is_register_bit(mtype)) {
-                    if (const_val) {
-                        emit_ins1(sec, "setb", varname);
-                    } else {
-                        emit_ins1(sec, "clr", varname);
-                    }
+                int val = ins->imm.ival & 0xFF;
+                if (is_register_bit(ins->mem_type)) {
+                    emit_ins1(sec, val ? "setb" : "clr", varname);
                 } else {
-                    char ibuf[16];
-                    snprintf(ibuf, sizeof(ibuf), "#%d", const_val);
-                    emit_ins2(sec, "mov", varname, ibuf);
+                    snprintf(buf, sizeof(buf), "#%d", val);
+                    emit_ins2(sec, "mov", varname, buf);
                 }
             }
             break;
         }
         
-        ValueName ptr = *(ValueName *)list_get(ins->args, 0);
-        ValueName val = *(ValueName *)list_get(ins->args, 1);
+        ValueName ptr = GET_ARG(0), val = GET_ARG(1);
         struct AddrInfo *info = addr_map_get(ptr);
         Ctype *mtype = ins->mem_type ? ins->mem_type : (info ? info->mem_type : NULL);
         int space = data_space_kind(mtype);
-        
-        int const_val = 0;
-        bool val_is_const = const_map_get(val, &const_val);
+        int cval; 
+        bool val_is_const = const_map_get(val, &cval);
+        #define MOV_A_VAL() do { \
+            if (val_is_const) { snprintf(buf, sizeof(buf), "#%d", cval & 0xFF); emit_ins2(sec, "mov", "A", buf); } \
+            else if (val_size(val) >= 2 || is_v16_value(val)) { \
+                char d0[64]; fmt_v16_direct(d0, sizeof(d0), v16_addr(val)); \
+                emit_ins2(sec, "mov", "A", d0); \
+            } else emit_ins2(sec, "mov", "A", vreg(val)); \
+        } while(0)
         
         if (info && info->is_stack) {
-            if (val_is_const) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", const_val & 0xFF);
-                emit_ins2(sec, "mov", "A", ibuf);
-            } else {
-                emit_ins2(sec, "mov", "A", vreg(val));
-            }
+            MOV_A_VAL();
             emit_stack_addr(sec, info->stack_off);
             emit_ins2(sec, "mov", "@r0", "A");
-            break;
-        }
-        
-        if (info && info->label) {
+        } else if (info && info->label) {
             if (strncmp(info->label, "0x", 2) == 0) {
                 if (val_is_const) {
-                    char ibuf[16];
-                    snprintf(ibuf, sizeof(ibuf), "#%d", const_val & 0xFF);
-                    emit_ins2(sec, "mov", info->label, ibuf);
+                    snprintf(buf, sizeof(buf), "#%d", cval & 0xFF);
+                    emit_ins2(sec, "mov", info->label, buf);
                 } else {
-                    emit_ins2(sec, "mov", "A", vreg(val));
+                    MOV_A_VAL();
                     emit_ins2(sec, "mov", info->label, "A");
                 }
-                break;
-            }
-            
-            if (is_register_bit(mtype)) {
-                if (val_is_const) {
-                    if (const_val) {
-                        emit_ins1(sec, "setb", info->label);
-                    } else {
-                        emit_ins1(sec, "clr", info->label);
-                    }
-                } else {
-                    emit_ins2(sec, "mov", "A", vreg(val));
+            } else if (is_register_bit(mtype)) {
+                if (val_is_const) emit_ins1(sec, cval ? "setb" : "clr", info->label);
+                else {
+                    MOV_A_VAL();
                     emit_ins1(sec, "rrc", "A");
                     emit_ins2(sec, "mov", info->label, "C");
                 }
-                break;
+            } else if (space == 4 || space == 5) {
+                snprintf(buf, sizeof(buf), "#%s", info->label);
+                emit_ins2(sec, "mov", "DPTR", buf);
+                MOV_A_VAL();
+                emit_ins2(sec, "movx", "@DPTR", "A");
+            } else if (space == 2) {
+                snprintf(buf, sizeof(buf), "#%s", info->label);
+                emit_ins2(sec, "mov", "r0", buf);
+                MOV_A_VAL();
+                emit_ins2(sec, "mov", "@r0", "A");
+            } else {
+                if (val_is_const) {
+                    snprintf(buf, sizeof(buf), "#%d", cval & 0xFF);
+                    emit_ins2(sec, "mov", info->label, buf);
+                } else {
+                    MOV_A_VAL();
+                    emit_ins2(sec, "mov", info->label, "A");
+                }
             }
-        }
-        
-        if (space == 6) {
-            /* CODE space - shouldn't have store */
         } else if (space == 4 || space == 5) {
-            if (info && info->label) {
-                char imm[128];
-                snprintf(imm, sizeof(imm), "#%s", info->label);
-                emit_ins2(sec, "mov", "DPTR", imm);
+            if (is_v16_value(ptr) || val_size(ptr) >= 2) {
+                AddrPair p; fmt_addr_pair(&p, v16_addr(ptr));
+                emit_ins2(sec, "mov", "0x82", p.lo);
+                emit_ins2(sec, "mov", "0x83", p.hi);
             } else {
                 emit_ins2(sec, "mov", "0x82", vreg(ptr));
                 emit_ins2(sec, "mov", "0x83", "#0");
             }
-            
-            if (val_is_const) {
-                char ibuf[16];
-                snprintf(ibuf, sizeof(ibuf), "#%d", const_val & 0xFF);
-                emit_ins2(sec, "mov", "A", ibuf);
-            } else {
-                emit_ins2(sec, "mov", "A", vreg(val));
-            }
+            MOV_A_VAL();
             emit_ins2(sec, "movx", "@DPTR", "A");
         } else {
-            if (info && info->label) {
-                if (val_is_const) {
-                    char ibuf[16];
-                    snprintf(ibuf, sizeof(ibuf), "#%d", const_val & 0xFF);
-                    emit_ins2(sec, "mov", info->label, ibuf);
-                } else {
-                    emit_ins2(sec, "mov", "A", vreg(val));
-                    emit_ins2(sec, "mov", info->label, "A");
-                }
-            } else {
-                if (val_is_const) {
-                    char ibuf[16];
-                    snprintf(ibuf, sizeof(ibuf), "#%d", const_val & 0xFF);
-                    snprintf(buf, sizeof(buf), "@%s", vreg(ptr));
-                    emit_ins2(sec, "mov", buf, ibuf);
-                } else {
-                    emit_ins2(sec, "mov", "A", vreg(val));
-                    snprintf(buf, sizeof(buf), "@%s", vreg(ptr));
-                    emit_ins2(sec, "mov", buf, "A");
-                }
-            }
+            MOV_A_VAL();
+            snprintf(buf, sizeof(buf), "@%s", vreg(ptr));
+            emit_ins2(sec, "mov", buf, "A");
         }
+        #undef MOV_A_VAL
         break;
     }
+    
     case IROP_JMP: {
         char *label = list_get(ins->labels, 0);
         emit_phi_moves_for_edge(sec, func, cur_block, label);
         emit_ins1(sec, "sjmp", map_block_label(func_name, label));
         break;
     }
+    
     case IROP_BR: {
-        char *t = list_get(ins->labels, 0);  // true 块
-        char *f = list_get(ins->labels, 1);  // false 块
-        ValueName condv = *(ValueName *)list_get(ins->args, 0);
+        char *t = list_get(ins->labels, 0), *f = list_get(ins->labels, 1);
+        ValueName condv = GET_ARG(0);
         char *l_true = new_label("br_true");
-        emit_ins2(sec, "mov", "A", vreg(condv));  // 条件非0 => true
-        emit_ins1(sec, "jnz", l_true);
+        bool handled_bit = false;
+        if (g_pending_cmp.valid && g_pending_cmp.dest == condv) {
+            char *l_false = new_label("br_false");
+            switch (g_pending_cmp.op) {
+            case IROP_LT:
+                if (g_pending_cmp.is_16)
+                    emit_cmp16_branch(sec, CMP_LT, g_pending_cmp.is_signed,
+                                      g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                else
+                    emit_cmp8_branch(sec, CMP_LT, g_pending_cmp.is_signed,
+                                     g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                break;
+            case IROP_LE:
+                if (g_pending_cmp.is_16)
+                    emit_cmp16_branch(sec, CMP_LE, g_pending_cmp.is_signed,
+                                      g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                else
+                    emit_cmp8_branch(sec, CMP_LE, g_pending_cmp.is_signed,
+                                     g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                break;
+            case IROP_GT:
+                if (g_pending_cmp.is_16)
+                    emit_cmp16_branch(sec, CMP_GT, g_pending_cmp.is_signed,
+                                      g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                else
+                    emit_cmp8_branch(sec, CMP_GT, g_pending_cmp.is_signed,
+                                     g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                break;
+            case IROP_GE:
+                if (g_pending_cmp.is_16)
+                    emit_cmp16_branch(sec, CMP_GE, g_pending_cmp.is_signed,
+                                      g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                else
+                    emit_cmp8_branch(sec, CMP_GE, g_pending_cmp.is_signed,
+                                     g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                break;
+            case IROP_EQ:
+                if (g_pending_cmp.is_16)
+                    emit_eqne16_branch(sec, false, g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                else
+                    emit_eqne8_branch(sec, false, g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                break;
+            case IROP_NE:
+                if (g_pending_cmp.is_16)
+                    emit_eqne16_branch(sec, true, g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                else
+                    emit_eqne8_branch(sec, true, g_pending_cmp.a, g_pending_cmp.b, l_true, l_false);
+                break;
+            default:
+                break;
+            }
 
-        /* false edge */
+            emit_label(sec, l_false);
+            emit_phi_moves_for_edge(sec, func, cur_block, f);
+            emit_ins1(sec, "sjmp", map_block_label(func_name, f));
+            emit_label(sec, l_true);
+            emit_phi_moves_for_edge(sec, func, cur_block, t);
+            emit_ins1(sec, "sjmp", map_block_label(func_name, t));
+
+            g_pending_cmp.valid = false;
+            free(l_false);
+            free(l_true);
+            break;
+        }
+        Instr *cdef = find_def_instr(func, condv);
+        if (cdef && (cdef->op == IROP_NE || cdef->op == IROP_EQ) && cdef->args && cdef->args->len >= 2) {
+            ValueName a = *(ValueName *)list_get(cdef->args, 0);
+            ValueName b = *(ValueName *)list_get(cdef->args, 1);
+            int cval = 0;
+            bool a_const = const_map_get(a, &cval);
+            bool b_const = !a_const && const_map_get(b, &cval);
+            if (a_const || b_const) {
+                ValueName other = a_const ? b : a;
+                if (cval == 0 || cval == 1) {
+                    Instr *ld = find_def_instr(func, other);
+                    if (ld && ld->op == IROP_LOAD && is_register_bit(ld->mem_type)) {
+                        ValueName addr = *(ValueName *)list_get(ld->args, 0);
+                        AddrInfo *ainfo = addr_map_get(addr);
+                        if (ainfo && ainfo->label) {
+                            bool jump_when_set = (cdef->op == IROP_NE) ? (cval == 0) : (cval != 0);
+                            emit_ins2(sec, jump_when_set ? "jb" : "jnb", ainfo->label, l_true);
+                            handled_bit = true;
+                        }
+                    }
+                }
+            }
+        }
+        if (!handled_bit) {
+            emit_ins2(sec, "mov", "A", vreg(condv));
+            emit_ins1(sec, "jnz", l_true);
+        }
+        /* 条件为假时跳转到 false 分支 (fall-through) */
         emit_phi_moves_for_edge(sec, func, cur_block, f);
         emit_ins1(sec, "sjmp", map_block_label(func_name, f));
-
-        /* true edge */
+        /* 条件为真时跳转到 true 分支 */
         emit_label(sec, l_true);
         emit_phi_moves_for_edge(sec, func, cur_block, t);
         emit_ins1(sec, "sjmp", map_block_label(func_name, t));
         free(l_true);
         break;
     }
+    
     case IROP_CALL: {
         char *fname = list_get(ins->labels, 0);
-        int nargs = ins->args ? ins->args->len : 0;
-        int total_bytes = 0;
-        typedef struct { ValueName v; int byte_idx; int byte_off; int size; } ArgByte;
-        ArgByte *bytes = NULL;
-        if (ins->args) {
-            for (int idx = 0; idx < nargs; ++idx) {
-                ValueName v = *(ValueName *)list_get(ins->args, idx);
-                int sz = val_size(v);
-                total_bytes += (sz >= 2) ? 2 : 1;
-            }
+        int nargs = ins->args ? ins->args->len : 0, total_bytes = 0;
+        int *arg_off = nargs > 0 ? gen_alloc(sizeof(int) * nargs) : NULL;
+        
+        // 计算参数字节数
+        for (int i = 0; i < nargs; i++) {
+            ValueName v = GET_ARG(i);
+            if (arg_off) arg_off[i] = total_bytes;
+            total_bytes += (val_size(v) >= 2) ? 2 : 1;
         }
-        int extra = total_bytes > 8 ? (total_bytes - 8) : 0;
-
-        if (total_bytes > 0)
-            bytes = gen_alloc(sizeof(ArgByte) * total_bytes);
-        int bi = 0;
-        int byte_idx = 0;
-        if (ins->args) {
-            for (int idx = 0; idx < nargs; ++idx) {
-                ValueName v = *(ValueName *)list_get(ins->args, idx);
-                int sz = val_size(v);
-                int cnt = (sz >= 2) ? 2 : 1;
-                for (int j = 0; j < cnt; ++j) {
-                    bytes[bi++] = (ArgByte){v, byte_idx + j, j, sz};
-                }
-                byte_idx += cnt;
-            }
+        int extra = total_bytes > 3 ? total_bytes - 3 : 0;
+        
+        // 保存寄存器
+        for (int r = 0; r <= 3; r++) {
+            snprintf(buf, sizeof(buf), "r%d", r);
+            emit_ins1(sec, "push", buf);
         }
-
-        for (int r = 0; r <= 3; ++r) {
-            char regbuf[8];
-            snprintf(regbuf, sizeof(regbuf), "r%d", r);
-            emit_ins1(sec, "push", regbuf);
-        }
-
-        if (total_bytes > 0) {
-            for (int i = total_bytes - 1; i >= 0; --i) {
-                if (bytes[i].byte_idx < 8) continue;
-                if (bytes[i].size >= 2) {
-                    char src[16];
-                    fmt_direct(src, sizeof(src), v16_addr(bytes[i].v) + bytes[i].byte_off);
-                    emit_ins2(sec, "mov", "A", src);
+        
+        // 装载寄存器参数（R1-R3，按字节顺序）
+        for (int i = 0; i < nargs; i++) {
+            ValueName v = GET_ARG(i);
+            int sz = val_size(v);
+            int cval = 0;
+            bool is_const = const_map_get(v, &cval);
+            for (int b = 0; b < sz; ++b) {
+                int byte_idx = arg_off ? (arg_off[i] + b) : 0;
+                if (byte_idx >= 3) continue;
+                char rbuf[8];
+                snprintf(rbuf, sizeof(rbuf), "r%d", 1 + byte_idx);
+                if (is_const) {
+                    snprintf(buf, sizeof(buf), "#%d", (b == 0) ? (cval & 0xFF) : ((cval >> 8) & 0xFF));
+                    emit_ins2(sec, "mov", rbuf, buf);
+                } else if (sz >= 2) {
+                    AddrPair p; fmt_addr_pair(&p, v16_addr(v));
+                    emit_ins2(sec, "mov", rbuf, b == 0 ? p.lo : p.hi);
                 } else {
-                    emit_ins2(sec, "mov", "A", vreg(bytes[i].v));
-                }
-                emit_ins1(sec, "push", "A");
-            }
-
-            for (int i = 0; i < total_bytes; ++i) {
-                if (bytes[i].byte_idx >= 8) continue;
-                char regbuf[8];
-                snprintf(regbuf, sizeof(regbuf), "r%d", 7 - bytes[i].byte_idx);
-                if (bytes[i].size >= 2) {
-                    char src[16];
-                    fmt_direct(src, sizeof(src), v16_addr(bytes[i].v) + bytes[i].byte_off);
-                    emit_ins2(sec, "mov", regbuf, src);
-                } else {
-                    emit_ins2(sec, "mov", regbuf, vreg(bytes[i].v));
+                    emit_ins2(sec, "mov", rbuf, vreg(v));
                 }
             }
         }
+        
+        // 压栈多余参数（超过 R1-R3 的字节）
+        if (total_bytes > 3) {
+            for (int i = nargs - 1; i >= 0; i--) {
+                ValueName v = GET_ARG(i);
+                int sz = val_size(v);
+                int cval = 0;
+                bool is_const = const_map_get(v, &cval);
+                if (sz >= 2) {
+                    AddrPair p; fmt_addr_pair(&p, v16_addr(v));
+                    for (int b = sz - 1; b >= 0; --b) {
+                        int byte_idx = arg_off ? (arg_off[i] + b) : 0;
+                        if (byte_idx < 3) continue;
+                        if (is_const) {
+                            snprintf(buf, sizeof(buf), "#%d", (b == 0) ? (cval & 0xFF) : ((cval >> 8) & 0xFF));
+                            emit_ins2(sec, "mov", "A", buf);
+                        } else {
+                            emit_ins2(sec, "mov", "A", b == 0 ? p.lo : p.hi);
+                        }
+                        emit_ins1(sec, "push", "A");
+                    }
+                } else {
+                    int byte_idx = arg_off ? arg_off[i] : 0;
+                    if (byte_idx >= 3) {
+                        if (is_const) {
+                            snprintf(buf, sizeof(buf), "#%d", cval & 0xFF);
+                            emit_ins2(sec, "mov", "A", buf);
+                        } else {
+                            emit_ins2(sec, "mov", "A", vreg(v));
+                        }
+                        emit_ins1(sec, "push", "A");
+                    }
+                }
+            }
+        }
+        
         emit_ins1(sec, "lcall", fname ? fname : "<null>");
-
-        for (int i = 0; i < extra; ++i)
-            emit_ins1(sec, "pop", "r0");
-
-        for (int r = 3; r >= 0; --r) {
-            char regbuf[8];
-            snprintf(regbuf, sizeof(regbuf), "r%d", r);
-            emit_ins1(sec, "pop", regbuf);
+        
+        // 清理栈
+        for (int i = 0; i < extra; i++) emit_ins1(sec, "pop", "r0");
+        for (int r = 3; r >= 0; r--) {
+            snprintf(buf, sizeof(buf), "r%d", r);
+            emit_ins1(sec, "pop", buf);
         }
-
+        
+        // 保存返回值
         if (ins->dest != 0) {
-            if (ins->type && ins->type->size >= 2) {
-                int addr = v16_addr(ins->dest);
-                char dst0[16];
-                char dst1[16];
-                fmt_direct(dst0, sizeof(dst0), addr);
-                fmt_direct(dst1, sizeof(dst1), addr + 1);
-                emit_ins2(sec, "mov", "A", "0x82");
-                emit_ins2(sec, "mov", dst0, "A");
-                emit_ins2(sec, "mov", "A", "0x83");
-                emit_ins2(sec, "mov", dst1, "A");
+            if (IS_16BIT()) {
+                AddrPair d; fmt_addr_pair(&d, v16_addr(ins->dest));
+                emit_ins2(sec, "mov", d.lo, "r7");
+                emit_ins2(sec, "mov", d.hi, "r6");
             } else {
-                emit_ins2(sec, "mov", vreg(ins->dest), "A");
+                emit_ins2(sec, "mov", vreg(ins->dest), "r7");
             }
         }
         break;
     }
-    case IROP_RET:
-        // ret 指令应该始终有参数（虚拟寄存器引用），不再使用 ret const 格式
+    
+    case IROP_RET: {
         if (ins->args && ins->args->len > 0) {
-            ValueName v = *(ValueName *)list_get(ins->args, 0);
-            
+            ValueName v = GET_ARG(0);
             if (func && func->ret_type && func->ret_type->size >= 2) {
-                int const_val = 0;
-                if (const_map_get(v, &const_val)) {
-                    char buf0[16], buf1[16];
-                    snprintf(buf0, sizeof(buf0), "#%d", const_val & 0xFF);
-                    snprintf(buf1, sizeof(buf1), "#%d", (const_val >> 8) & 0xFF);
-                    emit_ins2(sec, "mov", "0x82", buf0);
-                    emit_ins2(sec, "mov", "0x83", buf1);
+                int cval;
+                if (const_map_get(v, &cval)) {
+                    snprintf(buf, sizeof(buf), "#%d", cval & 0xFF);
+                    emit_ins2(sec, "mov", "r7", buf);
+                    snprintf(buf, sizeof(buf), "#%d", (cval >> 8) & 0xFF);
+                    emit_ins2(sec, "mov", "r6", buf);
                 } else if (is_v16_value(v)) {
-                    int addr = v16_addr(v);
-                    char src0[16], src1[16];
-                    fmt_direct(src0, sizeof(src0), addr);
-                    fmt_direct(src1, sizeof(src1), addr + 1);
-                    emit_ins2(sec, "mov", "A", src0);
-                    emit_ins2(sec, "mov", "0x82", "A");
-                    emit_ins2(sec, "mov", "A", src1);
-                    emit_ins2(sec, "mov", "0x83", "A");
+                    AddrPair s; fmt_addr_pair(&s, v16_addr(v));
+                    emit_ins2(sec, "mov", "r7", s.lo);
+                    emit_ins2(sec, "mov", "r6", s.hi);
                 } else {
-                    emit_ins2(sec, "mov", "0x82", vreg(v));
-                    emit_ins2(sec, "mov", "0x83", "#0");
+                    emit_ins2(sec, "mov", "r7", vreg(v));
+                    emit_ins2(sec, "mov", "r6", "#0");
                 }
             } else {
-                int const_val = 0;
-                if (const_map_get(v, &const_val)) {
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "#%d", const_val & 0xFF);
-                    emit_ins2(sec, "mov", "A", buf);
+                int cval;
+                if (const_map_get(v, &cval)) {
+                    snprintf(buf, sizeof(buf), "#%d", cval & 0xFF);
+                    emit_ins2(sec, "mov", "r7", buf);
                 } else {
-                    emit_ins2(sec, "mov", "A", vreg(v));
+                    emit_ins2(sec, "mov", "r7", vreg(v));
                 }
+                emit_ins2(sec, "mov", "r6", "#0");
+            }
+        } else if (has_imm_tag(ins)) {
+            if (func && func->ret_type && func->ret_type->size >= 2) {
+                int v = (int)ins->imm.ival;
+                snprintf(buf, sizeof(buf), "#%d", v & 0xFF);
+                emit_ins2(sec, "mov", "r7", buf);
+                snprintf(buf, sizeof(buf), "#%d", (v >> 8) & 0xFF);
+                emit_ins2(sec, "mov", "r6", buf);
+            } else {
+                snprintf(buf, sizeof(buf), "#%ld", ins->imm.ival & 0xFF);
+                emit_ins2(sec, "mov", "r7", buf);
+                emit_ins2(sec, "mov", "r6", "#0");
             }
         } else {
-            int has_imm = 0;
-            if (ins->labels && ins->labels->len > 0) {
-                char *tag = (char *)list_get(ins->labels, 0);
-                if (tag && strcmp(tag, "imm") == 0) has_imm = 1;
-            }
-            if (has_imm) {
-                if (func && func->ret_type && func->ret_type->size >= 2) {
-                    char buf0[16], buf1[16];
-                    snprintf(buf0, sizeof(buf0), "#%ld", ins->imm.ival & 0xFF);
-                    snprintf(buf1, sizeof(buf1), "#%ld", (ins->imm.ival >> 8) & 0xFF);
-                    emit_ins2(sec, "mov", "0x82", buf0);
-                    emit_ins2(sec, "mov", "0x83", buf1);
-                } else {
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "#%ld", ins->imm.ival & 0xFF);
-                    emit_ins2(sec, "mov", "A", buf);
-                }
-            } else {
-                emit_ins2(sec, "mov", "A", "#0");
-            }
+            emit_ins2(sec, "mov", "r7", "#0");
+            emit_ins2(sec, "mov", "r6", "#0");
         }
         
-        if (func && func->stack_size > 0)
-            emit_frame_epilogue(sec, func->stack_size);
+        if (func && func->stack_size > 0) emit_frame_epilogue(sec, func->stack_size);
         
         if (func && func->is_interrupt) {
             emit_interrupt_epilogue(sec);
@@ -1592,13 +1933,18 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             emit_ins0(sec, "ret");
         }
         break;
+    }
+    
     case IROP_PHI:
         gen_clear_pending_ssa();
         return;
+        
     default:
-        gen_clear_pending_ssa();
-        return;
+        break;
     }
 
     gen_clear_pending_ssa();
+    #undef IS_16BIT
+    #undef GET_ARG
+    #undef VREG
 }

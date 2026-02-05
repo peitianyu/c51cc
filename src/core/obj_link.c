@@ -153,6 +153,20 @@ static int apply_relocs(ObjFile *out)
     return 0;
 }
 
+static int validate_idata_range(const ObjFile *out)
+{
+    if (!out) return -1;
+    for (Iter it = list_iter(out->sections); !iter_end(it);) {
+        Section *sec = iter_next(&it);
+        if (!sec) continue;
+        if (sec->kind == SEC_IDATA && sec->bytes_len > 0x100) {
+            fprintf(stderr, "obj_link: idata section overflow (size=%d > 0x100)\n", sec->bytes_len);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 ObjFile *obj_link(List *objs)
 {
     if (!objs) return NULL;
@@ -239,6 +253,11 @@ ObjFile *obj_link(List *objs)
 
     list_free(maps);
     free(maps);
+
+    if (validate_idata_range(out) != 0) {
+        objfile_free(out);
+        return NULL;
+    }
 
     if (apply_relocs(out) != 0) {
         objfile_free(out);

@@ -7,6 +7,7 @@ Dict *g_mmio_map = NULL;
 Dict *g_val_type = NULL;
 Dict *g_v16_map = NULL;
 int g_v16_next = 0x70;
+char *g_v16_base_label = NULL;
 int g_lower_id = 0;
 
 /* === Core utilities === */
@@ -54,8 +55,13 @@ bool parse_int_val(const char *s, int *out)
 
 int parse_reg_rn(const char *s)
 {
-    if (!s || s[0] != 'r' || s[1] < '0' || s[1] > '7' || s[2] != '\0') return -1;
-    return s[1] - '0';
+    if (!s) return -1;
+    if ((s[0] == 'r' || s[0] == 'R') && s[1] >= '0' && s[1] <= '7' && s[2] == '\0')
+        return s[1] - '0';
+    if ((s[0] == 'a' || s[0] == 'A') && (s[1] == 'r' || s[1] == 'R') &&
+        s[2] >= '0' && s[2] <= '7' && s[3] == '\0')
+        return s[2] - '0';
+    return -1;
 }
 
 int parse_indirect_rn(const char *s)
