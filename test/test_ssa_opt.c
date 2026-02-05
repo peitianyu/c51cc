@@ -42,15 +42,15 @@
 //     return a + b + c;
 // }
 
-// ============================================
-// 2. 代数简化测试 (Algebraic Simplification)
-// ============================================
+// // ============================================
+// // 2. 代数简化测试 (Algebraic Simplification)
+// // ============================================
 
-// x - x = 0
-int test_algebraic_sub_self(int a) {
-    int b = a - a;           // => 0
-    return b;
-}
+// // x - x = 0
+// int test_algebraic_sub_self(int a) {
+//     int b = a - a;           // => 0
+//     return b;
+// }
 
 // // x ^ x = 0
 // int test_algebraic_xor_self(int a) {
@@ -106,9 +106,9 @@ int test_algebraic_sub_self(int a) {
 //     return b;
 // }
 
-// // ============================================
-// // 3. 强度削弱测试 (Strength Reduction)
-// // ============================================
+// ============================================
+// 3. 强度削弱测试 (Strength Reduction)
+// ============================================
 
 // // 乘法转左移
 // int test_strength_mul2(int a) { return a * 2; }    // => a << 1
@@ -149,16 +149,16 @@ int test_algebraic_sub_self(int a) {
 //     return d;
 // }
 
-// // 条件死代码
-// int test_dce_conditional(int x, int cond) {
-//     int a = x + 1;
-//     int b = x + 2;
-//     if (cond) {
-//         return a;
-//     } else {
-//         return b;
-//     }
-// }
+// 条件死代码
+int test_dce_conditional(int x, int cond) {
+    int a = x + 1;
+    int b = x + 2;
+    if (cond) {
+        return a;
+    } else {
+        return b;
+    }
+}
 
 // // 循环中的死代码
 // int test_dce_loop(int n) {

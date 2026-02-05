@@ -834,6 +834,46 @@ static bool pass_local_opts(Func *f, Stats *s) {
                     list_clear(i->args);
                     ++s->fold; changed = true; continue;
                 }
+                /* x * (2^k) = x << k */
+                if (i->op == IROP_MUL && has_b && b_val > 0 && (b_val & (b_val - 1)) == 0) {
+                    int64_t k = 0;
+                    while ((b_val >> k) > 1) ++k;
+                    i->op = IROP_SHL;
+                    i->imm.ival = k;
+                    if (!i->labels) i->labels = make_list();
+                    list_clear(i->labels);
+                    char *tag = pass_alloc(4);
+                    strcpy(tag, "imm");
+                    list_push(i->labels, tag);
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = a;
+                    list_push(i->args, p);
+                    ++s->fold; changed = true; continue;
+                }
+                /* unsigned x / (2^k) = x >> k */
+                if (i->op == IROP_DIV && has_b && b_val > 0 && (b_val & (b_val - 1)) == 0) {
+                    bool udiv = is_unsigned_type(i->type);
+                    if (!udiv) {
+                        Instr *adef = find_def_instr(f, a);
+                        udiv = adef && is_unsigned_type(adef->type);
+                    }
+                    if (!udiv) {
+                        continue;
+                    }
+                    int64_t k = 0;
+                    while ((b_val >> k) > 1) ++k;
+                    i->op = IROP_SHR;
+                    i->imm.ival = k;
+                    if (!i->labels) i->labels = make_list();
+                    list_clear(i->labels);
+                    char *tag = pass_alloc(4);
+                    strcpy(tag, "imm");
+                    list_push(i->labels, tag);
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = a;
+                    list_push(i->args, p);
+                    ++s->fold; changed = true; continue;
+                }
                 /* x << 0 = x, x >> 0 = x */
                 if ((i->op == IROP_SHL || i->op == IROP_SHR) && has_b && b_val == 0) {
                     i->op = IROP_TRUNC; /* copy */
@@ -857,6 +897,19 @@ static bool pass_local_opts(Func *f, Stats *s) {
                     ValueName *p = pass_alloc(sizeof *p); *p = a;
                     list_push(i->args, p);
                     ++s->fold; changed = true; continue;
+                }
+
+                /* 3.1 0 - x = -x */
+                if (i->op == IROP_SUB) {
+                    int64_t a_val = 0;
+                    if (get_const_value(f, a, &a_val) && a_val == 0) {
+                        ValueName rhs = get_arg(i, 1);
+                        i->op = IROP_NEG;
+                        list_clear(i->args);
+                        ValueName *p = pass_alloc(sizeof *p); *p = rhs;
+                        list_push(i->args, p);
+                        ++s->fold; changed = true; continue;
+                    }
                 }
             }
             /* 4. 比较链优化：ne (gt x, y), 0 -> gt x, y
