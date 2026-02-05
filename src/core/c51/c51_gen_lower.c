@@ -95,9 +95,21 @@ int val_size(ValueName v)
     return t ? t->size : 1;
 }
 
+static ValueName v16_resolve_alias(ValueName v)
+{
+    if (!g_v16_alias || v <= 0) return v;
+    for (int i = 0; i < 8; ++i) {
+        int *p = (int *)dict_get(g_v16_alias, vreg_key(v));
+        if (!p || *p == v) break;
+        v = *p;
+    }
+    return v;
+}
+
 int v16_addr(ValueName v)
 {
     if (!g_v16_map || v <= 0) return -1;
+    v = v16_resolve_alias(v);
     int *p = (int *)dict_get(g_v16_map, vreg_key(v));
     if (p) return *p;
     int *np = gen_alloc(sizeof(int));
@@ -105,6 +117,14 @@ int v16_addr(ValueName v)
     g_v16_next += 2;
     dict_put(g_v16_map, vreg_key(v), np);
     return *np;
+}
+
+void v16_alias_put(ValueName v, ValueName alias)
+{
+    if (!g_v16_alias || v <= 0 || alias <= 0 || v == alias) return;
+    int *p = gen_alloc(sizeof(int));
+    *p = alias;
+    dict_put(g_v16_alias, vreg_key(v), p);
 }
 
 bool is_v16_value(ValueName v)
@@ -139,6 +159,25 @@ void emit_set_v16(Section *sec, int addr, int val)
     char dst1[64];
     fmt_v16_direct(dst1, sizeof(dst1), addr + 1);
     emit_ins2(sec, "mov", dst1, buf);
+}
+
+static bool v16_reg_pair(ValueName v, int *lo, int *hi)
+{
+    if (!g_v16_reg_map || v <= 0) return false;
+    ValueName cur = v;
+    for (int i = 0; i < 8; ++i) {
+        V16RegPair *p = (V16RegPair *)dict_get(g_v16_reg_map, vreg_key(cur));
+        if (p) {
+            if (lo) *lo = p->lo;
+            if (hi) *hi = p->hi;
+            return true;
+        }
+        if (!g_v16_alias) break;
+        int *alias = (int *)dict_get(g_v16_alias, vreg_key(cur));
+        if (!alias || *alias == cur) break;
+        cur = *alias;
+    }
+    return false;
 }
 
 /* === Block analysis === */
@@ -216,7 +255,19 @@ void emit_phi_moves_for_edge(Section *sec, Func *func, Block *from, const char *
         int cval = 0;
         if (const_map_get(src_val, &cval)) {
             if (phi_size >= 2 || is_v16_value(phi->dest)) {
-                emit_set_v16(sec, v16_addr(phi->dest), cval);
+                int rlo = -1, rhi = -1;
+                if (v16_reg_pair(phi->dest, &rlo, &rhi)) {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "#%d", cval & 0xFF);
+                    char rbuf[8];
+                    snprintf(rbuf, sizeof(rbuf), "r%d", rlo);
+                    emit_ins2(sec, "mov", rbuf, buf);
+                    snprintf(buf, sizeof(buf), "#%d", (cval >> 8) & 0xFF);
+                    snprintf(rbuf, sizeof(rbuf), "r%d", rhi);
+                    emit_ins2(sec, "mov", rbuf, buf);
+                } else {
+                    emit_set_v16(sec, v16_addr(phi->dest), cval);
+                }
             } else {
                 char ibuf[16];
                 snprintf(ibuf, sizeof(ibuf), "#%d", cval & 0xFF);
@@ -226,15 +277,33 @@ void emit_phi_moves_for_edge(Section *sec, Func *func, Block *from, const char *
         }
 
         if (phi_size >= 2 || is_v16_value(phi->dest) || is_v16_value(src_val)) {
-            int dst = v16_addr(phi->dest);
-            int src = v16_addr(src_val);
+            int d_lo = -1, d_hi = -1, s_lo = -1, s_hi = -1;
+            bool d_reg = v16_reg_pair(phi->dest, &d_lo, &d_hi);
+            bool s_reg = v16_reg_pair(src_val, &s_lo, &s_hi);
+            if (d_reg && s_reg && d_lo == s_lo && d_hi == s_hi) continue;
+
             char d0[64], d1[64], s0[64], s1[64];
-            fmt_v16_direct(d0, sizeof(d0), dst);
-            fmt_v16_direct(d1, sizeof(d1), dst + 1);
-            fmt_v16_direct(s0, sizeof(s0), src);
-            fmt_v16_direct(s1, sizeof(s1), src + 1);
-            emit_ins2(sec, "mov", d0, s0);
-            emit_ins2(sec, "mov", d1, s1);
+            if (d_reg) {
+                snprintf(d0, sizeof(d0), "r%d", d_lo);
+                snprintf(d1, sizeof(d1), "r%d", d_hi);
+            } else {
+                int dst = v16_addr(phi->dest);
+                fmt_v16_direct(d0, sizeof(d0), dst);
+                fmt_v16_direct(d1, sizeof(d1), dst + 1);
+            }
+            if (s_reg) {
+                snprintf(s0, sizeof(s0), "r%d", s_lo);
+                snprintf(s1, sizeof(s1), "r%d", s_hi);
+            } else {
+                int src = v16_addr(src_val);
+                fmt_v16_direct(s0, sizeof(s0), src);
+                fmt_v16_direct(s1, sizeof(s1), src + 1);
+            }
+
+            emit_ins2(sec, "mov", "A", s0);
+            emit_ins2(sec, "mov", d0, "A");
+            emit_ins2(sec, "mov", "A", s1);
+            emit_ins2(sec, "mov", d1, "A");
         } else {
             emit_ins2(sec, "mov", vreg(phi->dest), vreg(src_val));
         }

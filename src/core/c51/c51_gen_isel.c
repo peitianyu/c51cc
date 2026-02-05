@@ -144,9 +144,69 @@ static bool cmp_used_by_next_br(Func *f, Block *blk, Instr *cmp, Instr **out_br)
     return false;
 }
 
+static ValueName find_phi_dest_for_edge(Func *func, Block *from, ValueName src)
+{
+    if (!func || !from || src <= 0 || !from->instrs || from->instrs->len == 0) return 0;
+    Instr *term = (Instr *)list_get(from->instrs, from->instrs->len - 1);
+    if (!term || !term->labels) return 0;
+
+    char from_label[32];
+    snprintf(from_label, sizeof(from_label), "block%d", from->id);
+
+    int label_count = (term->op == IROP_BR) ? 2 : (term->op == IROP_JMP ? 1 : 0);
+    for (int l = 0; l < label_count; ++l) {
+        char *lbl = list_get(term->labels, l);
+        Block *to = find_block_by_label(func, lbl);
+        if (!to || !to->phis) continue;
+        for (Iter pit = list_iter(to->phis); !iter_end(pit);) {
+            Instr *phi = iter_next(&pit);
+            if (!phi || phi->op != IROP_PHI || !phi->labels || !phi->args) continue;
+            for (int i = 0; i < phi->labels->len && i < phi->args->len; ++i) {
+                char *plbl = list_get(phi->labels, i);
+                if (!plbl || strcmp(plbl, from_label) != 0) continue;
+                ValueName *srcp = list_get(phi->args, i);
+                if (srcp && *srcp == src) return phi->dest;
+            }
+        }
+    }
+    return 0;
+}
+
 /* ========== 16位操作辅助 ========== */
 
 typedef struct { char lo[64], hi[64]; } AddrPair;
+
+static void fmt_addr_pair(AddrPair *p, int addr);
+
+static bool v16_reg_pair(ValueName v, int *lo, int *hi)
+{
+    if (!g_v16_reg_map || v <= 0) return false;
+    ValueName cur = v;
+    for (int i = 0; i < 8; ++i) {
+        V16RegPair *p = (V16RegPair *)dict_get(g_v16_reg_map, vreg_key(cur));
+        if (p) {
+            if (lo) *lo = p->lo;
+            if (hi) *hi = p->hi;
+            return true;
+        }
+        if (!g_v16_alias) break;
+        int *alias = (int *)dict_get(g_v16_alias, vreg_key(cur));
+        if (!alias || *alias == cur) break;
+        cur = *alias;
+    }
+    return false;
+}
+
+static void fmt_v16_pair(ValueName v, AddrPair *out)
+{
+    int rlo = -1, rhi = -1;
+    if (v16_reg_pair(v, &rlo, &rhi)) {
+        snprintf(out->lo, sizeof(out->lo), "r%d", rlo);
+        snprintf(out->hi, sizeof(out->hi), "r%d", rhi);
+    } else {
+        fmt_addr_pair(out, v16_addr(v));
+    }
+}
 
 static void fmt_addr_pair(AddrPair *p, int addr)
 {
@@ -165,10 +225,32 @@ static void emit_mov16(Section *sec, int dst_addr, int src_addr)
     emit_ins2(sec, "mov", d.hi, "A");
 }
 
+static void emit_mov16_val(Section *sec, ValueName dstv, ValueName srcv)
+{
+    AddrPair d, s;
+    fmt_v16_pair(dstv, &d);
+    fmt_v16_pair(srcv, &s);
+    emit_ins2(sec, "mov", "A", s.lo);
+    emit_ins2(sec, "mov", d.lo, "A");
+    emit_ins2(sec, "mov", "A", s.hi);
+    emit_ins2(sec, "mov", d.hi, "A");
+}
+
 static void emit_load_imm16(Section *sec, int dst_addr, int val)
 {
     AddrPair d;
     fmt_addr_pair(&d, dst_addr);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "#%d", val & 0xFF);
+    emit_ins2(sec, "mov", d.lo, buf);
+    snprintf(buf, sizeof(buf), "#%d", (val >> 8) & 0xFF);
+    emit_ins2(sec, "mov", d.hi, buf);
+}
+
+static void emit_load_imm16_val(Section *sec, ValueName v, int val)
+{
+    AddrPair d;
+    fmt_v16_pair(v, &d);
     char buf[16];
     snprintf(buf, sizeof(buf), "#%d", val & 0xFF);
     emit_ins2(sec, "mov", d.lo, buf);
@@ -579,8 +661,7 @@ static void emit_load_b_imm_or_reg(Section *sec, Instr *ins)
 static void emit_promote_to_v16(Section *sec, ValueName v, AddrPair *out)
 {
     bool need_promote = !(is_v16_value(v) || val_size(v) >= 2);
-    int addr = v16_addr(v);
-    fmt_addr_pair(out, addr);
+    fmt_v16_pair(v, out);
     if (!need_promote) return;
 
     int cval = 0;
@@ -615,7 +696,7 @@ static void emit_promote_to_v16(Section *sec, ValueName v, AddrPair *out)
 }
 
 /* 通用16位加减法 */
-static void emit_addsub16(Section *sec, Instr *ins, bool is_sub)
+static void emit_addsub16(Section *sec, Instr *ins, bool is_sub, Func *func, Block *cur_block)
 {
     ValueName a = *(ValueName *)list_get(ins->args, 0);
     ValueName b = *(ValueName *)list_get(ins->args, 1);
@@ -625,7 +706,7 @@ static void emit_addsub16(Section *sec, Instr *ins, bool is_sub)
     bool b_const = const_map_get(b, &imm_b);
     if (a_const && b_const) {
         int res = is_sub ? (imm_a - imm_b) : (imm_a + imm_b);
-        emit_load_imm16(sec, v16_addr(ins->dest), res);
+        emit_load_imm16_val(sec, ins->dest, res);
         if (g_const_map) const_map_put(ins->dest, res);
         return;
     }
@@ -655,9 +736,48 @@ static void emit_addsub16(Section *sec, Instr *ins, bool is_sub)
         return;
     }
 
+    if (func && cur_block && (is_v16_value(ins->dest) || val_size(ins->dest) >= 2)) {
+        if (cur_block->instrs && cur_block->instrs->len >= 2) {
+            Instr *term = list_get(cur_block->instrs, cur_block->instrs->len - 1);
+            Instr *prev = list_get(cur_block->instrs, cur_block->instrs->len - 2);
+            if (prev == ins && term && (term->op == IROP_JMP || term->op == IROP_BR)) {
+                ValueName phi_dest = find_phi_dest_for_edge(func, cur_block, ins->dest);
+                if (phi_dest > 0 && (is_v16_value(phi_dest) || val_size(phi_dest) >= 2)) {
+                    v16_alias_put(ins->dest, phi_dest);
+                }
+            }
+        }
+    }
+
+    if (b_const && imm_b == 1) {
+        int d_lo = -1, d_hi = -1, a_lo = -1, a_hi = -1;
+        bool d_reg = v16_reg_pair(ins->dest, &d_lo, &d_hi);
+        bool a_reg = v16_reg_pair(a, &a_lo, &a_hi);
+        bool same_pair = d_reg && a_reg && d_lo == a_lo && d_hi == a_hi;
+        int dst = v16_addr(ins->dest);
+        int src = v16_addr(a);
+        if (same_pair || (!d_reg && !a_reg && dst == src)) {
+            char d0[64], d1[64];
+            if (d_reg) {
+                snprintf(d0, sizeof(d0), "r%d", d_lo);
+                snprintf(d1, sizeof(d1), "r%d", d_hi);
+            } else {
+                fmt_v16_direct(d0, sizeof(d0), dst);
+                fmt_v16_direct(d1, sizeof(d1), dst + 1);
+            }
+            char *l_skip = new_label(is_sub ? "dec_skip" : "inc_skip");
+            emit_ins1(sec, is_sub ? "dec" : "inc", d0);
+            emit_ins1(sec, "jnz", l_skip);
+            emit_ins1(sec, is_sub ? "dec" : "inc", d1);
+            emit_label(sec, l_skip);
+            free(l_skip);
+            return;
+        }
+    }
+
     emit_promote_to_v16(sec, a, &pa);
     if (!b_const) emit_promote_to_v16(sec, b, &pb);
-    fmt_addr_pair(&pd, v16_addr(ins->dest));
+    fmt_v16_pair(ins->dest, &pd);
     
     if (is_sub) emit_ins1(sec, "clr", "C");
     emit_ins2(sec, "mov", "A", pa.lo);
@@ -703,6 +823,17 @@ static void emit_cmp8(Section *sec, CmpKind kind, bool is_signed,
     free(l_true); free(l_false); free(l_end);
 }
 
+static CmpKind swap_cmp_kind(CmpKind k)
+{
+    switch (k) {
+        case CMP_LT: return CMP_GT;
+        case CMP_LE: return CMP_GE;
+        case CMP_GT: return CMP_LT;
+        case CMP_GE: return CMP_LE;
+    }
+    return k;
+}
+
 static void emit_cmp8_branch(Section *sec, CmpKind kind, bool is_signed,
                              ValueName a, ValueName b,
                              const char *l_true, const char *l_false)
@@ -721,11 +852,18 @@ static void emit_cmp16(Section *sec, CmpKind kind, bool is_signed,
     char *l_true = new_label("cmp_true");
     char *l_false = new_label("cmp_false");
     char *l_end = new_label("cmp_end");
-    char *l_same = NULL;
+    char *l_hi_diff = NULL;
+    char *l_lo_diff = NULL;
+    char *l_sign_diff = NULL;
     char a_hi[32], a_lo[32], b_hi[32], b_lo[32];
 
     /* 尝试常量优化 */
     int cval = 0;
+    bool a_const = const_map_get(a, &cval);
+    if (a_const && !const_map_get(b, &cval)) {
+        ValueName tmp = a; a = b; b = tmp;
+        kind = swap_cmp_kind(kind);
+    }
     if (const_map_get(b, &cval)) {
         /* b 是常量，检查是否可以用 CJNE 优化 */
         /* 对于 16 位，使用 CJNE 比较 */
@@ -786,44 +924,92 @@ static void emit_cmp16(Section *sec, CmpKind kind, bool is_signed,
     fmt_v16_operand_byte(b, 1, b_hi, sizeof(b_hi));
     fmt_v16_operand_byte(b, 0, b_lo, sizeof(b_lo));
 
-    if (is_signed) {
-        l_same = new_label("cmp_same");
+    if (!is_signed) {
+        char *l_check_lo = new_label("cmp_lo");
         emit_ins2(sec, "mov", "A", a_hi);
-        emit_ins2(sec, "xrl", "A", b_hi);
-        emit_ins2(sec, "anl", "A", "#0x80");
-        emit_ins1(sec, "jz", l_same);
-        emit_ins2(sec, "mov", "A", a_hi);
-        emit_ins2(sec, "anl", "A", "#0x80");
-        bool lt_like = (kind == CMP_LT || kind == CMP_LE);
-        emit_ins1(sec, lt_like ? "jnz" : "jz", l_true);
-        emit_ins1(sec, "sjmp", l_false);
-        emit_label(sec, l_same);
-        free(l_same);
+        emit_ins3(sec, "cjne", "A", b_hi, l_check_lo);
+        emit_ins2(sec, "mov", "A", a_lo);
+        emit_ins3(sec, "cjne", "A", b_lo, l_check_lo);
+
+        if (kind == CMP_LT || kind == CMP_GT) {
+            emit_ins2(sec, "mov", vreg(dest), "#0");
+        } else {
+            emit_ins2(sec, "mov", vreg(dest), "#1");
+        }
+        emit_ins1(sec, "sjmp", l_end);
+
+        emit_label(sec, l_check_lo);
+        if (kind == CMP_LT || kind == CMP_LE) {
+            emit_ins1(sec, "jc", l_true);
+            emit_ins1(sec, "sjmp", l_false);
+        } else {
+            emit_ins1(sec, "jc", l_false);
+            emit_ins1(sec, "sjmp", l_true);
+        }
+
+        emit_label(sec, l_true);
+        emit_ins2(sec, "mov", vreg(dest), "#1");
+        emit_ins1(sec, "sjmp", l_end);
+        emit_label(sec, l_false);
+        emit_ins2(sec, "mov", vreg(dest), "#0");
+        emit_label(sec, l_end);
+
+        free(l_check_lo);
+        free(l_true);
+        free(l_false);
+        free(l_end);
+        return;
     }
+
+    l_hi_diff = new_label("cmp_hi_diff");
+    l_lo_diff = new_label("cmp_lo_diff");
+    l_sign_diff = new_label("cmp_sign_diff");
 
     emit_ins2(sec, "mov", "A", a_hi);
-    emit_ins1(sec, "clr", "C");
-    emit_ins2(sec, "subb", "A", b_hi);
-    if (kind == CMP_LT || kind == CMP_LE) {
-        emit_ins1(sec, "jc", l_true);
-        emit_ins1(sec, "jnz", l_false);
-    } else {
-        emit_ins1(sec, "jc", l_false);
-        emit_ins1(sec, "jnz", l_true);
-    }
-
+    emit_ins3(sec, "cjne", "A", b_hi, l_hi_diff);
     emit_ins2(sec, "mov", "A", a_lo);
-    emit_ins1(sec, "clr", "C");
-    emit_ins2(sec, "subb", "A", b_lo);
+    emit_ins3(sec, "cjne", "A", b_lo, l_lo_diff);
+
+    if (kind == CMP_LT || kind == CMP_GT) {
+        emit_ins2(sec, "mov", vreg(dest), "#0");
+    } else {
+        emit_ins2(sec, "mov", vreg(dest), "#1");
+    }
+    emit_ins1(sec, "sjmp", l_end);
+
+    emit_label(sec, l_lo_diff);
     if (kind == CMP_LT || kind == CMP_LE) {
         emit_ins1(sec, "jc", l_true);
-        emit_ins1(sec, "jnz", l_false);
+        emit_ins1(sec, "sjmp", l_false);
     } else {
         emit_ins1(sec, "jc", l_false);
-        emit_ins1(sec, "jnz", l_true);
+        emit_ins1(sec, "sjmp", l_true);
     }
 
-    emit_ins1(sec, "sjmp", (kind == CMP_LE || kind == CMP_GE) ? l_true : l_false);
+    emit_label(sec, l_hi_diff);
+    emit_ins2(sec, "mov", "A", a_hi);
+    emit_ins2(sec, "xrl", "A", b_hi);
+    emit_ins2(sec, "anl", "A", "#0x80");
+    emit_ins1(sec, "jnz", l_sign_diff);
+
+    if (kind == CMP_LT || kind == CMP_LE) {
+        emit_ins1(sec, "jc", l_true);
+        emit_ins1(sec, "sjmp", l_false);
+    } else {
+        emit_ins1(sec, "jc", l_false);
+        emit_ins1(sec, "sjmp", l_true);
+    }
+
+    emit_label(sec, l_sign_diff);
+    emit_ins2(sec, "mov", "A", a_hi);
+    emit_ins2(sec, "anl", "A", "#0x80");
+    if (kind == CMP_LT || kind == CMP_LE) {
+        emit_ins1(sec, "jnz", l_true);
+        emit_ins1(sec, "sjmp", l_false);
+    } else {
+        emit_ins1(sec, "jnz", l_false);
+        emit_ins1(sec, "sjmp", l_true);
+    }
 
     emit_label(sec, l_false);
     emit_ins2(sec, "mov", vreg(dest), "#0");
@@ -832,6 +1018,9 @@ static void emit_cmp16(Section *sec, CmpKind kind, bool is_signed,
     emit_ins2(sec, "mov", vreg(dest), "#1");
     emit_label(sec, l_end);
 
+    free(l_hi_diff);
+    free(l_lo_diff);
+    free(l_sign_diff);
     free(l_true); free(l_false); free(l_end);
 }
 
@@ -839,10 +1028,17 @@ static void emit_cmp16_branch(Section *sec, CmpKind kind, bool is_signed,
                               ValueName a, ValueName b,
                               const char *l_true, const char *l_false)
 {
-    char *l_same = NULL;
+    char *l_hi_diff = NULL;
+    char *l_lo_diff = NULL;
+    char *l_sign_diff = NULL;
     char a_hi[32], a_lo[32], b_hi[32], b_lo[32];
 
     int cval = 0;
+    bool a_const = const_map_get(a, &cval);
+    if (a_const && !const_map_get(b, &cval)) {
+        ValueName tmp = a; a = b; b = tmp;
+        kind = swap_cmp_kind(kind);
+    }
     if (const_map_get(b, &cval)) {
         fmt_v16_operand_byte(a, 1, a_hi, sizeof(a_hi));
         fmt_v16_operand_byte(a, 0, a_lo, sizeof(a_lo));
@@ -881,44 +1077,76 @@ static void emit_cmp16_branch(Section *sec, CmpKind kind, bool is_signed,
     fmt_v16_operand_byte(b, 1, b_hi, sizeof(b_hi));
     fmt_v16_operand_byte(b, 0, b_lo, sizeof(b_lo));
 
-    if (is_signed) {
-        l_same = new_label("cmp_same");
+    if (!is_signed) {
+        char *l_check_lo = new_label("cmp_lo");
         emit_ins2(sec, "mov", "A", a_hi);
-        emit_ins2(sec, "xrl", "A", b_hi);
-        emit_ins2(sec, "anl", "A", "#0x80");
-        emit_ins1(sec, "jz", l_same);
-        emit_ins2(sec, "mov", "A", a_hi);
-        emit_ins2(sec, "anl", "A", "#0x80");
-        bool lt_like = (kind == CMP_LT || kind == CMP_LE);
-        emit_ins1(sec, lt_like ? "jnz" : "jz", l_true);
-        emit_ins1(sec, "sjmp", l_false);
-        emit_label(sec, l_same);
-        free(l_same);
+        emit_ins3(sec, "cjne", "A", b_hi, l_check_lo);
+        emit_ins2(sec, "mov", "A", a_lo);
+        emit_ins3(sec, "cjne", "A", b_lo, l_check_lo);
+
+        emit_ins1(sec, "sjmp", (kind == CMP_LT || kind == CMP_GT) ? l_false : l_true);
+
+        emit_label(sec, l_check_lo);
+        if (kind == CMP_LT || kind == CMP_LE) {
+            emit_ins1(sec, "jc", l_true);
+            emit_ins1(sec, "sjmp", l_false);
+        } else {
+            emit_ins1(sec, "jc", l_false);
+            emit_ins1(sec, "sjmp", l_true);
+        }
+
+        free(l_check_lo);
+        return;
     }
+
+    l_hi_diff = new_label("cmp_hi_diff");
+    l_lo_diff = new_label("cmp_lo_diff");
+    l_sign_diff = new_label("cmp_sign_diff");
 
     emit_ins2(sec, "mov", "A", a_hi);
-    emit_ins1(sec, "clr", "C");
-    emit_ins2(sec, "subb", "A", b_hi);
-    if (kind == CMP_LT || kind == CMP_LE) {
-        emit_ins1(sec, "jc", l_true);
-        emit_ins1(sec, "jnz", l_false);
-    } else {
-        emit_ins1(sec, "jc", l_false);
-        emit_ins1(sec, "jnz", l_true);
-    }
-
+    emit_ins3(sec, "cjne", "A", b_hi, l_hi_diff);
     emit_ins2(sec, "mov", "A", a_lo);
-    emit_ins1(sec, "clr", "C");
-    emit_ins2(sec, "subb", "A", b_lo);
+    emit_ins3(sec, "cjne", "A", b_lo, l_lo_diff);
+
+    emit_ins1(sec, "sjmp", (kind == CMP_LT || kind == CMP_GT) ? l_false : l_true);
+
+    emit_label(sec, l_lo_diff);
     if (kind == CMP_LT || kind == CMP_LE) {
         emit_ins1(sec, "jc", l_true);
-        emit_ins1(sec, "jnz", l_false);
+        emit_ins1(sec, "sjmp", l_false);
     } else {
         emit_ins1(sec, "jc", l_false);
-        emit_ins1(sec, "jnz", l_true);
+        emit_ins1(sec, "sjmp", l_true);
     }
 
-    emit_ins1(sec, "sjmp", (kind == CMP_LE || kind == CMP_GE) ? l_true : l_false);
+    emit_label(sec, l_hi_diff);
+    emit_ins2(sec, "mov", "A", a_hi);
+    emit_ins2(sec, "xrl", "A", b_hi);
+    emit_ins2(sec, "anl", "A", "#0x80");
+    emit_ins1(sec, "jnz", l_sign_diff);
+
+    if (kind == CMP_LT || kind == CMP_LE) {
+        emit_ins1(sec, "jc", l_true);
+        emit_ins1(sec, "sjmp", l_false);
+    } else {
+        emit_ins1(sec, "jc", l_false);
+        emit_ins1(sec, "sjmp", l_true);
+    }
+
+    emit_label(sec, l_sign_diff);
+    emit_ins2(sec, "mov", "A", a_hi);
+    emit_ins2(sec, "anl", "A", "#0x80");
+    if (kind == CMP_LT || kind == CMP_LE) {
+        emit_ins1(sec, "jnz", l_true);
+        emit_ins1(sec, "sjmp", l_false);
+    } else {
+        emit_ins1(sec, "jnz", l_false);
+        emit_ins1(sec, "sjmp", l_true);
+    }
+
+    free(l_hi_diff);
+    free(l_lo_diff);
+    free(l_sign_diff);
 }
 
 static void emit_eqne8_branch(Section *sec, bool is_ne, ValueName a, ValueName b,
@@ -964,6 +1192,11 @@ static void emit_eqne16_branch(Section *sec, bool is_ne, ValueName a, ValueName 
 
 static void fmt_v16_operand_byte(ValueName v, int byte, char *out, size_t n)
 {
+    int rlo = -1, rhi = -1;
+    if (v16_reg_pair(v, &rlo, &rhi)) {
+        snprintf(out, n, "r%d", byte == 0 ? rlo : rhi);
+        return;
+    }
     int cv = 0;
     if (const_map_get(v, &cv)) {
         fmt_imm8(out, n, (cv >> (byte * 8)) & 0xFF);
@@ -1106,12 +1339,12 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         break;
         
     case IROP_ADD:
-        if (IS_16BIT()) emit_addsub16(sec, ins, false);
+        if (IS_16BIT()) emit_addsub16(sec, ins, false, func, cur_block);
         else emit_binop8(sec, ins, "add", false);
         break;
         
     case IROP_SUB:
-        if (IS_16BIT()) emit_addsub16(sec, ins, true);
+        if (IS_16BIT()) emit_addsub16(sec, ins, true, func, cur_block);
         else emit_binop8(sec, ins, "subb", true);
         break;
         
@@ -1252,7 +1485,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             if (g_const_map) const_map_put(ins->dest, val & 0xFF);
         } else if (is_v16_value(src) || val_size(src) >= 2) {
             char src0[16];
-            fmt_v16_direct(src0, sizeof(src0), v16_addr(src));
+            fmt_v16_operand_byte(src, 0, src0, sizeof(src0));
             emit_ins2(sec, "mov", "A", src0);
             emit_ins2(sec, "mov", vreg(ins->dest), "A");
         } else {
@@ -1263,8 +1496,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     
     case IROP_ZEXT: {
         ValueName src = GET_ARG(0);
-        int dst = v16_addr(ins->dest);
-        AddrPair d; fmt_addr_pair(&d, dst);
+        AddrPair d; fmt_v16_pair(ins->dest, &d);
         int val;
         
         if (const_map_get(src, &val)) {
@@ -1273,7 +1505,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             emit_ins2(sec, "mov", d.hi, "#0");
             if (g_const_map) const_map_put(ins->dest, val & 0xFF);
         } else if (is_v16_value(src) || val_size(src) >= 2) {
-            emit_mov16(sec, dst, v16_addr(src));
+            emit_mov16_val(sec, ins->dest, src);
         } else {
             emit_ins2(sec, "mov", "A", vreg(src));
             emit_ins2(sec, "mov", d.lo, "A");
@@ -1284,8 +1516,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     
     case IROP_SEXT: {
         ValueName src = GET_ARG(0);
-        int dst = v16_addr(ins->dest);
-        AddrPair d; fmt_addr_pair(&d, dst);
+        AddrPair d; fmt_v16_pair(ins->dest, &d);
         int val;
         
         if (const_map_get(src, &val)) {
@@ -1296,7 +1527,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             emit_ins2(sec, "mov", d.hi, buf);
             if (g_const_map) const_map_put(ins->dest, ((low & 0x80) ? 0xFF00 : 0) | low);
         } else if (is_v16_value(src) || val_size(src) >= 2) {
-            emit_mov16(sec, dst, v16_addr(src));
+            emit_mov16_val(sec, ins->dest, src);
         } else {
             char *l_pos = new_label("sext_pos");
             char *l_end = new_label("sext_end");

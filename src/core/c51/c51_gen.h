@@ -21,6 +21,11 @@ typedef struct AddrInfo {
     int stack_off;
 } AddrInfo;
 
+typedef struct V16RegPair {
+    int lo;
+    int hi;
+} V16RegPair;
+
 /* === Forward declarations === */
 typedef struct Interval Interval;
 
@@ -30,6 +35,8 @@ extern Dict *g_const_map;
 extern Dict *g_mmio_map;
 extern Dict *g_val_type;
 extern Dict *g_v16_map;
+extern Dict *g_v16_reg_map;
+extern Dict *g_v16_alias;
 extern int g_v16_next;
 extern char *g_v16_base_label;
 extern int g_lower_id;
@@ -129,6 +136,7 @@ Ctype *val_type_get(ValueName v);
 int val_size(ValueName v);
 int v16_addr(ValueName v);
 bool is_v16_value(ValueName v);
+void v16_alias_put(ValueName v, ValueName alias);
 void fmt_direct(char *buf, size_t n, int addr);
 void emit_set_v16(Section *sec, int addr, int val);
 void fmt_v16_direct(char *buf, size_t n, int addr);

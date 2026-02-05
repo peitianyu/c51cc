@@ -32,6 +32,17 @@ void regalloc_section_asminstrs(Section *sec)
 {
     if (!sec || !sec->asminstrs) return;
 
+    unsigned reserved_mask = 0;
+    if (g_v16_reg_map) {
+        for (Iter it = list_iter(g_v16_reg_map->list); !iter_end(it);) {
+            DictEntry *e = iter_next(&it);
+            if (!e || !e->val) continue;
+            V16RegPair *p = (V16RegPair *)e->val;
+            if (p->lo >= 0 && p->lo <= 7) reserved_mask |= reg_bit(p->lo);
+            if (p->hi >= 0 && p->hi <= 7) reserved_mask |= reg_bit(p->hi);
+        }
+    }
+
     int max_v = -1;
     int ins_index = 0;
     for (Iter it = list_iter(sec->asminstrs); !iter_end(it); ++ins_index) {
@@ -104,10 +115,11 @@ void regalloc_section_asminstrs(Section *sec)
                 if (reg_of[v] == 0) r0_used = true;
                 if (reg_of[v] == 1) r1_used = true;
             }
-            if (!r0_used) reg = 0;
-            else if (!r1_used) reg = 1;
+            if (!r0_used && !(reserved_mask & reg_bit(0))) reg = 0;
+            else if (!r1_used && !(reserved_mask & reg_bit(1))) reg = 1;
         } else {
             for (int r = 2; r <= 6; ++r) {
+                if (reserved_mask & reg_bit(r)) continue;
                 bool used = false;
                 for (int j = 0; j < active_len; ++j) {
                     if (reg_of[active[j]] == r) { used = true; break; }
