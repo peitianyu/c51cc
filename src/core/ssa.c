@@ -1969,6 +1969,21 @@ static void ssa_print_func(FILE *fp, Func *f) {
     List *consts = collect_consts(f);
     
     if (f->blocks) {
+        int printable_blocks = 0;
+        int printable_only_id = -1;
+        for (int j = 0; j < f->blocks->len; j++) {
+            Block *blk = list_get(f->blocks, j);
+            if (!blk) continue;
+            bool is_first = (j == 0);
+            bool has_preds = blk->preds && blk->preds->len > 0;
+            bool has_instrs = (blk->phis && blk->phis->len > 0) ||
+                              (blk->instrs && blk->instrs->len > 0);
+            if (!is_first && !has_preds && !has_instrs) {
+                continue;
+            }
+            printable_blocks++;
+            printable_only_id = blk->id;
+        }
         for (int j = 0; j < f->blocks->len; j++) {
             Block *blk = list_get(f->blocks, j);
             if (!blk) continue;
@@ -1980,7 +1995,9 @@ static void ssa_print_func(FILE *fp, Func *f) {
             if (!is_first && !has_preds && !has_instrs) {
                 continue; // 跳过空死块
             }
-            fprintf(fp, "\n  .b%d:\n", blk->id);
+            if (!(printable_blocks == 1 && printable_only_id == 0)) {
+                fprintf(fp, "\n  b%d:\n", blk->id);
+            }
             
             if (blk->phis) {
                 for (int i = 0; i < blk->phis->len; i++) {

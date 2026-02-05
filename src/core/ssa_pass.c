@@ -220,6 +220,7 @@ static bool is_volatile_for_forwarding(const Instr *i) {
 
 static bool is_pure_instr(const Instr *i) {
     switch (i->op) {
+    case IROP_PARAM:
     case IROP_CONST:
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
     case IROP_AND: case IROP_OR:  case IROP_XOR:
@@ -463,6 +464,11 @@ static bool pass_phi(Func *f, Stats *s) {
 }
 
 /*---------- 常量折叠 + store/ret 标记 ----------*/
+#define CASE_BIN \
+    case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD: \
+    case IROP_AND: case IROP_OR:  case IROP_XOR: \
+    case IROP_SHL: case IROP_SHR: \
+    case IROP_EQ:  case IROP_NE:  case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE
 static bool pass_const_fold(Func *f, Stats *s) {
     bool changed = false;
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
