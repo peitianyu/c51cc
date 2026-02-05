@@ -178,6 +178,64 @@ static void list_clear_shallow(List *list) {
     list->head = list->tail = NULL;
 }
 
+static bool value_used(Func *f, ValueName v);
+
+static bool block_only_jmp_in_func(Func *f, Block *b, Instr **term_out) {
+    if (term_out) *term_out = NULL;
+    if (!b || !b->instrs) return false;
+    Instr *term = NULL;
+    for (Iter it = list_iter(b->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i || i->op == IROP_NOP) continue;
+        if (i->op == IROP_PARAM) {
+            continue; /* 入口块允许忽略param */
+        }
+        if (term) return false; /* 多于一个有效指令 */
+        term = i;
+    }
+    if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) return false;
+    if (term_out) *term_out = term;
+    return true;
+}
+
+static bool block_has_other_preds(Func *f, Block *t, Block *only) {
+    if (!f || !t) return false;
+    int tid = (int)t->id;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || b == only) continue;
+        if (!b->instrs || b->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        if (!term || !term->labels) continue;
+        if (term->op == IROP_JMP && term->labels->len >= 1) {
+            int id = -1;
+            sscanf((char *)list_get(term->labels, 0), "block%d", &id);
+            if (id == tid) return true;
+        } else if (term->op == IROP_BR && term->labels->len >= 2) {
+            int id1 = -1, id2 = -1;
+            sscanf((char *)list_get(term->labels, 0), "block%d", &id1);
+            sscanf((char *)list_get(term->labels, 1), "block%d", &id2);
+            if (id1 == tid || id2 == tid) return true;
+        }
+    }
+    return false;
+}
+
+static bool block_only_ret(Block *b, Instr **ret_out) {
+    if (ret_out) *ret_out = NULL;
+    if (!b || !b->instrs) return false;
+    Instr *term = NULL;
+    for (Iter it = list_iter(b->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i || i->op == IROP_NOP) continue;
+        if (term) return false;
+        term = i;
+    }
+    if (!term || term->op != IROP_RET) return false;
+    if (ret_out) *ret_out = term;
+    return true;
+}
+
 static List *preds_remove(List *preds, Block *rem) {
     List *dst = make_list();
     if (!preds) return dst;
@@ -452,15 +510,133 @@ static bool phi_pred(void *phi_, void *f_) {
     }
     return false; /* 可删 */
 }
+static bool phi_simplify_value(Instr *p, Func *f, Stats *s) {
+    if (!p || p->op != IROP_PHI) return false;
+    if (!p->args || p->args->len == 0) return false;
+
+    ValueName rep = 0;
+    bool has_rep = false;
+    bool rep_is_const = false;
+    int64_t rep_const = 0;
+
+    for (int i = 0; i < p->args->len; ++i) {
+        ValueName v = *(ValueName *)list_get(p->args, i);
+        if (v == p->dest) continue;
+        if (!has_rep) {
+            rep = v;
+            has_rep = true;
+            rep_is_const = get_const_value(f, v, &rep_const);
+            continue;
+        }
+        if (v == rep) continue;
+        if (rep_is_const) {
+            int64_t cv = 0;
+            if (get_const_value(f, v, &cv) && cv == rep_const) continue;
+        }
+        return false;
+    }
+
+    if (!has_rep) return false;
+
+    if (rep_is_const) {
+        p->op = IROP_CONST;
+        p->imm.ival = rep_const;
+        list_clear(p->args);
+        if (p->labels) list_clear(p->labels);
+    } else {
+        p->op = IROP_TRUNC; /* copy */
+        list_clear(p->args);
+        ValueName *pv = pass_alloc(sizeof *pv);
+        *pv = rep;
+        list_push(p->args, pv);
+        if (p->labels) list_clear(p->labels);
+    }
+    ++s->fold;
+    return true;
+}
+static bool phi_label_exists(List *labels, const char *lbl) {
+    if (!labels || !lbl) return false;
+    for (Iter it = list_iter(labels); !iter_end(it);) {
+        char *p = iter_next(&it);
+        if (p && strcmp(p, lbl) == 0) return true;
+    }
+    return false;
+}
+static bool phi_dedup_edges(Instr *p) {
+    if (!p || p->op != IROP_PHI || !p->args || !p->labels) return false;
+    int n = p->args->len < p->labels->len ? p->args->len : p->labels->len;
+    if (n <= 1) return false;
+
+    List *args_tmp = make_list();
+    List *labels_tmp = make_list();
+    bool changed = false;
+
+    for (int i = 0; i < n; ++i) {
+        ValueName *v = list_get(p->args, i);
+        char *lbl = list_get(p->labels, i);
+        if (lbl && phi_label_exists(labels_tmp, lbl)) {
+            changed = true;
+            continue;
+        }
+        list_push(args_tmp, v);
+        list_push(labels_tmp, lbl);
+    }
+
+    if (changed) {
+        list_clear_shallow(p->args);
+        list_clear_shallow(p->labels);
+        for (Iter it = list_iter(args_tmp); !iter_end(it);) {
+            list_push(p->args, iter_next(&it));
+        }
+        for (Iter it = list_iter(labels_tmp); !iter_end(it);) {
+            list_push(p->labels, iter_next(&it));
+        }
+    }
+
+    list_clear_shallow(args_tmp);
+    list_clear_shallow(labels_tmp);
+    free(args_tmp);
+    free(labels_tmp);
+    return changed;
+}
 static bool pass_phi(Func *f, Stats *s) {
     int rm0 = s->phi_rm;
+    bool changed = false;
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
+        for (Iter kt = list_iter(b->phis); !iter_end(kt);) {
+            Instr *p = iter_next(&kt);
+            if (phi_simplify_value(p, f, s)) changed = true;
+            if (phi_dedup_edges(p)) changed = true;
+        }
         List *keep = filter_list(b->phis, phi_pred, f);
         s->phi_rm += b->phis->len - keep->len;
         b->phis = keep;
     }
-    return s->phi_rm != rm0;
+    if (s->phi_rm != rm0) changed = true;
+    return changed;
+}
+
+/*---------- 清理已折叠的PHI ----------*/
+static bool pass_phi_cleanup(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks) return false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->phis) continue;
+        List *keep = make_list();
+        for (Iter kt = list_iter(b->phis); !iter_end(kt);) {
+            Instr *p = iter_next(&kt);
+            if (p && p->op == IROP_PHI) {
+                list_push(keep, p);
+            } else {
+                changed = true;
+                if (s) s->phi_rm++;
+            }
+        }
+        b->phis = keep;
+    }
+    return changed;
 }
 
 /*---------- 常量折叠 + store/ret 标记 ----------*/
@@ -1273,6 +1449,31 @@ static bool pass_block_merge(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 分支目标相同 => jmp ----------*/
+static bool pass_br_same_target(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks) return false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs || b->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        if (!term || term->op != IROP_BR || !term->labels || term->labels->len < 2) continue;
+        char *l0 = (char *)list_get(term->labels, 0);
+        char *l1 = (char *)list_get(term->labels, 1);
+        if (!l0 || !l1 || strcmp(l0, l1) != 0) continue;
+
+        char *lab = pass_alloc(strlen(l0) + 1);
+        strcpy(lab, l0);
+        term->op = IROP_JMP;
+        if (term->args) list_clear(term->args);
+        list_clear(term->labels);
+        list_push(term->labels, lab);
+        s->rm++;
+        changed = true;
+    }
+    return changed;
+}
+
 /*---------- 常量分支消除 + 死块删除 ----------*/
 static bool pass_const_branch(Func *f, Stats *s) {
     bool changed = false;
@@ -1461,9 +1662,8 @@ static bool pass_entry_jmp_elim(Func *f, Stats *s) {
     if (!f || !f->entry || !f->blocks) return false;
     Block *b = f->entry;
     if (!b || (b->phis && b->phis->len > 0)) return false;
-    if (!b->instrs || b->instrs->len != 1) return false;
-    Instr *term = (Instr *)list_get(b->instrs, 0);
-    if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) return false;
+    Instr *term = NULL;
+    if (!block_only_jmp_in_func(f, b, &term)) return false;
 
     int tid = -1;
     sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
@@ -1471,7 +1671,7 @@ static bool pass_entry_jmp_elim(Func *f, Stats *s) {
     Block *t = find_block_by_id(f, tid);
     if (!t || t == b) return false;
     if (t->phis && t->phis->len > 0) return false;
-    if (t->preds && t->preds->len != 1) return false;
+
 
     /* 将入口设置为目标块，清理目标块前驱 */
     f->entry = t;
@@ -1481,6 +1681,114 @@ static bool pass_entry_jmp_elim(Func *f, Stats *s) {
     list_clear_shallow(b->instrs);
     b->instrs = make_list();
     b->preds = make_list();
+
+    s->rm++;
+    return true;
+}
+
+/*---------- 入口块跳转内联 ----------*/
+static bool pass_entry_jmp_inline(Func *f, Stats *s) {
+    if (!f || !f->entry || !f->blocks) return false;
+    rebuild_preds(f);
+    Block *b = f->entry;
+    if (!b || (b->phis && b->phis->len > 0)) return false;
+    Instr *term = NULL;
+    if (!block_only_jmp_in_func(f, b, &term)) return false;
+
+    int tid = -1;
+    sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+    if (tid < 0) return false;
+    Block *t = find_block_by_id(f, tid);
+    if (!t || t == b) return false;
+    if (t->phis && t->phis->len > 0) return false;
+    if (block_has_other_preds(f, t, b)) return false;
+
+    list_clear_shallow(b->instrs);
+    b->instrs = make_list();
+    if (t->instrs) {
+        for (Iter it = list_iter(t->instrs); !iter_end(it);) {
+            Instr *inst = iter_next(&it);
+            list_push(b->instrs, inst);
+        }
+    }
+
+    b->preds = make_list();
+
+    list_clear_shallow(t->instrs);
+    t->instrs = make_list();
+    t->preds = make_list();
+
+    s->rm++;
+    return true;
+}
+
+/*---------- 入口块 jmp->ret 折叠 ----------*/
+static bool pass_entry_jmp_ret_fold(Func *f, Stats *s) {
+    if (!f || !f->entry || !f->blocks) return false;
+    Block *b = f->entry;
+    if (!b || (b->phis && b->phis->len > 0)) return false;
+    Instr *term = NULL;
+    if (!block_only_jmp_in_func(f, b, &term)) return false;
+
+    int tid = -1;
+    sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+    if (tid < 0) return false;
+    Block *t = find_block_by_id(f, tid);
+    if (!t || t == b) return false;
+    if (t->phis && t->phis->len > 0) return false;
+    if (block_has_other_preds(f, t, b)) return false;
+
+    Instr *ret = NULL;
+    if (!block_only_ret(t, &ret)) return false;
+
+    list_clear_shallow(b->instrs);
+    b->instrs = make_list();
+    list_push(b->instrs, ret);
+
+    list_clear_shallow(t->instrs);
+    t->instrs = make_list();
+    t->preds = make_list();
+
+    s->rm++;
+    return true;
+}
+
+/*---------- 入口块 jmp->ret 复制 ----------*/
+static bool pass_entry_jmp_ret_copy(Func *f, Stats *s) {
+    if (!f || !f->entry || !f->blocks) return false;
+    Block *b = f->entry;
+    if (!b || (b->phis && b->phis->len > 0)) return false;
+    Instr *term = NULL;
+    if (!block_only_jmp_in_func(f, b, &term)) return false;
+
+    int tid = -1;
+    sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+    if (tid < 0) return false;
+    Block *t = find_block_by_id(f, tid);
+    if (!t || t == b) return false;
+    if (t->phis && t->phis->len > 0) return false;
+
+    Instr *ret = NULL;
+    if (!block_only_ret(t, &ret)) return false;
+
+    Instr *r = pass_alloc(sizeof *r);
+    memcpy(r, ret, sizeof *r);
+    if (ret->args) {
+        r->args = make_list();
+        for (Iter it = list_iter(ret->args); !iter_end(it);) {
+            list_push(r->args, iter_next(&it));
+        }
+    }
+    if (ret->labels) {
+        r->labels = make_list();
+        for (Iter it = list_iter(ret->labels); !iter_end(it);) {
+            list_push(r->labels, iter_next(&it));
+        }
+    }
+
+    list_clear_shallow(b->instrs);
+    b->instrs = make_list();
+    list_push(b->instrs, r);
 
     s->rm++;
     return true;
@@ -1634,6 +1942,67 @@ static bool pass_entry_param_sink(Func *f, Stats *s) {
     return true;
 }
 
+/*---------- 可达块裁剪 ----------*/
+static bool pass_prune_unreachable(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks || f->blocks->len == 0) return false;
+
+    int max_id = 0;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (b && (int)b->id > max_id) max_id = (int)b->id;
+    }
+
+    bool *seen = pass_alloc((size_t)(max_id + 1) * sizeof(bool));
+    for (int i = 0; i <= max_id; ++i) seen[i] = false;
+
+    Block **work = pass_alloc((size_t)f->blocks->len * sizeof(Block *));
+    int wlen = 0;
+    Block *entry = f->entry ? f->entry : (Block *)list_get(f->blocks, 0);
+    if (entry) { seen[entry->id] = true; work[wlen++] = entry; }
+
+    while (wlen > 0) {
+        Block *b = work[--wlen];
+        if (!b || !b->instrs || b->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        if (!term || !term->labels) continue;
+        if (term->op == IROP_JMP && term->labels->len >= 1) {
+            int tid = -1;
+            sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+            if (tid >= 0 && tid <= max_id && !seen[tid]) {
+                Block *t = find_block_by_id(f, tid);
+                if (t) { seen[tid] = true; work[wlen++] = t; }
+            }
+        } else if (term->op == IROP_BR && term->labels->len >= 2) {
+            int t1 = -1, t2 = -1;
+            sscanf((char *)list_get(term->labels, 0), "block%d", &t1);
+            sscanf((char *)list_get(term->labels, 1), "block%d", &t2);
+            if (t1 >= 0 && t1 <= max_id && !seen[t1]) {
+                Block *t = find_block_by_id(f, t1);
+                if (t) { seen[t1] = true; work[wlen++] = t; }
+            }
+            if (t2 >= 0 && t2 <= max_id && !seen[t2]) {
+                Block *t = find_block_by_id(f, t2);
+                if (t) { seen[t2] = true; work[wlen++] = t; }
+            }
+        }
+    }
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        if ((int)b->id <= max_id && !seen[b->id]) {
+            b->preds = make_list();
+            b->phis = make_list();
+            b->instrs = make_list();
+            s->rm++;
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 /*---------- 空块消除（空块视为fallthrough到下一个块） ----------*/
 static bool pass_empty_block_elim(Func *f, Stats *s) {
     bool changed = false;
@@ -1674,6 +2043,49 @@ static bool pass_empty_block_elim(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 仅含 jmp 的空块消除 ----------*/
+static bool pass_jmp_only_elim(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks) return false;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || b == f->entry) continue;
+        if (b->phis && b->phis->len > 0) continue;
+        Instr *term = NULL;
+        if (!block_only_jmp_in_func(f, b, &term)) continue;
+
+        int sid = -1;
+        sscanf((char *)list_get(term->labels, 0), "block%d", &sid);
+        if (sid < 0) continue;
+        Block *succ = find_block_by_id(f, sid);
+        if (!succ || succ == b) continue;
+
+        if (succ->phis && succ->phis->len > 0 && b->preds && b->preds->len > 1) {
+            continue; /* 避免在有PHI且多前驱时错误合并 */
+        }
+
+        if (b->preds) {
+            for (Iter pit = list_iter(b->preds); !iter_end(pit);) {
+                Block *pred = iter_next(&pit);
+                if (!pred || pred == b) continue;
+                replace_term_target(pred, b->id, succ->id);
+                if (succ->preds) succ->preds = preds_remove(succ->preds, b);
+                list_unique_push(succ->preds, pred, block_ptr_eq);
+                replace_phi_pred_label(succ, b->id, pred->id);
+            }
+        }
+
+        b->preds = make_list();
+        b->phis = make_list();
+        b->instrs = make_list();
+
+        s->rm++;
+        changed = true;
+    }
+    return changed;
+}
+
 /*---------- 统一迭代框架 ----------*/
 void ssa_optimize_func(Func *f, int level) {
     if (!f || level == OPT_O0) return;
@@ -1690,7 +2102,12 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_addr_merge(f, &st);
         changed |= pass_local_opts(f, &st);
         changed |= pass_const_branch(f, &st);
+        changed |= pass_br_same_target(f, &st);
         changed |= pass_jump_threading(f, &st);
+        if (pass_jmp_only_elim(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
         changed |= pass_entry_jmp_elim(f, &st);
         changed |= pass_entry_param_sink(f, &st);
         rebuild_preds(f);
@@ -1699,12 +2116,44 @@ void ssa_optimize_func(Func *f, int level) {
             rebuild_preds(f);
         }
         changed |= pass_phi(f, &st);
+        if (pass_phi_cleanup(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
+        if (pass_entry_jmp_elim(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
+        if (pass_entry_jmp_inline(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
+        if (pass_entry_jmp_ret_fold(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
+        if (pass_entry_jmp_ret_copy(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
+        if (pass_prune_unreachable(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
         changed |= pass_store_cleanup(f, &st);
         changed |= pass_binop_const_inline(f, &st);
         changed |= pass_ret_const_inline(f, &st);
         changed |= pass_const_store_prune(f, &st);
         changed |= pass_block_merge(f, &st);
         changed |= pass_dce(f, &st);
+        if (pass_entry_jmp_ret_copy(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
+        if (pass_entry_jmp_ret_fold(f, &st)) {
+            changed = true;
+            rebuild_preds(f);
+        }
     } while (changed && ++it < 20);
 }
 

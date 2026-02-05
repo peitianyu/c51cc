@@ -1988,11 +1988,11 @@ static void ssa_print_func(FILE *fp, Func *f) {
             Block *blk = list_get(f->blocks, j);
             if (!blk) continue;
             // 跳过空死块：无前驱且无指令的块（除了第一个块）
-            bool is_first = (j == 0);
+            bool is_entry = (f->entry && blk == f->entry);
             bool has_preds = blk->preds && blk->preds->len > 0;
             bool has_instrs = (blk->phis && blk->phis->len > 0) ||
                               (blk->instrs && blk->instrs->len > 0);
-            if (!is_first && !has_preds && !has_instrs) {
+            if (!is_entry && !has_preds && !has_instrs) {
                 continue; // 跳过空死块
             }
             if (!(printable_blocks == 1 && printable_only_id == 0)) {

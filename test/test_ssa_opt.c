@@ -149,16 +149,16 @@
 //     return d;
 // }
 
-// 条件死代码
-int test_dce_conditional(int x, int cond) {
-    int a = x + 1;
-    int b = x + 2;
-    if (cond) {
-        return a;
-    } else {
-        return b;
-    }
-}
+// // 条件死代码
+// int test_dce_conditional(int x, int cond) {
+//     int a = x + 1;
+//     int b = x + 2;
+//     if (cond) {
+//         return a;
+//     } else {
+//         return b;
+//     }
+// }
 
 // // 循环中的死代码
 // int test_dce_loop(int n) {
@@ -185,16 +185,16 @@ int test_dce_conditional(int x, int cond) {
 //     return result;           // PHI 只有一个有效值 x
 // }
 
-// // 常量 PHI
-// int test_phi_constant(int cond) {
-//     int result;
-//     if (cond) {
-//         result = 10;
-//     } else {
-//         result = 10;         // 与 then 分支相同常量
-//     }
-//     return result;
-// }
+// 常量 PHI
+int test_phi_constant(int cond) {
+    int result;
+    if (cond) {
+        result = 10;
+    } else {
+        result = 10;         // 与 then 分支相同常量
+    }
+    return result;
+}
 
 // // 多分支 PHI
 // int test_phi_multi(int x, int a, int b, int c) {
