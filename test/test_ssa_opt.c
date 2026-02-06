@@ -378,29 +378,29 @@
 //     return a;
 // }
 
-// // ============================================
-// // 11. 指针优化测试 (Pointer Optimization)
-// // ============================================
+// ============================================
+// 11. 指针优化测试 (Pointer Optimization)
+// ============================================
 
-// // 取地址再解引用
-// int test_ptr_deref_addr(int a) {
-//     int *p = &a;
-//     return *p;               // => a
-// }
+// 取地址再解引用
+int test_ptr_deref_addr(int a) {
+    int *p = &a;
+    return *p;               // => a
+}
 
-// // 自增自减
-// int test_ptr_inc(int *p) {
-//     int a = *p;
-//     p = p + 1;
-//     int b = *p;
-//     return a + b;
-// }
+// 自增自减
+int test_ptr_inc(int *p) {
+    int a = *p;
+    p = p + 1;
+    int b = *p;
+    return a + b;
+}
 
-// // 指针解引用
-// int test_ptr_deref(int *p) {
-//     int a = *p;
-//     return a;
-// }
+// 指针解引用
+int test_ptr_deref(int *p) {
+    int a = *p;
+    return a;
+}
 
 // // ============================================
 // // 12. 位运算优化测试 (Bitwise Optimization)

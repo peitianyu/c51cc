@@ -56,6 +56,8 @@ static Func *find_func_in_unit(const char *name) {
 
 typedef struct { ValueName from, to; } ValueMapEntry;
 
+typedef struct { const char *name; ValueName val; } ParamMapEntry;
+
 static bool vmap_put(ValueMapEntry *map, int *count, int cap, ValueName from, ValueName to) {
     if (*count >= cap) return false;
     map[*count].from = from;
@@ -69,6 +71,17 @@ static ValueName vmap_get(ValueMapEntry *map, int count, ValueName from, bool *f
         if (map[i].from == from) {
             if (found) *found = true;
             return map[i].to;
+        }
+    }
+    if (found) *found = false;
+    return 0;
+}
+
+static ValueName pmap_get(ParamMapEntry *map, int count, const char *name, bool *found) {
+    for (int i = 0; i < count; ++i) {
+        if (map[i].name && name && strcmp(map[i].name, name) == 0) {
+            if (found) *found = true;
+            return map[i].val;
         }
     }
     if (found) *found = false;
@@ -294,6 +307,29 @@ static bool is_pure_instr(const Instr *i) {
     default:
         return false;
     }
+}
+
+static bool addr_used_only_by_loads(Func *f, ValueName addr) {
+    if (!f || addr <= 0) return false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr *p = iter_next(&jt);
+            if (!p || !p->args) continue;
+            for (int k = 0; k < p->args->len; ++k)
+                if (*(ValueName *)list_get(p->args, k) == addr) return false;
+        }
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || !i->args) continue;
+            for (int k = 0; k < i->args->len; ++k) {
+                if (*(ValueName *)list_get(i->args, k) != addr) continue;
+                if (i->op != IROP_LOAD) return false;
+            }
+        }
+    }
+    return true;
 }
 
 /*---------- 数据流辅助 ----------*/
@@ -1268,6 +1304,56 @@ static bool pass_store_cleanup(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 取地址再解引用折叠 ----------*/
+static bool pass_addr_deref_fold(Func *f, Stats *s) {
+    if (!f) return false;
+    bool changed = false;
+
+    ParamMapEntry pmap[64];
+    int pcount = 0;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_PARAM || !i->labels || i->labels->len < 1) continue;
+            if (pcount < 64) {
+                pmap[pcount].name = (const char *)list_get(i->labels, 0);
+                pmap[pcount].val = i->dest;
+                pcount++;
+            }
+        }
+    }
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_LOAD || is_volatile_mem(i) || !i->args || i->args->len < 1) continue;
+            ValueName base = get_arg(i, 0);
+            Instr *def = find_def_instr(f, base);
+            if (!def || def->op != IROP_ADDR || !def->labels || def->labels->len < 1) continue;
+            const char *name = (const char *)list_get(def->labels, 0);
+            bool found = false;
+            ValueName pv = pmap_get(pmap, pcount, name, &found);
+            if (!found) continue;
+            if (!addr_used_only_by_loads(f, base)) continue;
+
+            i->op = IROP_TRUNC;
+            if (i->labels) list_clear(i->labels);
+            list_clear(i->args);
+            ValueName *p = pass_alloc(sizeof(ValueName));
+            *p = pv;
+            list_push(i->args, p);
+            changed = true;
+            if (s) s->fold++;
+        }
+    }
+
+    return changed;
+}
+
 /*---------- 内联函数调用 ----------*/
 static bool inline_single_call(Func *f, Instr *call, int *next_val, Stats *s, List *out_instrs) {
     if (!f || !call || call->op != IROP_CALL || !call->labels || call->labels->len < 1) return false;
@@ -2115,6 +2201,7 @@ void ssa_optimize_func(Func *f, int level) {
         changed = false;
         changed |= pass_const_fold(f, &st);
         changed |= pass_store_load_forwarding(f, &st);
+        changed |= pass_addr_deref_fold(f, &st);
         changed |= pass_dead_local_store_elim(f, &st);
         changed |= pass_global_load(f, &st);
         changed |= pass_copy_prop(f, &st);
