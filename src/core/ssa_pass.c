@@ -415,9 +415,18 @@ static bool resolve_base_offset(Func *f, ValueName addr, ValueName *base, int64_
         if (!def) return false;
         if (def->op == IROP_OFFSET) {
             ValueName b = get_arg(def, 0);
-            ValueName ov = get_arg(def, 1);
             int64_t o = 0;
-            if (!get_const_value(f, ov, &o)) return false;
+            if (def->args && def->args->len >= 2) {
+                ValueName ov = get_arg(def, 1);
+                if (!get_const_value(f, ov, &o)) return false;
+            } else if (def->labels && def->labels->len >= 2) {
+                char *tag = (char *)list_get(def->labels, 0);
+                char *imm = (char *)list_get(def->labels, 1);
+                if (!tag || strcmp(tag, "imm") != 0 || !imm) return false;
+                o = strtoll(imm, NULL, 10);
+            } else {
+                return false;
+            }
             int64_t scale = def->imm.ival ? def->imm.ival : 1;
             total += o * scale;
             cur = b;
@@ -1419,6 +1428,36 @@ static bool pass_addr_deref_fold(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- offset 立即数内联 ----------*/
+static bool pass_offset_imm_inline(Func *f, Stats *s) {
+    if (!f) return false;
+    bool changed = false;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_OFFSET || !i->args || i->args->len < 2) continue;
+            ValueName idx = get_arg(i, 1);
+            Instr *def = find_def_instr(f, idx);
+            if (!def || def->op != IROP_CONST) continue;
+
+            if (!i->labels) i->labels = make_list();
+            list_clear(i->labels);
+            char *tag = pass_alloc(4); strcpy(tag, "imm");
+            list_push(i->labels, tag);
+            char *imm = pass_alloc(32); snprintf(imm, 32, "%ld", (long)def->imm.ival);
+            list_push(i->labels, imm);
+
+            changed = true;
+            if (s) s->fold++;
+        }
+    }
+
+    return changed;
+}
+
 /*---------- 内联函数调用 ----------*/
 static bool inline_single_call(Func *f, Instr *call, int *next_val, Stats *s, List *out_instrs) {
     if (!f || !call || call->op != IROP_CALL || !call->labels || call->labels->len < 1) return false;
@@ -2268,6 +2307,7 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_store_load_forwarding(f, &st);
         changed |= pass_load_load_forwarding(f, &st);
         changed |= pass_addr_deref_fold(f, &st);
+        changed |= pass_offset_imm_inline(f, &st);
         changed |= pass_dead_local_store_elim(f, &st);
         changed |= pass_global_load(f, &st);
         changed |= pass_copy_prop(f, &st);

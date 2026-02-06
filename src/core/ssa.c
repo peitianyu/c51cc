@@ -1906,8 +1906,18 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
     }
     case IROP_OFFSET: {
         ValueName *a1 = list_get(i->args, 0);
+        fprintf(fp, "offset v%d, ", *a1);
+        if (i->labels && i->labels->len >= 2) {
+            char *tag = (char *)list_get(i->labels, 0);
+            char *imm = (char *)list_get(i->labels, 1);
+            if (tag && strcmp(tag, "imm") == 0 && imm) {
+                fprintf(fp, "const %s", imm);
+                fprintf(fp, ", #%ld", i->imm.ival);
+                break;
+            }
+        }
         ValueName *a2 = list_get(i->args, 1);
-        fprintf(fp, "offset v%d, v%d, #%ld", *a1, *a2, i->imm.ival);
+        fprintf(fp, "v%d, #%ld", *a2, i->imm.ival);
         break;
     }
     case IROP_SELECT: {

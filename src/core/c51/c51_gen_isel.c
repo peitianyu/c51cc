@@ -1727,10 +1727,20 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     }
     
     case IROP_OFFSET: {
-        ValueName base = GET_ARG(0), idx = GET_ARG(1);
+        ValueName base = GET_ARG(0), idx = 0;
         int elem = (int)ins->imm.ival, cidx;
+        bool imm_idx = false;
+        if (ins->labels && ins->labels->len >= 2) {
+            char *tag = (char *)list_get(ins->labels, 0);
+            char *imm = (char *)list_get(ins->labels, 1);
+            if (tag && strcmp(tag, "imm") == 0 && imm) {
+                cidx = (int)strtol(imm, NULL, 10);
+                imm_idx = true;
+            }
+        }
+        if (!imm_idx) idx = GET_ARG(1);
         emit_ins2(sec, "mov", "A", vreg(base));
-        if (const_map_get(idx, &cidx)) {
+        if (imm_idx || const_map_get(idx, &cidx)) {
             snprintf(buf, sizeof(buf), "#%d", cidx * elem);
             emit_ins2(sec, "add", "A", buf);
         } else {
