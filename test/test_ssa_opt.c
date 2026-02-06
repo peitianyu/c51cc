@@ -185,16 +185,16 @@
 //     return result;           // PHI 只有一个有效值 x
 // }
 
-// 常量 PHI
-int test_phi_constant(int cond) {
-    int result;
-    if (cond) {
-        result = 10;
-    } else {
-        result = 10;         // 与 then 分支相同常量
-    }
-    return result;
-}
+// // 常量 PHI
+// int test_phi_constant(int cond) {
+//     int result;
+//     if (cond) {
+//         result = 10;
+//     } else {
+//         result = 10;         // 与 then 分支相同常量
+//     }
+//     return result;
+// }
 
 // // 多分支 PHI
 // int test_phi_multi(int x, int a, int b, int c) {
@@ -235,9 +235,9 @@ int test_phi_constant(int cond) {
 //     return g_mutable;        // 不应该被优化
 // }
 
-// // ============================================
-// // 7. 控制流优化测试 (Control Flow Optimization)
-// // ============================================
+// ============================================
+// 7. 控制流优化测试 (Control Flow Optimization)
+// ============================================
 
 // // 常量条件 - 总是为真
 // int test_cf_const_true(int x) {
@@ -269,19 +269,19 @@ int test_phi_constant(int cond) {
 //     return 0;
 // }
 
-// // ============================================
-// // 8. 循环优化测试 (Loop Optimization)
-// // ============================================
+// ============================================
+// 8. 循环优化测试 (Loop Optimization)
+// ============================================
 
-// // 循环不变量外提
-// int test_loop_invariant(int n, int m) {
-//     int sum = 0;
-//     int inv = m * 10;        // 循环不变量
-//     for (int i = 0; i < n; i++) {
-//         sum = sum + inv + i;
-//     }
-//     return sum;
-// }
+// 循环不变量外提
+int test_loop_invariant(int n, int m) {
+    int sum = 0;
+    int inv = m * 10;        // 循环不变量
+    for (int i = 0; i < n; i++) {
+        sum = sum + inv + i;
+    }
+    return sum;
+}
 
 // // 循环中的强度削弱
 // int test_loop_strength(int n) {
