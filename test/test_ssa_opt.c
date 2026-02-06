@@ -312,28 +312,28 @@
 //     return sum;
 // }
 
-// do-while 循环
-int test_loop_do_while(int n) {
-    int sum = 0;
-    int i = 0;
-    do {
-        sum = sum + i;
-        i = i + 1;
-    } while (i < n);
-    return sum;
-}
+// // do-while 循环
+// int test_loop_do_while(int n) {
+//     int sum = 0;
+//     int i = 0;
+//     do {
+//         sum = sum + i;
+//         i = i + 1;
+//     } while (i < n);
+//     return sum;
+// }
 
 // // ============================================
 // // 9. 数组访问优化测试 (Array Access Optimization)
 // // ============================================
 
-// // 数组索引常量折叠
-// int test_array_const_index(void) {
-//     int arr[5] = {10, 20, 30, 40, 50};
-//     int a = arr[0];          // => 10
-//     int b = arr[1 + 1];      // => arr[2] = 30
-//     return a + b;
-// }
+// 数组索引常量折叠
+int test_array_const_index(void) {
+    int arr[5] = {10, 20, 30, 40, 50};
+    int a = arr[0];          // => 10
+    int b = arr[1 + 1];      // => arr[2] = 30
+    return a + b;
+}
 
 // // 数组元素访问
 // int test_array_access(int *arr, int idx) {

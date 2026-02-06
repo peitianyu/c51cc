@@ -479,6 +479,50 @@ static bool get_const_value(Func *f, ValueName v, int64_t *out) {
     return false;
 }
 
+static bool resolve_base_offset(Func *f, ValueName addr, ValueName *base, int64_t *off) {
+    int64_t total = 0;
+    ValueName cur = addr;
+    for (int depth = 0; depth < 8; ++depth) {
+        Instr *def = find_def_instr(f, cur);
+        if (!def) return false;
+        if (def->op == IROP_OFFSET) {
+            ValueName b = get_arg(def, 0);
+            ValueName ov = get_arg(def, 1);
+            int64_t o = 0;
+            if (!get_const_value(f, ov, &o)) return false;
+            int64_t scale = def->imm.ival;
+            if (scale == 0) scale = 1;
+            total += o * scale;
+            cur = b;
+            continue;
+        }
+        if (def->op == IROP_ADD) {
+            ValueName a0 = get_arg(def, 0);
+            ValueName a1 = get_arg(def, 1);
+            int64_t c = 0;
+            if (get_const_value(f, a0, &c)) { total += c; cur = a1; continue; }
+            if (get_const_value(f, a1, &c)) { total += c; cur = a0; continue; }
+            return false;
+        }
+        if (def->op == IROP_ADDR) {
+            if (base) *base = cur;
+            if (off) *off = total;
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+static bool is_local_addr_base(Func *f, ValueName base) {
+    if (!f || !f->stack_offsets) return false;
+    Instr *def = find_def_instr(f, base);
+    if (!def || def->op != IROP_ADDR || !def->labels || def->labels->len == 0) return false;
+    const char *name = (const char *)list_get(def->labels, 0);
+    if (!name) return false;
+    return dict_get(f->stack_offsets, (char *)name) != NULL;
+}
+
 static bool is_unsigned_type(Ctype *t) {
     return t && get_attr(t->attr).ctype_unsigned;
 }
@@ -1512,8 +1556,14 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
         Block *b = iter_next(&it);
         
         // 使用简单映射记录当前块内每个地址的最新存储值
-        // 地址 -> 存储的值
-        typedef struct { const char *name; ValueName val; } StoreMap;
+        // (name|base, offset) -> val
+        typedef struct {
+            bool use_name;
+            const char *name;
+            ValueName base;
+            int64_t offset;
+            ValueName val;
+        } StoreMap;
         StoreMap stores[64];
         int store_count = 0;
         
@@ -1526,20 +1576,32 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
                     continue;
                 }
                 // 记录这次存储
-                Instr *addr = find_def_instr(f, get_arg(i, 0));
-                if (addr && addr->op == IROP_ADDR) {
-                    const char *name = list_get(addr->labels, 0);
-                    // 更新映射
+                ValueName base = 0;
+                int64_t off = 0;
+                if (resolve_base_offset(f, get_arg(i, 0), &base, &off)) {
+                    const char *name = NULL;
+                    Instr *bdef = find_def_instr(f, base);
+                    if (bdef && bdef->op == IROP_ADDR && bdef->labels && bdef->labels->len > 0)
+                        name = (const char *)list_get(bdef->labels, 0);
                     bool found = false;
                     for (int k = 0; k < store_count; k++) {
-                        if (stores[k].name && !strcmp(stores[k].name, name)) {
+                        if (stores[k].offset != off) continue;
+                        if (name && stores[k].use_name && stores[k].name && !strcmp(stores[k].name, name)) {
+                            stores[k].val = get_arg(i, 1);
+                            found = true;
+                            break;
+                        }
+                        if (!name && !stores[k].use_name && stores[k].base == base) {
                             stores[k].val = get_arg(i, 1);
                             found = true;
                             break;
                         }
                     }
                     if (!found && store_count < 64) {
+                        stores[store_count].use_name = (name != NULL);
                         stores[store_count].name = name;
+                        stores[store_count].base = base;
+                        stores[store_count].offset = off;
                         stores[store_count].val = get_arg(i, 1);
                         store_count++;
                     }
@@ -1551,11 +1613,27 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
                     continue;
                 }
                 // 检查是否有可用的存储转发
-                Instr *addr = find_def_instr(f, get_arg(i, 0));
-                if (addr && addr->op == IROP_ADDR) {
-                    const char *name = list_get(addr->labels, 0);
+                ValueName base = 0;
+                int64_t off = 0;
+                if (resolve_base_offset(f, get_arg(i, 0), &base, &off)) {
+                    const char *name = NULL;
+                    Instr *bdef = find_def_instr(f, base);
+                    if (bdef && bdef->op == IROP_ADDR && bdef->labels && bdef->labels->len > 0)
+                        name = (const char *)list_get(bdef->labels, 0);
                     for (int k = 0; k < store_count; k++) {
-                        if (stores[k].name && !strcmp(stores[k].name, name)) {
+                        if (stores[k].offset != off) continue;
+                        if (name && stores[k].use_name && stores[k].name && !strcmp(stores[k].name, name)) {
+                            // 找到匹配的store，进行转发
+                            i->op = IROP_TRUNC; // 使用trunc作为复制
+                            list_clear(i->args);
+                            ValueName *p = pass_alloc(sizeof *p);
+                            *p = stores[k].val;
+                            list_push(i->args, p);
+                            changed = true;
+                            s->fold++;
+                            break;
+                        }
+                        if (!name && !stores[k].use_name && stores[k].base == base) {
                             // 找到匹配的store，进行转发
                             i->op = IROP_TRUNC; // 使用trunc作为复制
                             list_clear(i->args);
@@ -1575,6 +1653,100 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
             }
         }
     }
+    return changed;
+}
+
+/*---------- 删除无用的局部数组/结构体 store ----------*/
+    typedef struct {
+        bool use_name;
+        const char *name;
+        ValueName base;
+        bool used;
+        bool escaped;
+        bool is_local;
+    } BaseInfo;
+
+static BaseInfo *get_base_info(BaseInfo *bases, int *base_count, ValueName base, Func *f) {
+    const char *name = NULL;
+    Instr *bdef = find_def_instr(f, base);
+    if (bdef && bdef->op == IROP_ADDR && bdef->labels && bdef->labels->len > 0)
+        name = (const char *)list_get(bdef->labels, 0);
+
+    for (int i = 0; i < *base_count; ++i) {
+        if (name && bases[i].use_name && bases[i].name && !strcmp(bases[i].name, name)) return &bases[i];
+        if (!name && !bases[i].use_name && bases[i].base == base) return &bases[i];
+    }
+    if (*base_count >= 128) return NULL;
+    bases[*base_count].use_name = (name != NULL);
+    bases[*base_count].name = name;
+    bases[*base_count].base = base;
+    bases[*base_count].used = false;
+    bases[*base_count].escaped = false;
+    bases[*base_count].is_local = is_local_addr_base(f, base);
+    return &bases[(*base_count)++];
+}
+
+static bool pass_dead_local_store_elim(Func *f, Stats *s) {
+    if (!f) return false;
+    bool changed = false;
+
+    BaseInfo bases[128];
+    int base_count = 0;
+
+    // 统计：哪些base有load，哪些base逃逸
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i) continue;
+
+            if (i->op == IROP_LOAD) {
+                ValueName base = 0;
+                int64_t off = 0;
+                if (resolve_base_offset(f, get_arg(i, 0), &base, &off)) {
+                    BaseInfo *bi = get_base_info(bases, &base_count, base, f);
+                    if (bi) bi->used = true;
+                }
+            }
+
+            if (i->args) {
+                for (int k = 0; k < i->args->len; ++k) {
+                    ValueName v = *(ValueName *)list_get(i->args, k);
+                    Instr *def = find_def_instr(f, v);
+                    if (!def || def->op != IROP_ADDR) continue;
+                    BaseInfo *bi = get_base_info(bases, &base_count, v, f);
+                    if (!bi || !bi->is_local) continue;
+                    if (i->op == IROP_CALL || i->op == IROP_RET) {
+                        bi->escaped = true;
+                    } else if (i->op == IROP_STORE && k == 1) {
+                        bi->escaped = true; // 地址被存入内存
+                    }
+                }
+            }
+        }
+    }
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_STORE) continue;
+            if (is_volatile_for_forwarding(i)) continue;
+
+            ValueName base = 0;
+            int64_t off = 0;
+            if (!resolve_base_offset(f, get_arg(i, 0), &base, &off)) continue;
+            BaseInfo *bi = get_base_info(bases, &base_count, base, f);
+            if (!bi || !bi->is_local) continue;
+            if (bi->used || bi->escaped) continue;
+
+            i->op = IROP_NOP;
+            if (i->args) list_clear(i->args);
+            changed = true;
+            if (s) s->rm++;
+        }
+    }
+
     return changed;
 }
 
@@ -2456,6 +2628,7 @@ void ssa_optimize_func(Func *f, int level) {
         changed = false;
         changed |= pass_const_fold(f, &st);
         changed |= pass_store_load_forwarding(f, &st);
+        changed |= pass_dead_local_store_elim(f, &st);
         changed |= pass_global_load(f, &st);
         changed |= pass_copy_prop(f, &st);
         changed |= pass_const_merge(f, &st);

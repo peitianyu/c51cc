@@ -910,6 +910,9 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         return ssa_build_const_t(b, ast->ival, ast->ctype);
         
     case AST_LVAR: {
+        if (ast->ctype && ast->ctype->type == CTYPE_ARRAY) {
+            return ssa_build_addr(b, ast->varname, ast->ctype);
+        }
         return ssa_build_read(b, ast->varname);
     }
 
@@ -986,6 +989,31 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
     case PUNCT_LSHIFT: case PUNCT_RSHIFT:
     case PUNCT_EQ: case PUNCT_NE:
     case '<': case '>': case PUNCT_LE: case PUNCT_GE: {
+        if ((ast->type == '+' || ast->type == '-') && ast->left && ast->right) {
+            Ctype *lt = ast->left->ctype;
+            Ctype *rt = ast->right->ctype;
+            bool lptr = lt && (lt->type == CTYPE_PTR || lt->type == CTYPE_ARRAY);
+            bool rptr = rt && (rt->type == CTYPE_PTR || rt->type == CTYPE_ARRAY);
+            if (lptr && !rptr) {
+                Ctype *elem = lt ? lt->ptr : NULL;
+                int elem_size = (elem && elem->size > 0) ? elem->size : 1;
+                ValueName base = gen_expr(b, ast->left);
+                ValueName idx = gen_expr(b, ast->right);
+                if (ast->type == '-') {
+                    Ctype *itype = rt ? rt : ast->ctype;
+                    ValueName zero = ssa_build_const_t(b, 0, itype);
+                    idx = ssa_build_binop_t(b, IROP_SUB, zero, idx, itype);
+                }
+                return ssa_build_offset(b, base, idx, elem_size);
+            }
+            if (ast->type == '+' && rptr && !lptr) {
+                Ctype *elem = rt ? rt->ptr : NULL;
+                int elem_size = (elem && elem->size > 0) ? elem->size : 1;
+                ValueName base = gen_expr(b, ast->right);
+                ValueName idx = gen_expr(b, ast->left);
+                return ssa_build_offset(b, base, idx, elem_size);
+            }
+        }
         ValueName lhs = gen_expr(b, ast->left);
         ValueName rhs = gen_expr(b, ast->right);
         // 类型转换（算术转换）
