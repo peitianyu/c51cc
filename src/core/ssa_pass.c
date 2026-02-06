@@ -1203,6 +1203,71 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 加载到加载转发 ----------*/
+static bool pass_load_load_forwarding(Func *f, Stats *s) {
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        typedef struct { bool use_name; const char *name; ValueName base; int64_t offset; ValueName val; } LoadMap;
+        LoadMap loads[64];
+        int load_count = 0;
+
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i) continue;
+
+            if (i->op == IROP_STORE || i->op == IROP_CALL || i->op == IROP_ASM) {
+                load_count = 0;
+                continue;
+            }
+
+            if (i->op != IROP_LOAD) continue;
+            if (is_volatile_mem(i)) { load_count = 0; continue; }
+
+            ValueName base = 0;
+            int64_t off = 0;
+            ValueName addr = get_arg(i, 0);
+            bool ok = resolve_base_offset(f, addr, &base, &off);
+            const char *name = NULL;
+            if (!ok) {
+                base = addr;
+                off = 0;
+            } else {
+                Instr *bdef = find_def_instr(f, base);
+                if (bdef && bdef->op == IROP_ADDR && bdef->labels && bdef->labels->len > 0)
+                    name = (const char *)list_get(bdef->labels, 0);
+            }
+
+            for (int k = 0; k < load_count; k++) {
+                if (loads[k].offset != off) continue;
+                bool match = (name && loads[k].use_name && loads[k].name && !strcmp(loads[k].name, name)) ||
+                             (!name && !loads[k].use_name && loads[k].base == base);
+                if (match) {
+                    i->op = IROP_TRUNC;
+                    list_clear(i->args);
+                    ValueName *p = pass_alloc(sizeof *p); *p = loads[k].val;
+                    list_push(i->args, p);
+                    changed = true; if (s) s->fold++;
+                    goto next_instr;
+                }
+            }
+
+            if (load_count < 64) {
+                loads[load_count].use_name = (name != NULL);
+                loads[load_count].name = name;
+                loads[load_count].base = base;
+                loads[load_count].offset = off;
+                loads[load_count].val = i->dest;
+                load_count++;
+            }
+        next_instr:
+            ;
+        }
+    }
+    return changed;
+}
+
 /*---------- 死局部存储消除 ----------*/
 typedef struct { bool use_name; const char *name; ValueName base; bool used, escaped, is_local; } BaseInfo;
 
@@ -2201,6 +2266,7 @@ void ssa_optimize_func(Func *f, int level) {
         changed = false;
         changed |= pass_const_fold(f, &st);
         changed |= pass_store_load_forwarding(f, &st);
+        changed |= pass_load_load_forwarding(f, &st);
         changed |= pass_addr_deref_fold(f, &st);
         changed |= pass_dead_local_store_elim(f, &st);
         changed |= pass_global_load(f, &st);
