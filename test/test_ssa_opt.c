@@ -292,14 +292,14 @@
 //     return sum;
 // }
 
-// 双重for循环展开
-void test_loop_unroll(int n, int m) {
-    for(int i = 0; i < n; i++) {
-        for(int j = 0; j < m; j++) {
-            __asm__("nop"); // 占位指令，表示循环体
-        }
-    }
-}
+// // 双重for循环展开
+// void test_loop_unroll(int n, int m) {
+//     for(int i = 0; i < n; i++) {
+//         for(int j = 0; j < m; j++) {
+//             __asm__("nop"); // 占位指令，表示循环体
+//         }
+//     }
+// }
 
 // // while 循环
 // int test_loop_while(int n) {
@@ -312,16 +312,16 @@ void test_loop_unroll(int n, int m) {
 //     return sum;
 // }
 
-// // do-while 循环
-// int test_loop_do_while(int n) {
-//     int sum = 0;
-//     int i = 0;
-//     do {
-//         sum = sum + i;
-//         i = i + 1;
-//     } while (i < n);
-//     return sum;
-// }
+// do-while 循环
+int test_loop_do_while(int n) {
+    int sum = 0;
+    int i = 0;
+    do {
+        sum = sum + i;
+        i = i + 1;
+    } while (i < n);
+    return sum;
+}
 
 // // ============================================
 // // 9. 数组访问优化测试 (Array Access Optimization)

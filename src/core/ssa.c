@@ -1399,6 +1399,40 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         break;
     }
     
+    case AST_DO_WHILE: {
+        Block *body = ssa_build_block(b);
+        Block *exit = ssa_build_block(b);
+        
+        ssa_build_jmp(b, body);
+        ssa_build_position(b, body);
+        
+        // 关键：预先添加body作为自己的前驱
+        // 这样在body中读取变量时就知道是循环，会创建phi节点
+        ssa_add_pred(body, body);
+        
+        ssa_build_push_cf(b, exit, body);
+        gen_stmt(b, ast->while_body);
+        ssa_build_pop_cf(b);
+        
+        // 处理条件
+        if (ast->while_cond && ast->while_cond->type == AST_LITERAL) {
+            if (ast->while_cond->ival)
+                ssa_build_jmp(b, body);
+            else
+                ssa_build_jmp(b, exit);
+        } else {
+            ValueName cond = gen_expr(b, ast->while_cond);
+            ValueName zero = ssa_build_const(b, 0);
+            ValueName cmp = ssa_build_binop(b, IROP_NE, cond, zero);
+            ssa_build_br(b, cmp, body, exit);
+        }
+        
+        ssa_build_seal(b, body);
+        ssa_build_position(b, exit);
+        ssa_build_seal(b, exit);
+        break;
+    }
+    
     case AST_FOR: {
         if (ast->forinit) gen_stmt(b, ast->forinit);
         
