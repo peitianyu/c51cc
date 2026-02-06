@@ -392,6 +392,31 @@ static void rebuild_preds(Func *f) {
     }
 }
 
+/* 检查是否有任意指令或 PHI 的标签引用到块 b（例如 "blockN"） */
+static bool block_referenced_by_any_label(Func *f, Block *b) {
+    if (!f || !f->blocks || !b) return false;
+    int bid = (int)b->id;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *tb = iter_next(&it);
+        if (!tb) continue;
+        List *lists[2] = {tb->phis, tb->instrs};
+        for (int li = 0; li < 2; ++li) {
+            List *lst = lists[li];
+            if (!lst) continue;
+            for (Iter jt = list_iter(lst); !iter_end(jt);) {
+                Instr *inst = iter_next(&jt);
+                if (!inst || !inst->labels) continue;
+                for (int k = 0; k < inst->labels->len; ++k) {
+                    char *lbl = (char *)list_get(inst->labels, k);
+                    int id = -1;
+                    if (lbl && sscanf(lbl, "block%d", &id) == 1 && id == bid) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 static GlobalVar *find_global(const char *name) {
     if (!g_unit || !name) return NULL;
     for (Iter it = list_iter(g_unit->globals); !iter_end(it);) {
@@ -582,8 +607,23 @@ static bool pass_dce(Func *f, Stats *s) {
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
         if (!b) continue;
+        int before = b->instrs ? b->instrs->len : 0;
         List *keep = filter_list(b->instrs, dce_pred, f);
-        s->rm += b->instrs->len - keep->len;
+        int after = keep ? keep->len : 0;
+        int removed = before - after;
+        if (removed > 0) {
+            /* print removed instructions */
+            for (int i = 0; i < before; ++i) {
+                Instr *inst = (Instr *)list_get(b->instrs, i);
+                bool keep_flag = false;
+                for (int j = 0; j < after; ++j) {
+                    Instr *k = (Instr *)list_get(keep, j);
+                    if (k == inst) { keep_flag = true; break; }
+                }
+                if (!keep_flag && inst) ssa_print_instr(stdout, inst, NULL);
+            }
+        }
+        s->rm += before - after;
         b->instrs = keep;
     }
     return s->rm != rm0;
@@ -1873,7 +1913,7 @@ static bool pass_block_merge(Func *f, Stats *s) {
         if (!t || t == b) continue;
         if (t->phis && t->phis->len > 0) continue;
         if (!t->instrs || t->instrs->len == 0) continue;
-        if (t->preds && t->preds->len != 1) continue;
+         if (t->preds && t->preds->len != 1) continue;
 
         list_remove_last(b->instrs, NULL);
         for (Iter jt = list_iter(t->instrs); !iter_end(jt);) list_push(b->instrs, iter_next(&jt));
@@ -2027,10 +2067,33 @@ static bool pass_unreachable_block_elim(Func *f, Stats *s) {
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
         if (!b || b == f->entry) continue;
-        if (block_only_ret(b, NULL)) continue;
-        if (b->preds && b->preds->len > 0) continue;
+
+        if (block_only_ret(b, NULL)) 
+            continue;
+
+        if (b->preds && b->preds->len > 0) 
+            continue;
+
+        if (block_has_other_preds(f, b, NULL)) 
+            continue;
+
+        if (block_referenced_by_any_label(f, b)) 
+            continue;
 
         if ((b->phis && b->phis->len > 0) || (b->instrs && b->instrs->len > 0)) {
+            if (b->phis) {
+                for (Iter pit = list_iter(b->phis); !iter_end(pit);) {
+                    Instr *p = iter_next(&pit);
+                    if (p) ssa_print_instr(stdout, p, NULL);
+                }
+            }
+            if (b->instrs) {
+                for (Iter iit = list_iter(b->instrs); !iter_end(iit);) {
+                    Instr *ii = iter_next(&iit);
+                    if (ii) ssa_print_instr(stdout, ii, NULL);
+                }
+            }
+
             list_clear_shallow(b->phis);
             b->phis = make_list();
             list_clear_shallow(b->instrs);
@@ -2430,39 +2493,39 @@ void ssa_optimize_func(Func *f, int level) {
     bool changed;
     int it = 0;
     do {
-#define RUN_CFG_PASS(_p) do { if (_p(f, &st)) { changed = true; rebuild_preds(f); } } while (0)
+#define RUN_PASS(_p) do {  if (_p(f, &st)) { changed = true;  rebuild_preds(f); } } while (0)
         changed = false;
-        changed |= pass_const_fold(f, &st);
-        changed |= pass_store_load_forwarding(f, &st);
-        changed |= pass_load_load_forwarding(f, &st);
-        changed |= pass_addr_deref_fold(f, &st);
-        changed |= pass_offset_imm_inline(f, &st);
-        changed |= pass_dead_local_store_elim(f, &st);
-        changed |= pass_global_load(f, &st);
-        changed |= pass_copy_prop(f, &st);
-        changed |= pass_inline_func_call(f, &st);
-        changed |= pass_addr_merge(f, &st);
-        changed |= pass_local_opts(f, &st);
-        changed |= pass_bool_return_simplify(f, &st);
-        changed |= pass_loop_invariant_accum(f, &st);
-        RUN_CFG_PASS(pass_const_branch);
-        changed |= pass_br_same_target(f, &st);
-        changed |= pass_jump_threading(f, &st);
-        RUN_CFG_PASS(pass_jmp_only_elim);
-        RUN_CFG_PASS(pass_entry_jmp_inline);
-        RUN_CFG_PASS(pass_entry_jmp_ret_fold);
-        RUN_CFG_PASS(pass_entry_jmp_elim);
-        RUN_CFG_PASS(pass_unreachable_block_elim);
-        changed |= pass_const_merge(f, &st);
-        changed |= pass_phi(f, &st);
-        RUN_CFG_PASS(pass_phi_cleanup);
-        changed |= pass_store_cleanup(f, &st);
-        changed |= pass_binop_const_inline(f, &st);
-        changed |= pass_ret_const_inline(f, &st);
-        changed |= pass_const_store_prune(f, &st);
-        changed |= pass_block_merge(f, &st);
-        changed |= pass_dce(f, &st);
-#undef RUN_CFG_PASS
+        RUN_PASS(pass_const_fold);
+        RUN_PASS(pass_store_load_forwarding);
+        RUN_PASS(pass_load_load_forwarding);
+        RUN_PASS(pass_addr_deref_fold);
+        RUN_PASS(pass_offset_imm_inline);
+        RUN_PASS(pass_dead_local_store_elim);
+        RUN_PASS(pass_global_load);
+        RUN_PASS(pass_copy_prop);
+        RUN_PASS(pass_inline_func_call);
+        RUN_PASS(pass_addr_merge);
+        RUN_PASS(pass_local_opts);
+        RUN_PASS(pass_bool_return_simplify);
+        RUN_PASS(pass_loop_invariant_accum);
+        RUN_PASS(pass_const_branch);
+        RUN_PASS(pass_br_same_target);
+        RUN_PASS(pass_jump_threading);
+        RUN_PASS(pass_jmp_only_elim);
+        RUN_PASS(pass_entry_jmp_inline);
+        RUN_PASS(pass_entry_jmp_ret_fold);
+        RUN_PASS(pass_entry_jmp_elim);
+        RUN_PASS(pass_unreachable_block_elim);
+        RUN_PASS(pass_const_merge);
+        RUN_PASS(pass_phi);
+        RUN_PASS(pass_phi_cleanup);
+        RUN_PASS(pass_store_cleanup);
+        RUN_PASS(pass_binop_const_inline);
+        RUN_PASS(pass_ret_const_inline);
+        RUN_PASS(pass_const_store_prune);
+        RUN_PASS(pass_block_merge);
+        RUN_PASS(pass_dce);
+#undef RUN_PASS
     } while (changed && ++it < 20);
 
     ensure_block_targets_exist(f);
@@ -2498,6 +2561,8 @@ TEST(test, ssa_opt) {
         printf("ast: %s\n", ast_to_string(v));
         ssa_convert_ast(b, v);
     }
+    // printf("\n=== SSA Before Optimization ===\n");
+    // ssa_print(stdout, b->unit);
     ssa_optimize(b->unit, OPT_O1);
     printf("\n=== Optimized SSA Output ===\n");
     ssa_print(stdout, b->unit);

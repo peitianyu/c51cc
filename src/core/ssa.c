@@ -2040,6 +2040,20 @@ static void ssa_print_func(FILE *fp, Func *f) {
             if (!blk) continue;
             bool is_first = (j == 0);
             bool has_preds = blk->preds && blk->preds->len > 0;
+            if (!has_preds) {
+                /* 如果还有其他块的终止指令引用此块（标签中存在本块id），也视为有前驱 */
+                for (int x = 0; x < f->blocks->len && !has_preds; ++x) {
+                    Block *tb = list_get(f->blocks, x);
+                    if (!tb || !tb->instrs || tb->instrs->len == 0) continue;
+                    Instr *tterm = (Instr *)list_get(tb->instrs, tb->instrs->len - 1);
+                    if (!tterm || !tterm->labels) continue;
+                    for (int k = 0; k < tterm->labels->len; ++k) {
+                        int tid = -1;
+                        sscanf((char *)list_get(tterm->labels, k), "block%d", &tid);
+                        if (tid == (int)blk->id) { has_preds = true; break; }
+                    }
+                }
+            }
             bool has_instrs = (blk->phis && blk->phis->len > 0) ||
                               (blk->instrs && blk->instrs->len > 0);
             if (!is_first && !has_preds && !has_instrs) {

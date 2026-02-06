@@ -459,34 +459,34 @@
 //     return x ? a : b;
 // }
 
-// ============================================
-// 14. 综合优化测试 (Comprehensive Tests)
-// ============================================
+// // ============================================
+// // 14. 综合优化测试 (Comprehensive Tests)
+// // ============================================
 
-// 多个优化组合
-int test_comprehensive1(int n) {
-    int sum = 0;
-    int i = 0;
+// // 多个优化组合
+// int test_comprehensive1(int n) {
+//     int sum = 0;
+//     int i = 0;
     
-    while (i < n) {
-        // 常量表达式
-        int offset = 2 + 3 * 4;     // => 14
+//     while (i < n) {
+//         // 常量表达式
+//         int offset = 2 + 3 * 4;     // => 14
         
-        // 代数简化: x - x = 0
-        int dummy = offset - offset; // => 0 (死代码)
+//         // 代数简化: x - x = 0
+//         int dummy = offset - offset; // => 0 (死代码)
         
-        // 强度削弱: i * 8 => i << 3
-        int idx = i * 8;
+//         // 强度削弱: i * 8 => i << 3
+//         int idx = i * 8;
         
-        // 常量表达式
-        int scale = (10 + 6) / 4;   // => 4
+//         // 常量表达式
+//         int scale = (10 + 6) / 4;   // => 4
         
-        sum = sum + idx * scale + offset;
-        i = i + 1;
-    }
+//         sum = sum + idx * scale + offset;
+//         i = i + 1;
+//     }
     
-    return sum;
-}
+//     return sum;
+// }
 
 // // 嵌套循环优化
 // int test_nested_loops(int n) {
@@ -525,23 +525,23 @@ int test_comprehensive1(int n) {
 //     return sum;
 // }
 
-// // ============================================
-// // 15. 边界情况测试 (Edge Cases)
-// // ============================================
+// ============================================
+// 15. 边界情况测试 (Edge Cases)
+// ============================================
 
-// // 空函数
-// void test_empty(void) {
-// }
+// 空函数
+void test_empty(void) {
+}
 
-// // 仅返回常量
-// int test_return_const(void) {
-//     return 42;
-// }
+// 仅返回常量
+int test_return_const(void) {
+    return 42;
+}
 
-// // 仅返回参数
-// int test_return_param(int x) {
-//     return x;
-// }
+// 仅返回参数
+int test_return_param(int x) {
+    return x;
+}
 
 // // 多个返回路径
 // int test_multi_return(int x, int cond) {
