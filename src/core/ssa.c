@@ -1382,9 +1382,6 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         
         ssa_build_jmp(b, header);
         ssa_build_position(b, header);
-        
-        // 关键：预先添加body作为header的前驱
-        // 这样读取条件时就知道是循环头，会创建phi节点
         ssa_add_pred(header, body);
 
         // 处理条件
@@ -1400,13 +1397,10 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
             ssa_build_br(b, cmp, body, exit);
         }
         
-        // 在进入body之前，将header中为entry变量创建的phi节点复制到body的var_map
-        // 这样body中读取变量时会直接返回phi，而不是递归查找导致错误
         ssa_build_position(b, body);
         for (Iter it = list_iter(entry->var_map->list); !iter_end(it);) {
             DictEntry *e = iter_next(&it);
             const char *var = e->key;
-            // 在header中查找对应的phi节点
             ValueName *phi_val = dict_get(header->var_map, (char*)var);
             if (phi_val) {
                 ssa_build_write(b, var, *phi_val);
@@ -1419,7 +1413,6 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         
         ssa_build_jmp(b, header);
         ssa_build_seal(b, body);
-        // 再seal header，这样header的phi可以正确读取body的最终值
         ssa_build_seal(b, header);
         
         ssa_build_position(b, exit);
@@ -1433,9 +1426,6 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         
         ssa_build_jmp(b, body);
         ssa_build_position(b, body);
-        
-        // 关键：预先添加body作为自己的前驱
-        // 这样在body中读取变量时就知道是循环，会创建phi节点
         ssa_add_pred(body, body);
         
         ssa_build_push_cf(b, exit, body);

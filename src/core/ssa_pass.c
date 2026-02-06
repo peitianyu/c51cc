@@ -2027,6 +2027,7 @@ static bool pass_unreachable_block_elim(Func *f, Stats *s) {
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
         if (!b || b == f->entry) continue;
+        if (block_only_ret(b, NULL)) continue;
         if (b->preds && b->preds->len > 0) continue;
 
         if ((b->phis && b->phis->len > 0) || (b->instrs && b->instrs->len > 0)) {
