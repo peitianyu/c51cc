@@ -269,19 +269,19 @@
 //     return 0;
 // }
 
-// ============================================
-// 8. 循环优化测试 (Loop Optimization)
-// ============================================
+// // ============================================
+// // 8. 循环优化测试 (Loop Optimization)
+// // ============================================
 
-// 循环不变量外提
-int test_loop_invariant(int n, int m) {
-    int sum = 0;
-    int inv = m * 10;        // 循环不变量
-    for (int i = 0; i < n; i++) {
-        sum = sum + inv + i;
-    }
-    return sum;
-}
+// // 循环不变量外提
+// int test_loop_invariant(int n, int m) {
+//     int sum = 0;
+//     int inv = m * 10;        // 循环不变量
+//     for (int i = 0; i < n; i++) {
+//         sum = sum + inv + i;
+//     }
+//     return sum;
+// }
 
 // // 循环中的强度削弱
 // int test_loop_strength(int n) {
@@ -291,6 +291,15 @@ int test_loop_invariant(int n, int m) {
 //     }
 //     return sum;
 // }
+
+// 双重for循环展开
+void test_loop_unroll(int n, int m) {
+    for(int i = 0; i < n; i++) {
+        for(int j = 0; j < m; j++) {
+            __asm__("nop"); // 占位指令，表示循环体
+        }
+    }
+}
 
 // // while 循环
 // int test_loop_while(int n) {

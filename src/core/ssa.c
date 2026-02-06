@@ -1528,10 +1528,17 @@ static void gen_func(SSABuild *b, Ast *ast) {
     
     // 只在当前块不为空或有前驱时才添加默认ret
     // 避免在死块（如if语句的merge块）中添加不必要的ret
-    if (b->cur_block && !f->is_noreturn && ret && ret->type != CTYPE_VOID) {
+    if (b->cur_block && !f->is_noreturn) {
         bool has_preds = b->cur_block->preds && b->cur_block->preds->len > 0;
         bool has_instrs = b->cur_block->instrs && b->cur_block->instrs->len > 0;
-        if (has_preds || has_instrs) {
+        bool has_term = false;
+        if (has_instrs) {
+            Instr *last = (Instr *)list_get(b->cur_block->instrs, b->cur_block->instrs->len - 1);
+            if (last && (last->op == IROP_JMP || last->op == IROP_BR || last->op == IROP_RET)) {
+                has_term = true;
+            }
+        }
+        if ((has_preds || has_instrs) && !has_term) {
             ssa_build_ret(b, 0);
         }
     }
