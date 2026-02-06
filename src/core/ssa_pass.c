@@ -45,6 +45,53 @@ static int max_value_in_func(Func *f) {
     return maxv;
 }
 
+static Func *find_func_in_unit(const char *name) {
+    if (!g_unit || !name) return NULL;
+    for (Iter it = list_iter(g_unit->funcs); !iter_end(it);) {
+        Func *f = iter_next(&it);
+        if (f && f->name && strcmp(f->name, name) == 0) return f;
+    }
+    return NULL;
+}
+
+typedef struct { ValueName from, to; } ValueMapEntry;
+
+static bool vmap_put(ValueMapEntry *map, int *count, int cap, ValueName from, ValueName to) {
+    if (*count >= cap) return false;
+    map[*count].from = from;
+    map[*count].to = to;
+    (*count)++;
+    return true;
+}
+
+static ValueName vmap_get(ValueMapEntry *map, int count, ValueName from, bool *found) {
+    for (int i = 0; i < count; ++i) {
+        if (map[i].from == from) {
+            if (found) *found = true;
+            return map[i].to;
+        }
+    }
+    if (found) *found = false;
+    return 0;
+}
+
+static bool inline_allowed_op(IrOp op) {
+    switch (op) {
+    case IROP_CONST:
+    case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD: case IROP_NEG:
+    case IROP_AND: case IROP_OR: case IROP_XOR: case IROP_NOT:
+    case IROP_SHL: case IROP_SHR:
+    case IROP_EQ: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: case IROP_NE:
+    case IROP_LNOT:
+    case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT: case IROP_BITCAST:
+    case IROP_INTTOPTR: case IROP_PTRTOINT:
+    case IROP_OFFSET:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /* 替换值：在phi参数和指令参数中替换 */
 static void replace_value(Func *f, ValueName from, ValueName to) {
     if (!f || from == to) return;
@@ -1221,6 +1268,142 @@ static bool pass_store_cleanup(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 内联函数调用 ----------*/
+static bool inline_single_call(Func *f, Instr *call, int *next_val, Stats *s, List *out_instrs) {
+    if (!f || !call || call->op != IROP_CALL || !call->labels || call->labels->len < 1) return false;
+    const char *callee_name = (const char *)list_get(call->labels, 0);
+    Func *callee = find_func_in_unit(callee_name);
+    if (!callee || !callee->is_inline || callee->is_interrupt || callee->is_noreturn) return false;
+    if (callee == f) return false; // 递归暂不内联
+    if (!callee->blocks || callee->blocks->len != 1 || !callee->entry) return false;
+    Block *cb = callee->entry;
+    if (cb->phis && cb->phis->len > 0) return false;
+
+    int argc = call->args ? call->args->len : 0;
+    ValueName params[32];
+    int param_count = 0;
+    for (Iter it = list_iter(cb->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i) continue;
+        if (i->op == IROP_PARAM) {
+            if (param_count < 32) params[param_count++] = i->dest;
+            else return false;
+        }
+    }
+    if (param_count != argc) return false;
+
+    Instr *ret = NULL;
+    for (Iter it = list_iter(cb->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i || i->op == IROP_NOP || i->op == IROP_PARAM) continue;
+        if (i->op == IROP_RET) {
+            if (ret) return false;
+            ret = i;
+            continue;
+        }
+        if (!inline_allowed_op(i->op)) return false;
+    }
+    if (!ret) return false;
+
+    ValueMapEntry vmap[128];
+    int vmap_count = 0;
+    for (int i = 0; i < param_count; ++i) {
+        ValueName arg = *(ValueName *)list_get(call->args, i);
+        if (!vmap_put(vmap, &vmap_count, 128, params[i], arg)) return false;
+    }
+
+    List *cloned = make_list();
+    for (Iter it = list_iter(cb->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i || i->op == IROP_NOP || i->op == IROP_PARAM || i->op == IROP_RET) continue;
+        Instr *ni = pass_alloc(sizeof(Instr));
+        memset(ni, 0, sizeof(*ni));
+        ni->op = i->op;
+        ni->type = i->type;
+        ni->mem_type = i->mem_type;
+        ni->imm = i->imm;
+        if (i->dest) {
+            ni->dest = (*next_val)++;
+            if (!vmap_put(vmap, &vmap_count, 128, i->dest, ni->dest)) return false;
+        }
+        if (i->args && i->args->len > 0) {
+            ni->args = make_list();
+            for (int k = 0; k < i->args->len; ++k) {
+                ValueName v = *(ValueName *)list_get(i->args, k);
+                bool found = false;
+                ValueName mv = vmap_get(vmap, vmap_count, v, &found);
+                if (!found) return false;
+                ValueName *p = pass_alloc(sizeof(ValueName));
+                *p = mv;
+                list_push(ni->args, p);
+            }
+        }
+        if (i->labels && i->labels->len > 0) {
+            ni->labels = make_list();
+            for (int k = 0; k < i->labels->len; ++k)
+                list_push(ni->labels, list_get(i->labels, k));
+        }
+        list_push(cloned, ni);
+    }
+
+    ValueName ret_val = 0;
+    if (ret->args && ret->args->len > 0) {
+        ValueName rv = *(ValueName *)list_get(ret->args, 0);
+        bool found = false;
+        ret_val = vmap_get(vmap, vmap_count, rv, &found);
+        if (!found) return false;
+    }
+
+    if (call->dest && !ret_val) return false;
+
+    for (Iter it = list_iter(cloned); !iter_end(it);)
+        list_push(out_instrs, iter_next(&it));
+
+    list_clear_shallow(cloned);
+
+    if (call->dest && ret_val) {
+        bool dummy_changed = false;
+        replace_all_uses(f, call->dest, ret_val, &dummy_changed);
+    }
+    call->op = IROP_NOP;
+    if (call->args) list_clear(call->args);
+    if (call->labels) list_clear(call->labels);
+    if (s) s->fold++;
+    return true;
+}
+
+static bool pass_inline_func_call(Func *f, Stats *s) {
+    if (!f) return false;
+    bool changed = false;
+    int next_val = max_value_in_func(f) + 1;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs) continue;
+
+        List *new_instrs = make_list();
+        bool block_changed = false;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i && i->op == IROP_CALL) {
+                if (inline_single_call(f, i, &next_val, s, new_instrs)) {
+                    block_changed = true;
+                    continue;
+                }
+            }
+            list_push(new_instrs, i);
+        }
+
+        if (block_changed) {
+            list_clear_shallow(b->instrs);
+            b->instrs = new_instrs;
+            changed = true;
+        } else {
+            list_clear_shallow(new_instrs);
+        }
+    }
+    return changed;
+}
+
 /*---------- ret 常量内联 ----------*/
 static bool pass_ret_const_inline(Func *f, Stats *s) {
     bool changed = false;
@@ -1935,6 +2118,7 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_dead_local_store_elim(f, &st);
         changed |= pass_global_load(f, &st);
         changed |= pass_copy_prop(f, &st);
+        changed |= pass_inline_func_call(f, &st);
         changed |= pass_addr_merge(f, &st);
         changed |= pass_local_opts(f, &st);
         changed |= pass_loop_invariant_accum(f, &st);

@@ -355,7 +355,7 @@
 // // ============================================
 
 // // 简单函数
-// static int helper_add(int a, int b) {
+// static inline int helper_add(int a, int b) {
 //     return a + b;
 // }
 
