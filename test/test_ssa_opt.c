@@ -454,10 +454,10 @@
 //     return 0;
 // }
 
-// // 三元运算符
-// int test_ternary(int x, int a, int b) {
-//     return x ? a : b;
-// }
+// 三元运算符
+int test_ternary(int x, int a, int b) {
+    return x ? a : b;
+}
 
 // // ============================================
 // // 14. 综合优化测试 (Comprehensive Tests)
@@ -525,34 +525,34 @@
 //     return sum;
 // }
 
-// // ============================================
-// // 15. 边界情况测试 (Edge Cases)
-// // ============================================
+// ============================================
+// 15. 边界情况测试 (Edge Cases)
+// ============================================
 
-// // 空函数
-// void test_empty(void) {
-// }
+// 空函数
+void test_empty(void) {
+}
 
-// // 仅返回常量
-// int test_return_const(void) {
-//     return 42;
-// }
+// 仅返回常量
+int test_return_const(void) {
+    return 42;
+}
 
-// // 仅返回参数
-// int test_return_param(int x) {
-//     return x;
-// }
+// 仅返回参数
+int test_return_param(int x) {
+    return x;
+}
 
-// // 多个返回路径
-// int test_multi_return(int x, int cond) {
-//     if (cond) {
-//         return x + 1;
-//     }
-//     if (x > 10) {
-//         return x * 2;
-//     }
-//     return x;
-// }
+// 多个返回路径
+int test_multi_return(int x, int cond) {
+    if (cond) {
+        return x + 1;
+    }
+    if (x > 10) {
+        return x * 2;
+    }
+    return x;
+}
 
 // switch 语句（如果有）
 int test_switch(int x) {

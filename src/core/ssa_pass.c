@@ -1880,7 +1880,7 @@ static bool pass_binop_const_inline(Func *f, Stats *s) {
 }
 
 /*---------- bool 返回分支折叠 ----------*/
-static bool block_only_ret_const(Block *b, int64_t *out_val) {
+static bool block_only_ret_const(Func *f, Block *b, int64_t *out_val) {
     if (out_val) *out_val = 0;
     if (!b || !b->instrs) return false;
     Instr *ret = NULL;
@@ -1892,10 +1892,20 @@ static bool block_only_ret_const(Block *b, int64_t *out_val) {
         ret = i;
     }
     if (!ret) return false;
+    /* 优先识别已经被标记为 imm 的 ret */
     if (ret->labels && ret->labels->len > 0) {
         char *tag = (char *)list_get(ret->labels, 0);
         if (tag && strcmp(tag, "imm") == 0) {
             if (out_val) *out_val = ret->imm.ival;
+            return true;
+        }
+    }
+    /* 如果没有 imm 标签，尝试通过 ret 的参数追溯 CONST 定义 */
+    if (ret->args && ret->args->len > 0 && f) {
+        ValueName rv = *(ValueName *)list_get(ret->args, 0);
+        int64_t val = 0;
+        if (get_const_value(f, rv, &val)) {
+            if (out_val) *out_val = val;
             return true;
         }
     }
@@ -1927,8 +1937,8 @@ static bool pass_bool_return_simplify(Func *f, Stats *s) {
         if (bf->phis && bf->phis->len > 0) continue;
 
         int64_t vt = 0, vf = 0;
-        if (!block_only_ret_const(bt, &vt)) continue;
-        if (!block_only_ret_const(bf, &vf)) continue;
+        if (!block_only_ret_const(f, bt, &vt)) continue;
+        if (!block_only_ret_const(f, bf, &vf)) continue;
         if (!((vt == 1 && vf == 0) || (vt == 0 && vf == 1))) continue;
 
         ValueName cond = get_arg(term, 0);
@@ -1958,6 +1968,26 @@ static bool pass_bool_return_simplify(Func *f, Stats *s) {
         ValueName *pr = pass_alloc(sizeof(ValueName));
         *pr = ret_val;
         list_push(term->args, pr);
+
+        /* 将原来的常量返回块从前驱列表中移除；若无其他前驱则清空该块 */
+        if (bt && bt->preds) {
+            bt->preds = preds_remove(bt->preds, b);
+            if (bt->preds->len == 0) {
+                list_clear_shallow(bt->instrs);
+                bt->instrs = make_list();
+                list_clear_shallow(bt->phis);
+                bt->phis = make_list();
+            }
+        }
+        if (bf && bf->preds) {
+            bf->preds = preds_remove(bf->preds, b);
+            if (bf->preds->len == 0) {
+                list_clear_shallow(bf->instrs);
+                bf->instrs = make_list();
+                list_clear_shallow(bf->phis);
+                bf->phis = make_list();
+            }
+        }
 
         changed = true;
         if (s) s->fold++;
