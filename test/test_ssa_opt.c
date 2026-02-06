@@ -525,23 +525,23 @@
 //     return sum;
 // }
 
-// ============================================
-// 15. 边界情况测试 (Edge Cases)
-// ============================================
+// // ============================================
+// // 15. 边界情况测试 (Edge Cases)
+// // ============================================
 
-// 空函数
-void test_empty(void) {
-}
+// // 空函数
+// void test_empty(void) {
+// }
 
-// 仅返回常量
-int test_return_const(void) {
-    return 42;
-}
+// // 仅返回常量
+// int test_return_const(void) {
+//     return 42;
+// }
 
-// 仅返回参数
-int test_return_param(int x) {
-    return x;
-}
+// // 仅返回参数
+// int test_return_param(int x) {
+//     return x;
+// }
 
 // // 多个返回路径
 // int test_multi_return(int x, int cond) {
@@ -554,17 +554,17 @@ int test_return_param(int x) {
 //     return x;
 // }
 
-// // switch 语句（如果有）
-// int test_switch(int x) {
-//     int result;
-//     switch (x) {
-//         case 0: result = 10; break;
-//         case 1: result = 20; break;
-//         case 2: result = 30; break;
-//         default: result = 0; break;
-//     }
-//     return result;
-// }
+// switch 语句（如果有）
+int test_switch(int x) {
+    int result;
+    switch (x) {
+        case 0: result = 10; break;
+        case 1: result = 20; break;
+        case 2: result = 30; break;
+        default: result = 0; break;
+    }
+    return result;
+}
 
 // // ============================================
 // // 16. 主函数 - 调用所有测试

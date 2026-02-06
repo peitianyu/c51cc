@@ -1373,6 +1373,143 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
         ssa_build_seal(b, merge_b);
         break;
     }
+
+    case AST_SWITCH: {
+        ValueName ctrl = gen_expr(b, ast->ctrl);
+
+        // Fast-path: if every case (and default if present) is a simple
+        // assignment to the same local variable (like `case X: v = C; break;`),
+        // lower the switch to nested `select` expressions to avoid complex
+        // control-flow and jmp-only blocks.
+        bool simple_assign = true;
+        const char *assign_var = NULL;
+        if (ast->cases && ast->cases->len > 0) {
+            for (Iter it = list_iter(ast->cases); !iter_end(it);) {
+                SwitchCase *c = iter_next(&it);
+                Ast *s = c ? c->stmt : NULL;
+                if (!s) { simple_assign = false; break; }
+                // accept either direct '=' or a compound stmt whose first is '='
+                Ast *as = (s->type == AST_COMPOUND_STMT && s->stmts && s->stmts->len>0) ? list_get(s->stmts, 0) : s;
+                if (!as || as->type != '=') { simple_assign = false; break; }
+                Ast *left = as->left;
+                if (!left || (left->type != AST_LVAR && left->type != AST_GVAR)) { simple_assign = false; break; }
+                if (!assign_var) assign_var = left->varname;
+                else if (strcmp(assign_var, left->varname) != 0) { simple_assign = false; break; }
+            }
+        } else simple_assign = false;
+
+        // default must also assign the same var if present
+        if (ast->default_stmt && simple_assign) {
+            Ast *s = ast->default_stmt;
+            Ast *as = (s->type == AST_COMPOUND_STMT && s->stmts && s->stmts->len>0) ? list_get(s->stmts, 0) : s;
+            if (!as || as->type != '=') simple_assign = false;
+            else {
+                Ast *left = as->left;
+                if (!left || (left->type != AST_LVAR && left->type != AST_GVAR)) simple_assign = false;
+                else if (strcmp(assign_var, left->varname) != 0) simple_assign = false;
+            }
+        }
+
+        if (simple_assign && assign_var) {
+            // build nested selects
+            ValueName cur_val = 0;
+            if (ast->default_stmt) {
+                Ast *s = ast->default_stmt;
+                Ast *as = (s->type == AST_COMPOUND_STMT && s->stmts && s->stmts->len>0) ? list_get(s->stmts, 0) : s;
+                Ast *rhs = as->right;
+                cur_val = gen_expr(b, rhs);
+            } else {
+                cur_val = ssa_build_const(b, 0);
+            }
+
+            // iterate cases in reverse to build nested selects
+            for (int i = ast->cases->len - 1; i >= 0; --i) {
+                SwitchCase *c = list_get(ast->cases, i);
+                if (!c) continue;
+                Ast *s = c->stmt;
+                Ast *as = (s->type == AST_COMPOUND_STMT && s->stmts && s->stmts->len>0) ? list_get(s->stmts, 0) : s;
+                Ast *rhs = as->right;
+                ValueName val = gen_expr(b, rhs);
+
+                ValueName cond;
+                if (c->low == c->high) {
+                    cond = ssa_build_binop(b, IROP_EQ, ctrl, ssa_build_const(b, c->low));
+                } else {
+                    ValueName ge = ssa_build_binop(b, IROP_GE, ctrl, ssa_build_const(b, c->low));
+                    ValueName le = ssa_build_binop(b, IROP_LE, ctrl, ssa_build_const(b, c->high));
+                    cond = ssa_build_binop(b, IROP_AND, ge, le);
+                }
+                cur_val = ssa_build_select(b, cond, val, cur_val);
+            }
+
+            // write result to the variable
+            ssa_build_write(b, assign_var, cur_val);
+            break;
+        }
+
+        Block *exit = ssa_build_block(b);
+
+        int n = ast->cases ? ast->cases->len : 0;
+        List *checks = make_list();
+        List *cases = make_list();
+        for (int i = 0; i < n; ++i) {
+            list_push(checks, ssa_build_block(b));
+            list_push(cases, ssa_build_block(b));
+        }
+
+        Block *default_b = ast->default_stmt ? ssa_build_block(b) : exit;
+
+        /* build check chain: start in current block to avoid extra jmp-only blocks */
+        Block *chk = b->cur_block;
+        for (int i = 0; i < n; ++i) {
+            if (i > 0) {
+                chk = list_get(checks, i);
+                ssa_build_position(b, chk);
+            }
+
+            SwitchCase *c = list_get(ast->cases, i);
+            ValueName cmp = 0;
+            if (c->low == c->high) {
+                cmp = ssa_build_binop(b, IROP_EQ, ctrl, ssa_build_const(b, c->low));
+            } else {
+                ValueName ge = ssa_build_binop(b, IROP_GE, ctrl, ssa_build_const(b, c->low));
+                ValueName le = ssa_build_binop(b, IROP_LE, ctrl, ssa_build_const(b, c->high));
+                cmp = ssa_build_binop(b, IROP_AND, ge, le);
+            }
+
+            Block *case_b = list_get(cases, i);
+            Block *false_tgt = (i + 1 < n) ? list_get(checks, i + 1) : (ast->default_stmt ? default_b : exit);
+            ssa_build_br(b, cmp, case_b, false_tgt);
+            ssa_build_seal(b, chk);
+        }
+
+        /* Generate case bodies; break should jump to exit */
+        ssa_build_push_cf(b, exit, NULL);
+        for (int i = 0; i < n; ++i) {
+            Block *case_b = list_get(cases, i);
+            ssa_build_position(b, case_b);
+            SwitchCase *c = list_get(ast->cases, i);
+            if (c && c->stmt) gen_stmt(b, c->stmt);
+
+            if (b->cur_block) {
+                Block *next = (i + 1 < n) ? list_get(cases, i + 1) : (ast->default_stmt ? default_b : exit);
+                ssa_build_jmp(b, next);
+            }
+            ssa_build_seal(b, case_b);
+        }
+
+        if (ast->default_stmt) {
+            ssa_build_position(b, default_b);
+            gen_stmt(b, ast->default_stmt);
+            if (b->cur_block) ssa_build_jmp(b, exit);
+            ssa_build_seal(b, default_b);
+        }
+        ssa_build_pop_cf(b);
+
+        ssa_build_position(b, exit);
+        ssa_build_seal(b, exit);
+        break;
+    }
     
     case AST_WHILE: {
         Block *header = ssa_build_block(b);
@@ -1914,7 +2051,39 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
         ValueName *c = list_get(i->args, 0);
         ValueName *t = list_get(i->args, 1);
         ValueName *f = list_get(i->args, 2);
-        fprintf(fp, "select v%d, v%d, v%d", *c, *t, *f);
+        print_arg(fp, *c, consts);
+        fprintf(fp, ": ");
+        fprintf(fp, "select ");
+        print_arg(fp, *c, consts);
+        fprintf(fp, ", ");
+        /* if this select has immediate labels like "imm1=..." or "imm2=...", print them */
+        if (i->labels) {
+            bool printed_t = false, printed_f = false;
+            for (Iter lt = list_iter(i->labels); !iter_end(lt);) {
+                char *lbl = iter_next(&lt);
+                if (!lbl) continue;
+                char key1[16], key2[16];
+                snprintf(key1, sizeof(key1), "imm1=");
+                snprintf(key2, sizeof(key2), "imm2=");
+                if (!printed_t && strncmp(lbl, key1, strlen(key1)) == 0) {
+                    fprintf(fp, "const %s", lbl + strlen(key1));
+                    printed_t = true;
+                    continue;
+                }
+                if (!printed_f && strncmp(lbl, key2, strlen(key2)) == 0) {
+                    if (!printed_t) { /* ensure separator */ }
+                    fprintf(fp, ", const %s", lbl + strlen(key2));
+                    printed_f = true;
+                    continue;
+                }
+            }
+            if (!printed_t) { print_arg(fp, *t, consts); }
+            if (!printed_f) { fprintf(fp, ", "); print_arg(fp, *f, consts); }
+        } else {
+            print_arg(fp, *t, consts);
+            fprintf(fp, ", ");
+            print_arg(fp, *f, consts);
+        }
         break;
     }
     case IROP_ASM: {

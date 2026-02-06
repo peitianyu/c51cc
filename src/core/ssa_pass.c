@@ -522,8 +522,23 @@ static bool value_used(Func *f, ValueName v) {
                     if (label && label[0] == '@') continue;
                 }
                 if (i->args) {
-                    for (int k = 0; k < i->args->len; ++k)
-                        if (*(ValueName *)list_get(i->args, k) == v) return true;
+                    for (int k = 0; k < i->args->len; ++k) {
+                        ValueName av = *(ValueName *)list_get(i->args, k);
+                        if (av != v) continue;
+                        /* check if this argument is encoded as an immediate in labels */
+                        bool is_imm = false;
+                        if (i->labels) {
+                            for (Iter lt = list_iter(i->labels); !iter_end(lt);) {
+                                char *lbl = iter_next(&lt);
+                                if (!lbl) continue;
+                                char key[16];
+                                snprintf(key, sizeof(key), "imm%d=", k);
+                                if (strncmp(lbl, key, strlen(key)) == 0) { is_imm = true; break; }
+                            }
+                        }
+                        if (is_imm) continue; /* not a real use */
+                        return true;
+                    }
                 }
             }
         }
@@ -620,7 +635,6 @@ static bool pass_dce(Func *f, Stats *s) {
                     Instr *k = (Instr *)list_get(keep, j);
                     if (k == inst) { keep_flag = true; break; }
                 }
-                if (!keep_flag && inst) ssa_print_instr(stdout, inst, NULL);
             }
         }
         s->rm += before - after;
@@ -773,6 +787,27 @@ static bool pass_phi(Func *f, Stats *s) {
     return changed || s->phi_rm != rm0;
 }
 
+/*---------- 移除未使用的 CONST 指令 ----------*/
+static bool pass_remove_unused_consts(Func *f, Stats *s) {
+    if (!f || !f->blocks) return false;
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs) continue;
+        List *keep = make_list();
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i) continue;
+            if (i->op == IROP_CONST && i->dest && !value_used(f, i->dest)) {
+                ++s->rm; changed = true; continue; /* drop */
+            }
+            list_push(keep, i);
+        }
+        if (changed) b->instrs = keep; else { list_clear_shallow(keep); free(keep); }
+    }
+    return changed;
+}
+
 static bool pass_phi_cleanup(Func *f, Stats *s) {
     bool changed = false;
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
@@ -847,6 +882,43 @@ static bool pass_const_fold(Func *f, Stats *s) {
                 if (i->args) list_clear(i->args);
                 if (i->labels) list_clear(i->labels);
                 ++s->fold; changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+/* 将只被单个用户使用的 CONST 内联到使用指令（目前处理 IROP_SELECT） */
+static bool pass_inline_consts_into_instrs(Func *f, Stats *s) {
+    if (!f || !f->blocks) return false;
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i) continue;
+            if (i->op != IROP_SELECT) continue;
+
+            for (int argidx = 1; argidx <= 2; ++argidx) {
+                if (!i->args || i->args->len <= argidx) continue;
+                ValueName av = *(ValueName *)list_get(i->args, argidx);
+                if (av == 0) continue;
+                Instr *def = find_def_instr(f, av);
+                if (!def || def->op != IROP_CONST) continue;
+                int uses = count_uses(f, av);
+                if (uses != 1) continue; /* only inline single-use const */
+
+                /* encode immediate into labels: imm{idx}=<val> */
+                char buf[64]; snprintf(buf, sizeof(buf), "imm%d=%ld", argidx, (long)def->imm.ival);
+                if (!i->labels) i->labels = make_list();
+                char *lbl = pass_alloc(strlen(buf) + 1); strcpy(lbl, buf);
+                list_push(i->labels, lbl);
+
+                /* replace argument with 0 to remove usage link */
+                ValueName *p = list_get(i->args, argidx);
+                *p = 0;
+                changed = true; ++s->fold;
             }
         }
     }
@@ -2081,19 +2153,6 @@ static bool pass_unreachable_block_elim(Func *f, Stats *s) {
             continue;
 
         if ((b->phis && b->phis->len > 0) || (b->instrs && b->instrs->len > 0)) {
-            if (b->phis) {
-                for (Iter pit = list_iter(b->phis); !iter_end(pit);) {
-                    Instr *p = iter_next(&pit);
-                    if (p) ssa_print_instr(stdout, p, NULL);
-                }
-            }
-            if (b->instrs) {
-                for (Iter iit = list_iter(b->instrs); !iter_end(iit);) {
-                    Instr *ii = iter_next(&iit);
-                    if (ii) ssa_print_instr(stdout, ii, NULL);
-                }
-            }
-
             list_clear_shallow(b->phis);
             b->phis = make_list();
             list_clear_shallow(b->instrs);
@@ -2518,6 +2577,8 @@ void ssa_optimize_func(Func *f, int level) {
         RUN_PASS(pass_unreachable_block_elim);
         RUN_PASS(pass_const_merge);
         RUN_PASS(pass_phi);
+        RUN_PASS(pass_inline_consts_into_instrs);
+        RUN_PASS(pass_remove_unused_consts);
         RUN_PASS(pass_phi_cleanup);
         RUN_PASS(pass_store_cleanup);
         RUN_PASS(pass_binop_const_inline);
