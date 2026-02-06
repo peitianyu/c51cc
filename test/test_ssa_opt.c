@@ -239,16 +239,16 @@
 // // 7. 控制流优化测试 (Control Flow Optimization)
 // // ============================================
 
-// // 常量条件 - 总是为真
-// int test_cf_const_true(int x) {
-//     int result;
-//     if (1) {                 // 总是为真
-//         result = x + 1;
-//     } else {
-//         result = x - 1;      // 死代码
-//     }
-//     return result;
-// }
+// 常量条件 - 总是为真
+int test_cf_const_true(int x) {
+    int result;
+    if (1) {                 // 总是为真
+        result = x + 1;
+    } else {
+        result = x - 1;      // 死代码
+    }
+    return result;
+}
 
 // // 常量条件 - 总是为假
 // int test_cf_const_false(int x) {
@@ -454,10 +454,10 @@
 //     return 0;
 // }
 
-// 三元运算符
-int test_ternary(int x, int a, int b) {
-    return x ? a : b;
-}
+// // 三元运算符
+// int test_ternary(int x, int a, int b) {
+//     return x ? a : b;
+// }
 
 // // ============================================
 // // 14. 综合优化测试 (Comprehensive Tests)
@@ -525,46 +525,46 @@ int test_ternary(int x, int a, int b) {
 //     return sum;
 // }
 
-// ============================================
-// 15. 边界情况测试 (Edge Cases)
-// ============================================
+// // ============================================
+// // 15. 边界情况测试 (Edge Cases)
+// // ============================================
 
-// 空函数
-void test_empty(void) {
-}
+// // 空函数
+// void test_empty(void) {
+// }
 
-// 仅返回常量
-int test_return_const(void) {
-    return 42;
-}
+// // 仅返回常量
+// int test_return_const(void) {
+//     return 42;
+// }
 
-// 仅返回参数
-int test_return_param(int x) {
-    return x;
-}
+// // 仅返回参数
+// int test_return_param(int x) {
+//     return x;
+// }
 
-// 多个返回路径
-int test_multi_return(int x, int cond) {
-    if (cond) {
-        return x + 1;
-    }
-    if (x > 10) {
-        return x * 2;
-    }
-    return x;
-}
+// // 多个返回路径
+// int test_multi_return(int x, int cond) {
+//     if (cond) {
+//         return x + 1;
+//     }
+//     if (x > 10) {
+//         return x * 2;
+//     }
+//     return x;
+// }
 
-// switch 语句（如果有）
-int test_switch(int x) {
-    int result;
-    switch (x) {
-        case 0: result = 10; break;
-        case 1: result = 20; break;
-        case 2: result = 30; break;
-        default: result = 0; break;
-    }
-    return result;
-}
+// // switch 语句（如果有）
+// int test_switch(int x) {
+//     int result;
+//     switch (x) {
+//         case 0: result = 10; break;
+//         case 1: result = 20; break;
+//         case 2: result = 30; break;
+//         default: result = 0; break;
+//     }
+//     return result;
+// }
 
 // // ============================================
 // // 16. 主函数 - 调用所有测试

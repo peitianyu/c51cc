@@ -2582,7 +2582,7 @@ void ssa_optimize_func(Func *f, int level) {
     bool changed;
     int it = 0;
     do {
-#define RUN_PASS(_p) do {  if (_p(f, &st)) { changed = true;  rebuild_preds(f); } } while (0)
+#define RUN_PASS(_p) do {  if (_p(f, &st)) { changed = true; rebuild_preds(f); } } while (0)
         changed = false;
         RUN_PASS(pass_const_fold);
         RUN_PASS(pass_store_load_forwarding);
