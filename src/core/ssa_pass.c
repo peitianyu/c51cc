@@ -1235,6 +1235,217 @@ static bool pass_local_opts(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 循环不变量累加外提 ----------*/
+static Block *find_instr_block(Func *f, Instr *inst) {
+    if (!f || !inst || !f->blocks) return NULL;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (i == inst) return b;
+        }
+    }
+    return NULL;
+}
+
+static bool is_cmp_op(IrOp op) {
+    return op == IROP_LT || op == IROP_LE || op == IROP_GT || op == IROP_GE ||
+           op == IROP_EQ || op == IROP_NE;
+}
+
+static Instr *block_last_effective_instr(Block *b) {
+    if (!b || !b->instrs) return NULL;
+    Instr *last = NULL;
+    for (Iter it = list_iter(b->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i) continue;
+        if (i->op == IROP_NOP || i->op == IROP_PHI) continue;
+        last = i;
+    }
+    return last;
+}
+
+static bool pass_loop_invariant_accum(Func *f, Stats *s) {
+    bool changed = false;
+    if (!f || !f->blocks || f->blocks->len < 4) return false;
+
+
+    rebuild_preds(f);
+
+    Block *b0 = f->entry ? f->entry : (Block *)list_get(f->blocks, 0);
+    if (!b0 || !b0->instrs || b0->instrs->len == 0) return false;
+
+    Instr *b0term = block_last_effective_instr(b0);
+    if (!b0term) return false;
+    if (b0term->op != IROP_JMP || !b0term->labels || b0term->labels->len < 1) return false;
+
+    int hid = -1;
+    sscanf((char *)list_get(b0term->labels, 0), "block%d", &hid);
+    if (hid < 0) return false;
+    Block *b1 = find_block_by_id(f, hid);
+    if (!b1 || !b1->instrs || b1->instrs->len == 0 || !b1->phis) return false;
+
+
+    Instr *b1term = block_last_effective_instr(b1);
+    if (!b1term) return false;
+    if (b1term->op != IROP_BR || !b1term->labels || b1term->labels->len < 2) return false;
+
+    int bid_body = -1, bid_exit = -1;
+    char *lbl0 = (char *)list_get(b1term->labels, 0);
+    char *lbl1 = (char *)list_get(b1term->labels, 1);
+    sscanf(lbl0, "block%d", &bid_body);
+    sscanf(lbl1, "block%d", &bid_exit);
+    if (bid_body < 0 || bid_exit < 0) return false;
+    Block *b2 = find_block_by_id(f, bid_body);
+    Block *b4 = find_block_by_id(f, bid_exit);
+    if (!b2 || !b4 || !b2->instrs || b2->instrs->len == 0 || !b4->instrs || b4->instrs->len == 0) return false;
+
+
+    Instr *b2term = block_last_effective_instr(b2);
+    if (!b2term || b2term->op != IROP_JMP || !b2term->labels || b2term->labels->len < 1) return false;
+    int back_id = -1;
+    sscanf((char *)list_get(b2term->labels, 0), "block%d", &back_id);
+    if (back_id != (int)b1->id) return false;
+
+    /* 识别 phi_i 与 phi_sum */
+    if (!b1->phis || b1->phis->len < 2) return false;
+    Instr *phi_i = NULL;
+    ValueName n_val = 0;
+    ValueName cond = get_arg(b1term, 0);
+    Instr *cond_def = find_def_instr(f, cond);
+    if (!cond_def || !is_cmp_op(cond_def->op)) return false;
+
+    ValueName c0 = get_arg(cond_def, 0);
+    ValueName c1 = get_arg(cond_def, 1);
+    for (Iter it = list_iter(b1->phis); !iter_end(it);) {
+        Instr *p = iter_next(&it);
+        if (!p || p->op != IROP_PHI) continue;
+        if (p->dest == c0 || p->dest == c1) {
+            phi_i = p;
+            n_val = (p->dest == c0) ? c1 : c0;
+            break;
+        }
+    }
+    if (!phi_i || n_val == 0) return false;
+
+
+    Instr *phi_sum = NULL;
+    /* 在 b2 查找 sum + inv 与 (sum+inv) + i */
+    Instr *add1 = NULL; /* sum + inv */
+    Instr *add2 = NULL; /* add1 + i */
+    ValueName inv_val = 0;
+    for (Iter it = list_iter(b2->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i || i->op != IROP_ADD || !i->args || i->args->len < 2) continue;
+        ValueName a0 = get_arg(i, 0);
+        ValueName a1 = get_arg(i, 1);
+        /* 寻找形如 phi_sum + inv 的 add1 */
+        for (Iter pit = list_iter(b1->phis); !iter_end(pit);) {
+            Instr *p = iter_next(&pit);
+            if (!p || p->op != IROP_PHI || p == phi_i) continue;
+            if (a0 == p->dest || a1 == p->dest) {
+                ValueName cand_inv = (a0 == p->dest) ? a1 : a0;
+                Instr *inv_def = find_def_instr(f, cand_inv);
+                Block *inv_blk = find_instr_block(f, inv_def);
+                if (inv_def && inv_blk == b0) {
+                    phi_sum = p;
+                    add1 = i;
+                    inv_val = cand_inv;
+                    break;
+                }
+            }
+        }
+        if (add1) break;
+    }
+    if (!phi_sum || !add1 || inv_val == 0) return false;
+
+
+    /* 查找 add2: add1 + phi_i */
+    for (Iter it = list_iter(b2->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i || i->op != IROP_ADD || !i->args || i->args->len < 2) continue;
+        ValueName a0 = get_arg(i, 0);
+        ValueName a1 = get_arg(i, 1);
+        if ((a0 == add1->dest && a1 == phi_i->dest) || (a1 == add1->dest && a0 == phi_i->dest)) {
+            add2 = i;
+            break;
+        }
+    }
+    if (!add2) return false;
+
+
+    /* phi_sum 必须从 b2 回边使用 add2 */
+    bool phi_has_add2 = false;
+    if (phi_sum->labels && phi_sum->args) {
+        for (int k = 0; k < phi_sum->labels->len && k < phi_sum->args->len; ++k) {
+            char *lbl = (char *)list_get(phi_sum->labels, k);
+            ValueName v = *(ValueName *)list_get(phi_sum->args, k);
+            if (lbl && v == add2->dest) {
+                int pid = -1;
+                sscanf(lbl, "block%d", &pid);
+                if (pid == (int)b2->id) { phi_has_add2 = true; break; }
+            }
+        }
+    }
+    if (!phi_has_add2) return false;
+
+
+    /* 在 b0 插入 v_mul = n * inv */
+    Instr *term0 = NULL;
+    list_remove_last(b0->instrs, (void **)&term0);
+    if (!term0 || term0->op != IROP_JMP) {
+        if (term0) list_push(b0->instrs, term0);
+        return false;
+    }
+
+    ValueName next_val = max_value_in_func(f) + 1;
+    Instr *mul_n_inv = pass_alloc(sizeof(Instr));
+    memset(mul_n_inv, 0, sizeof(*mul_n_inv));
+    mul_n_inv->op = IROP_MUL;
+    mul_n_inv->dest = next_val++;
+    mul_n_inv->type = phi_sum->type;
+    mul_n_inv->args = make_list();
+    ValueName *pn = pass_alloc(sizeof(ValueName)); *pn = n_val; list_push(mul_n_inv->args, pn);
+    ValueName *pi = pass_alloc(sizeof(ValueName)); *pi = inv_val; list_push(mul_n_inv->args, pi);
+    list_push(b0->instrs, mul_n_inv);
+    list_push(b0->instrs, term0);
+    ValueName mul_val = mul_n_inv->dest;
+
+    /* b2: add2 改为 sum + i，并将 add1 标记为 NOP */
+    list_clear(add2->args);
+    ValueName *ps0 = pass_alloc(sizeof(ValueName)); *ps0 = phi_sum->dest; list_push(add2->args, ps0);
+    ValueName *ps1 = pass_alloc(sizeof(ValueName)); *ps1 = phi_i->dest; list_push(add2->args, ps1);
+    add1->op = IROP_NOP;
+    if (add1->args) list_clear(add1->args);
+
+    /* b4: ret 前插入 sum + (n * inv) */
+    Instr *ret = NULL;
+    list_remove_last(b4->instrs, (void **)&ret);
+    if (!ret || ret->op != IROP_RET) {
+        if (ret) list_push(b4->instrs, ret);
+        return false;
+    }
+    Instr *add_exit = pass_alloc(sizeof(Instr));
+    memset(add_exit, 0, sizeof(*add_exit));
+    add_exit->op = IROP_ADD;
+    add_exit->dest = next_val++;
+    add_exit->type = phi_sum->type;
+    add_exit->args = make_list();
+    ValueName *pe0 = pass_alloc(sizeof(ValueName)); *pe0 = phi_sum->dest; list_push(add_exit->args, pe0);
+    ValueName *pe1 = pass_alloc(sizeof(ValueName)); *pe1 = mul_val; list_push(add_exit->args, pe1);
+    list_push(b4->instrs, add_exit);
+
+    if (ret->args) list_clear(ret->args);
+    else ret->args = make_list();
+    ValueName *pret = pass_alloc(sizeof(ValueName)); *pret = add_exit->dest; list_push(ret->args, pret);
+    list_push(b4->instrs, ret);
+
+    changed = true;
+    if (s) s->fold++;
+    return changed;
+}
+
 /*---------- 存储到加载转发 ----------*/
 static bool pass_store_load_forwarding(Func *f, Stats *s) {
     bool changed = false;
@@ -2171,6 +2382,7 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_const_merge(f, &st);
         changed |= pass_addr_merge(f, &st);
         changed |= pass_local_opts(f, &st);
+        changed |= pass_loop_invariant_accum(f, &st);
         changed |= pass_const_branch(f, &st);
         changed |= pass_br_same_target(f, &st);
         changed |= pass_jump_threading(f, &st);
