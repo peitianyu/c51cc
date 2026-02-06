@@ -435,58 +435,58 @@
 //     return x ^ 1;            // 切换最低位
 // }
 
-// ============================================
-// 13. 比较链优化测试 (Comparison Chain)
-// ============================================
-
-// 双重比较简化
-int test_compare_chain(int x) {
-    int a = (x == 0);        // 布尔值
-    int b = (a != 0);        // => x != 0
-    return b;
-}
-
-// 布尔值转换
-int test_bool_convert(int x) {
-    if (x) {                 // 非零为真
-        return 1;
-    }
-    return 0;
-}
-
-// 三元运算符
-int test_ternary(int x, int a, int b) {
-    return x ? a : b;
-}
-
 // // ============================================
-// // 14. 综合优化测试 (Comprehensive Tests)
+// // 13. 比较链优化测试 (Comparison Chain)
 // // ============================================
 
-// // 多个优化组合
-// int test_comprehensive1(int n) {
-//     int sum = 0;
-//     int i = 0;
-    
-//     while (i < n) {
-//         // 常量表达式
-//         int offset = 2 + 3 * 4;     // => 14
-        
-//         // 代数简化: x - x = 0
-//         int dummy = offset - offset; // => 0 (死代码)
-        
-//         // 强度削弱: i * 8 => i << 3
-//         int idx = i * 8;
-        
-//         // 常量表达式
-//         int scale = (10 + 6) / 4;   // => 4
-        
-//         sum = sum + idx * scale + offset;
-//         i = i + 1;
-//     }
-    
-//     return sum;
+// // 双重比较简化
+// int test_compare_chain(int x) {
+//     int a = (x == 0);        // 布尔值
+//     int b = (a != 0);        // => x != 0
+//     return b;
 // }
+
+// // 布尔值转换
+// int test_bool_convert(int x) {
+//     if (x) {                 // 非零为真
+//         return 1;
+//     }
+//     return 0;
+// }
+
+// // 三元运算符
+// int test_ternary(int x, int a, int b) {
+//     return x ? a : b;
+// }
+
+// ============================================
+// 14. 综合优化测试 (Comprehensive Tests)
+// ============================================
+
+// 多个优化组合
+int test_comprehensive1(int n) {
+    int sum = 0;
+    int i = 0;
+    
+    while (i < n) {
+        // 常量表达式
+        int offset = 2 + 3 * 4;     // => 14
+        
+        // 代数简化: x - x = 0
+        int dummy = offset - offset; // => 0 (死代码)
+        
+        // 强度削弱: i * 8 => i << 3
+        int idx = i * 8;
+        
+        // 常量表达式
+        int scale = (10 + 6) / 4;   // => 4
+        
+        sum = sum + idx * scale + offset;
+        i = i + 1;
+    }
+    
+    return sum;
+}
 
 // // 嵌套循环优化
 // int test_nested_loops(int n) {

@@ -407,6 +407,21 @@ static bool get_const_value(Func *f, ValueName v, int64_t *out) {
     return false;
 }
 
+static bool get_shift_imm(Func *f, Instr *i, ValueName *lhs_out, int64_t *sh_out) {
+    if (!i || (i->op != IROP_SHL && i->op != IROP_SHR) || !lhs_out || !sh_out) return false;
+    if (!i->args || i->args->len < 1) return false;
+    *lhs_out = get_arg(i, 0);
+    if (i->args->len >= 2) {
+        int64_t s = 0;
+        if (get_const_value(f, get_arg(i, 1), &s)) { *sh_out = s; return true; }
+    }
+    if (i->labels && i->labels->len > 0) {
+        char *tag = (char *)list_get(i->labels, 0);
+        if (tag && strcmp(tag, "imm") == 0) { *sh_out = i->imm.ival; return true; }
+    }
+    return false;
+}
+
 static bool resolve_base_offset(Func *f, ValueName addr, ValueName *base, int64_t *off) {
     int64_t total = 0;
     ValueName cur = addr;
@@ -789,6 +804,8 @@ static bool pass_const_fold(Func *f, Stats *s) {
             }
             if (ok) {
                 i->op = IROP_CONST; i->imm.ival = r;
+                if (i->args) list_clear(i->args);
+                if (i->labels) list_clear(i->labels);
                 ++s->fold; changed = true;
             }
         }
@@ -1132,6 +1149,30 @@ static bool pass_local_opts(Func *f, Stats *s) {
                     ValueName *p = pass_alloc(sizeof *p); *p = get_arg(c, 0);
                     list_push(i->args, p);
                     ++s->rm; changed = true; continue;
+                }
+            }
+
+            /* 移位合并：(x << a) << b => x << (a+b) */
+            if ((i->op == IROP_SHL || i->op == IROP_SHR) && i->args->len >= 1) {
+                ValueName lhs = 0;
+                int64_t s1 = 0;
+                if (get_shift_imm(f, i, &lhs, &s1)) {
+                    Instr *d = find_def_instr(f, lhs);
+                    if (d && d->op == i->op) {
+                        ValueName base = 0;
+                        int64_t s0 = 0;
+                        if (get_shift_imm(f, d, &base, &s0)) {
+                            i->imm.ival = s0 + s1;
+                            if (!i->labels) i->labels = make_list();
+                            list_clear(i->labels);
+                            char *tag = pass_alloc(4); strcpy(tag, "imm");
+                            list_push(i->labels, tag);
+                            list_clear(i->args);
+                            ValueName *p = pass_alloc(sizeof *p); *p = base;
+                            list_push(i->args, p);
+                            ++s->fold; changed = true; continue;
+                        }
+                    }
                 }
             }
         }
