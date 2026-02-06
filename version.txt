@@ -1,3 +1,43 @@
 version: 0.0.1
 基本完成hex文件的初步输出
 
+version: 0.0.2
+优化：优化精简 pp.c 代码
+优化：优化 asm 测试代码
+修复：修复 while/for 循环中的 phi 问题
+修复：修复复杂表达式与类型转换的 SSA 输出错误
+修复：修复 Win/Linux 编辑差异导致的解析异常
+修复：修复函数递归中的 bug
+修复：修复复杂流图的 phi 问题
+修复：修复 SSA 生成的大部分问题
+修复：修复打印 instr 崩溃问题
+优化：优化 ssa_opt
+优化：优化 SSA（分支折叠、死块清除、多余 addr、多余 const）
+优化：优化 while 的 SSA 处理
+优化：双重 for 循环的 SSA 输出优化
+优化：优化 SSA 中函数类型的真实打印
+优化：优化测试项，删除 c51_link.c
+特性：在 asm 中添加 SSA 打印用于调试
+优化：初步优化 hex_verify.c
+优化：根据 Keil 优化 hex_verify.c 输出
+优化：增加 ssa_pass
+优化：优化强度削弱代码
+优化：精简 phi
+优化：优化控制流
+优化：优化循环不变量外提
+特性：SSA 中添加 do-while 支持
+优化：优化数组常数折叠
+优化：整理 ssa_pass 代码
+特性：添加 <<= >>= &= |= ^= += -= *= /= %= 支持
+修复：修复 print_link_summary 编译问题
+修复：修复 while(1); 崩溃
+特性：添加函数式宏展开、多行宏、do{...}while(0) 宏
+特性：添加 #if/#elif 支持
+特性：添加 # 与 ## 运算符支持
+特性：添加变参宏
+特性：添加预定义宏
+特性：添加 #error/#warning
+特性：添加 #pragma once/#pragma message(...)
+特性：添加 asm(...)
+特性：将 obj 与 link 模块提出来
+特性：添加串口测试代码
