@@ -2007,13 +2007,8 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
         fprintf(fp, "ret");
         if (i->args && i->args->len >= 1) {
             ValueName *v = list_get(i->args, 0);
-            Instr *def = find_def_instr_print(g_print_func, *v);
-            if (def && def->op == IROP_CONST && suppress_const_print(g_print_func, *v)) {
-                fprintf(fp, " const %ld", def->imm.ival);
-            } else {
-                fprintf(fp, " ");
-                print_arg(fp, *v, consts);
-            }
+            fprintf(fp, " ");
+            print_arg(fp, *v, consts);
         } else if (i->labels && i->labels->len > 0) {
             char *tag = (char *)list_get(i->labels, 0);
             if (tag && strcmp(tag, "imm") == 0) {

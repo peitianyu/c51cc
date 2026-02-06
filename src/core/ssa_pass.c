@@ -1726,6 +1726,93 @@ static bool pass_binop_const_inline(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- bool 返回分支折叠 ----------*/
+static bool block_only_ret_const(Block *b, int64_t *out_val) {
+    if (out_val) *out_val = 0;
+    if (!b || !b->instrs) return false;
+    Instr *ret = NULL;
+    for (Iter it = list_iter(b->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i || i->op == IROP_NOP || i->op == IROP_PARAM) continue;
+        if (ret) return false;
+        if (i->op != IROP_RET) return false;
+        ret = i;
+    }
+    if (!ret) return false;
+    if (ret->labels && ret->labels->len > 0) {
+        char *tag = (char *)list_get(ret->labels, 0);
+        if (tag && strcmp(tag, "imm") == 0) {
+            if (out_val) *out_val = ret->imm.ival;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool pass_bool_return_simplify(Func *f, Stats *s) {
+    if (!f || !f->blocks) return false;
+    bool changed = false;
+    int next_val = max_value_in_func(f) + 1;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs || b->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        if (!term || term->op != IROP_BR || !term->labels || term->labels->len < 2 || !term->args) continue;
+
+        char *lbl_t = (char *)list_get(term->labels, 0);
+        char *lbl_f = (char *)list_get(term->labels, 1);
+        int id_t = -1, id_f = -1;
+        if (!lbl_t || !lbl_f) continue;
+        if (sscanf(lbl_t, "block%d", &id_t) != 1) continue;
+        if (sscanf(lbl_f, "block%d", &id_f) != 1) continue;
+
+        Block *bt = find_block_by_id(f, id_t);
+        Block *bf = find_block_by_id(f, id_f);
+        if (!bt || !bf) continue;
+        if (bt->phis && bt->phis->len > 0) continue;
+        if (bf->phis && bf->phis->len > 0) continue;
+
+        int64_t vt = 0, vf = 0;
+        if (!block_only_ret_const(bt, &vt)) continue;
+        if (!block_only_ret_const(bf, &vf)) continue;
+        if (!((vt == 1 && vf == 0) || (vt == 0 && vf == 1))) continue;
+
+        ValueName cond = get_arg(term, 0);
+        ValueName ret_val = cond;
+
+        if (vt == 0 && vf == 1) {
+            Instr *ln = pass_alloc(sizeof(Instr));
+            memset(ln, 0, sizeof(*ln));
+            ln->op = IROP_LNOT;
+            ln->dest = next_val++;
+            Instr *cdef = find_def_instr(f, cond);
+            ln->type = cdef ? cdef->type : NULL;
+            ln->args = make_list();
+            ValueName *p = pass_alloc(sizeof(ValueName));
+            *p = cond;
+            list_push(ln->args, p);
+            list_remove_last(b->instrs, NULL);
+            list_push(b->instrs, ln);
+            list_push(b->instrs, term);
+            ret_val = ln->dest;
+        }
+
+        term->op = IROP_RET;
+        if (term->labels) list_clear(term->labels);
+        if (term->args) list_clear(term->args);
+        else term->args = make_list();
+        ValueName *pr = pass_alloc(sizeof(ValueName));
+        *pr = ret_val;
+        list_push(term->args, pr);
+
+        changed = true;
+        if (s) s->fold++;
+    }
+
+    return changed;
+}
+
 /*---------- 基本块合并 ----------*/
 static bool pass_block_merge(Func *f, Stats *s) {
     bool changed = false;
@@ -2314,6 +2401,7 @@ void ssa_optimize_func(Func *f, int level) {
         changed |= pass_inline_func_call(f, &st);
         changed |= pass_addr_merge(f, &st);
         changed |= pass_local_opts(f, &st);
+        changed |= pass_bool_return_simplify(f, &st);
         changed |= pass_loop_invariant_accum(f, &st);
         RUN_CFG_PASS(pass_const_branch);
         changed |= pass_br_same_target(f, &st);

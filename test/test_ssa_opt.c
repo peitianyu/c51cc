@@ -388,13 +388,13 @@
 //     return *p;               // => a
 // }
 
-// 自增自减
-int test_ptr_inc(int *p) {
-    int a = *p;
-    p = p + 1;
-    int b = *p;
-    return a + b;
-}
+// // 自增自减
+// int test_ptr_inc(int *p) {
+//     int a = *p;
+//     p = p + 1;
+//     int b = *p;
+//     return a + b;
+// }
 
 // // 指针解引用
 // int test_ptr_deref(int *p) {
@@ -435,29 +435,29 @@ int test_ptr_inc(int *p) {
 //     return x ^ 1;            // 切换最低位
 // }
 
-// // ============================================
-// // 13. 比较链优化测试 (Comparison Chain)
-// // ============================================
+// ============================================
+// 13. 比较链优化测试 (Comparison Chain)
+// ============================================
 
-// // 双重比较简化
-// int test_compare_chain(int x) {
-//     int a = (x == 0);        // 布尔值
-//     int b = (a != 0);        // => x != 0
-//     return b;
-// }
+// 双重比较简化
+int test_compare_chain(int x) {
+    int a = (x == 0);        // 布尔值
+    int b = (a != 0);        // => x != 0
+    return b;
+}
 
-// // 布尔值转换
-// int test_bool_convert(int x) {
-//     if (x) {                 // 非零为真
-//         return 1;
-//     }
-//     return 0;
-// }
+// 布尔值转换
+int test_bool_convert(int x) {
+    if (x) {                 // 非零为真
+        return 1;
+    }
+    return 0;
+}
 
-// // 三元运算符
-// int test_ternary(int x, int a, int b) {
-//     return x ? a : b;
-// }
+// 三元运算符
+int test_ternary(int x, int a, int b) {
+    return x ? a : b;
+}
 
 // // ============================================
 // // 14. 综合优化测试 (Comprehensive Tests)
