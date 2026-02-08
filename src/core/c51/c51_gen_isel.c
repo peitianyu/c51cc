@@ -1463,12 +1463,28 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         break;
     }
     
-    case IROP_NEG:
-        emit_ins1(sec, "clr", "C");
-        emit_ins2(sec, "mov", "A", "#0");
-        emit_ins2(sec, "subb", "A", VREG(0));
-        emit_ins2(sec, "mov", vreg(ins->dest), "A");
+    case IROP_NEG: {
+        ValueName src = GET_ARG(0);
+        /* 处理 16 位值的取负（0 - src），否则按 8 位处理 */
+        if (IS_16BIT() || is_v16_value(src) || val_size(src) >= 2) {
+            AddrPair pa, pd;
+            emit_promote_to_v16(sec, src, &pa);
+            fmt_addr_pair(&pd, v16_addr(ins->dest));
+            emit_ins1(sec, "clr", "C");
+            emit_ins2(sec, "mov", "A", "#0");
+            emit_ins2(sec, "subb", "A", pa.lo);
+            emit_ins2(sec, "mov", pd.lo, "A");
+            emit_ins2(sec, "mov", "A", "#0");
+            emit_ins2(sec, "subb", "A", pa.hi);
+            emit_ins2(sec, "mov", pd.hi, "A");
+        } else {
+            emit_ins1(sec, "clr", "C");
+            emit_ins2(sec, "mov", "A", "#0");
+            emit_ins2(sec, "subb", "A", VREG(0));
+            emit_ins2(sec, "mov", vreg(ins->dest), "A");
+        }
         break;
+    }
         
     case IROP_NOT:
         emit_ins2(sec, "mov", "A", VREG(0));

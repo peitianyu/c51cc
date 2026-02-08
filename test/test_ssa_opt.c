@@ -94,11 +94,11 @@
 //     return b;
 // }
 
-// // 0 - x = -x (如果支持)
-// int test_algebraic_zero_sub(int a) {
-//     int b = 0 - a;           // => -a
-//     return b;
-// }
+// 0 - x = -x (如果支持)
+int test_algebraic_zero_sub(int a) {
+    int b = 0 - a;           // => -a
+    return b;
+}
 
 // // x / 1 = x
 // int test_algebraic_div_one(int a) {
@@ -239,16 +239,16 @@
 // // 7. 控制流优化测试 (Control Flow Optimization)
 // // ============================================
 
-// 常量条件 - 总是为真
-int test_cf_const_true(int x) {
-    int result;
-    if (1) {                 // 总是为真
-        result = x + 1;
-    } else {
-        result = x - 1;      // 死代码
-    }
-    return result;
-}
+// // 常量条件 - 总是为真
+// int test_cf_const_true(int x) {
+//     int result;
+//     if (1) {                 // 总是为真
+//         result = x + 1;
+//     } else {
+//         result = x - 1;      // 死代码
+//     }
+//     return result;
+// }
 
 // // 常量条件 - 总是为假
 // int test_cf_const_false(int x) {
