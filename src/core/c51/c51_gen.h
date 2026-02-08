@@ -1,7 +1,7 @@
 #ifndef C51_GEN_H
 #define C51_GEN_H
 
-#include "c51_obj.h"
+#include "../obj.h"
 #include "../ssa.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -170,5 +170,12 @@ void fixup_short_jumps(Section *sec);
 
 /* === Entry point === */
 ObjFile *c51_gen_from_ssa(void *ssa);
+
+/* === Asm interface === */
+ObjFile *c51_asm_from_text(const char *text, char **error, int *error_line);
+
+/* === Output helpers (asm/hex) === */
+int c51_write_asm(FILE *fp, const ObjFile *obj);
+int c51_write_hex(FILE *fp, const ObjFile *obj);
 
 #endif /* C51_GEN_H */

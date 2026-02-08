@@ -1,4 +1,4 @@
-#include "c51_obj.h"
+#include "c51_gen.h"
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -60,18 +60,6 @@ static char *strip_comment(char *s)
         }
     }
     return s;
-}
-
-static bool is_ident(const char *s)
-{
-    if (!s || !*s) return false;
-    if (!(isalpha((unsigned char)*s) || *s == '_'))
-        return false;
-    for (const char *p = s + 1; *p; ++p) {
-        if (!(isalnum((unsigned char)*p) || *p == '_'))
-            return false;
-    }
-    return true;
 }
 
 static bool parse_int(const char *s, int *out)
@@ -207,16 +195,6 @@ static void parse_symbol_list(ObjFile *obj, char *args, void (*handler)(ObjFile 
         if (!comma) break;
         p = comma + 1;
     }
-}
-
-static int section_index_from_ptr(ObjFile *obj, Section *sec)
-{
-    int idx = 0;
-    for (Iter it = list_iter(obj->sections); !iter_end(it); ++idx) {
-        if (iter_next(&it) == sec)
-            return idx;
-    }
-    return -1;
 }
 
 static AsmInstr *asm_instr_new(const char *op)
@@ -614,5 +592,44 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
             }
         }
     }
+    return 0;
+}
+
+/* === HEX output === */
+static void hex_record(FILE *fp, unsigned char type, unsigned short addr, const unsigned char *data, int len)
+{
+    unsigned char sum = (unsigned char)(len + (addr >> 8) + (addr & 0xFF) + type);
+    fprintf(fp, ":%02X%04X%02X", len, addr, type);
+    for (int i = 0; i < len; ++i) {
+        sum += data[i];
+        fprintf(fp, "%02X", data[i]);
+    }
+    sum = (unsigned char)(~sum + 1);
+    fprintf(fp, "%02X\n", sum);
+}
+
+int c51_write_hex(FILE *fp, const ObjFile *obj)
+{
+    if (!fp || !obj) return -1;
+    Section *code = NULL;
+    for (Iter it = list_iter(obj->sections); !iter_end(it);) {
+        Section *sec = iter_next(&it);
+        if (sec && sec->kind == SEC_CODE) { code = sec; break; }
+    }
+    if (!code || !code->bytes || code->bytes_len == 0) {
+        hex_record(fp, 0x01, 0, NULL, 0);
+        return 0;
+    }
+
+    unsigned short addr = 0;
+    int i = 0;
+    while (i < code->bytes_len) {
+        int chunk = code->bytes_len - i;
+        if (chunk > 16) chunk = 16;
+        hex_record(fp, 0x00, addr, code->bytes + i, chunk);
+        addr += (unsigned short)chunk;
+        i += chunk;
+    }
+    hex_record(fp, 0x01, 0, NULL, 0);
     return 0;
 }
