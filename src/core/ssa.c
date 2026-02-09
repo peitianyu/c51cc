@@ -690,6 +690,10 @@ static ValueName ssa_build_offset(SSABuild *b, ValueName ptr, ValueName idx, int
     // 实际实现先用乘法再相加，或依赖后端优化
     Instr *i = ssa_make_instr(b, IROP_OFFSET);
     i->dest = ssa_new_value(b);
+    /* 标记结果为指针类型，便于后续打印与类型相关的分析 */
+    i->type = ssa_alloc(sizeof(Ctype));
+    i->type->type = CTYPE_PTR;
+    i->type->ptr = NULL;
     i->imm.ival = elem_size;
     ssa_add_arg(i, ptr);
     ssa_add_arg(i, idx);
