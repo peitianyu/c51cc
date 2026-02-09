@@ -93,7 +93,8 @@ static void select_v16_reg_pairs(Func *f)
     if (!f || !g_v16_reg_map) return;
     if (func_has_call(f)) return;
 
-    int pairs[2][2] = { {6, 7}, {4, 5} };
+    /* 寄存器对：{低字节, 高字节} = {R7, R6} 或 {R5, R4} */
+    int pairs[2][2] = { {7, 6}, {5, 4} };
     int picked = 0;
 
     for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {

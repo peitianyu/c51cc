@@ -767,6 +767,7 @@ static void emit_addsub16(Section *sec, Instr *ins, bool is_sub, Func *func, Blo
             }
             char *l_skip = new_label(is_sub ? "dec_skip" : "inc_skip");
             emit_ins1(sec, is_sub ? "dec" : "inc", d0);
+            emit_ins2(sec, "mov", "A", d0);   /* jnz 检查 A 寄存器 */
             emit_ins1(sec, "jnz", l_skip);
             emit_ins1(sec, is_sub ? "dec" : "inc", d1);
             emit_label(sec, l_skip);
@@ -2304,7 +2305,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                 } else {
                     emit_ins2(sec, "mov", "r7", vreg(v));
                 }
-                emit_ins2(sec, "mov", "r6", "#0");
+                /* 8位返回值只需设置r7，r6无需清零 */
             }
         } else if (has_imm_tag(ins)) {
             if (func && func->ret_type && func->ret_type->size >= 2) {
@@ -2316,11 +2317,10 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             } else {
                 snprintf(buf, sizeof(buf), "#%ld", ins->imm.ival & 0xFF);
                 emit_ins2(sec, "mov", "r7", buf);
-                emit_ins2(sec, "mov", "r6", "#0");
+                /* 8位立即数返回值只需设置r7，r6无需清零 */
             }
         } else {
-            emit_ins2(sec, "mov", "r7", "#0");
-            emit_ins2(sec, "mov", "r6", "#0");
+            /* void函数：无需设置返回值寄存器 */
         }
         
         if (func && func->stack_size > 0) emit_frame_epilogue(sec, func->stack_size);
