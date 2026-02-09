@@ -1242,6 +1242,10 @@ static void emit_eqne16(Section *sec, Instr *ins, bool is_ne)
 {
     ValueName a = *(ValueName *)list_get(ins->args, 0);
     ValueName b = *(ValueName *)list_get(ins->args, 1);
+    
+    /* 检查是否用于 bool 返回 */
+    bool is_bool_result = ins->type && ins->type->type == CTYPE_BOOL;
+    
     char *l_hit = new_label(is_ne ? "ne_hit" : "eq_hit");
     char *l_end = new_label(is_ne ? "ne_end" : "eq_end");
     
@@ -1251,10 +1255,27 @@ static void emit_eqne16(Section *sec, Instr *ins, bool is_ne)
     
     emit_eqne16_check_zero(sec, a, true, a_is_zero, b_is_zero, a, b, l_hit);
     
-    emit_ins2(sec, "mov", vreg(ins->dest), is_ne ? "#0" : "#1");
-    emit_ins1(sec, "sjmp", l_end);
-    emit_label(sec, l_hit);
-    emit_ins2(sec, "mov", vreg(ins->dest), is_ne ? "#1" : "#0");
+    if (is_bool_result) {
+        /* 直接设置 Carry Flag */
+        /* 对于 EQ: 相等 C=1, 不等 C=0 */
+        /* 对于 NE: 不等 C=1, 相等 C=0 */
+        if (is_ne) {
+            emit_ins1(sec, "clr", "C");
+            emit_ins1(sec, "sjmp", l_end);
+            emit_label(sec, l_hit);
+            emit_ins1(sec, "setb", "C");
+        } else {
+            emit_ins1(sec, "setb", "C");
+            emit_ins1(sec, "sjmp", l_end);
+            emit_label(sec, l_hit);
+            emit_ins1(sec, "clr", "C");
+        }
+    } else {
+        emit_ins2(sec, "mov", vreg(ins->dest), is_ne ? "#0" : "#1");
+        emit_ins1(sec, "sjmp", l_end);
+        emit_label(sec, l_hit);
+        emit_ins2(sec, "mov", vreg(ins->dest), is_ne ? "#1" : "#0");
+    }
     emit_label(sec, l_end);
     
     free(l_hit); free(l_end);
@@ -1603,6 +1624,34 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             g_pending_cmp.is_signed = is_signed_type(ins->type);
             g_pending_cmp.is_16 = IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2 ||
                                  is_v16_value(GET_ARG(0)) || is_v16_value(GET_ARG(1));
+            break;
+        }
+        /* 检查是否用于 bool 返回：如果是，直接设置 Carry Flag */
+        if (ins->type && ins->type->type == CTYPE_BOOL) {
+            /* EQ 直接设置 C: 相等 C=1, 不等 C=0 */
+            char *l_true = new_label("eq_true");
+            char *l_end = new_label("eq_end");
+            int cval = 0;
+            bool b_const = const_map_get(GET_ARG(1), &cval);
+            bool a_const = const_map_get(GET_ARG(0), &cval);
+            if (a_const || b_const) {
+                ValueName v = a_const ? GET_ARG(1) : GET_ARG(0);
+                char ibuf[16];
+                fmt_imm8(ibuf, sizeof(ibuf), cval);
+                emit_ins2(sec, "mov", "A", vreg(v));
+                emit_ins3(sec, "cjne", "A", ibuf, l_true);
+            } else {
+                emit_ins2(sec, "mov", "A", VREG(0));
+                emit_ins3(sec, "cjne", "A", VREG(1), l_true);
+            }
+            /* 相等: C=1 */
+            emit_ins1(sec, "setb", "C");
+            emit_ins1(sec, "sjmp", l_end);
+            emit_label(sec, l_true);
+            /* 不等: C=0 (cjne 后 C=0 表示 A >= operand，这里是不等，所以 C=0) */
+            emit_ins1(sec, "clr", "C");
+            emit_label(sec, l_end);
+            free(l_true); free(l_end);
             break;
         }
         if (IS_16BIT() || val_size(GET_ARG(0)) >= 2 || val_size(GET_ARG(1)) >= 2)
@@ -2190,23 +2239,42 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             if (is_bool_ret) {
                 /* bool 类型通过 Carry Flag 返回: C=1 表示 true, C=0 表示 false */
                 int cval;
-                if (const_map_get(v, &cval)) {
+                /* 检查值是否已经在 Carry Flag 中（通过比较操作直接设置的 bool） */
+                    /* 检测前一个指令是否是直接设置 Carry Flag 的比较操作 */
+                    Instr *prev = NULL;
+                    if (cur_block && cur_block->instrs) {
+                        for (int i = 0; i < cur_block->instrs->len; i++) {
+                            Instr *cur = (Instr *)list_get(cur_block->instrs, i);
+                            if (cur->dest == v) {
+                                prev = cur;
+                                break;
+                            }
+                        }
+                    }
+                    bool cf_already_set = prev && (prev->op == IROP_EQ || prev->op == IROP_NE ||
+                                                   prev->op == IROP_LT || prev->op == IROP_LE ||
+                                                   prev->op == IROP_GT || prev->op == IROP_GE) &&
+                                          prev->type && prev->type->type == CTYPE_BOOL;
+                    
+                    if (cf_already_set) {
+                        /* Carry Flag 已经设置好了，无需任何操作 */
+                    } else if (const_map_get(v, &cval)) {
                         if (cval) emit_ins1(sec, "setb", "C");
                         else emit_ins1(sec, "clr", "C");
                     } else {
-                            /* 将值转换为 Carry Flag: 1 -> setb C, 0 -> clr C */
-                            char *l_true = new_label("bool_true");
-                            char *l_end = new_label("bool_end");
-                            emit_ins2(sec, "mov", "A", vreg(v));
-                            emit_ins1(sec, "jnz", l_true);
-                            emit_ins1(sec, "clr", "C");
-                            emit_ins1(sec, "sjmp", l_end);
-                            emit_label(sec, l_true);
-                            emit_ins1(sec, "setb", "C");
-                            emit_label(sec, l_end);
-                            free(l_true);
-                            free(l_end);
-                        }
+                        /* 将值转换为 Carry Flag: 1 -> setb C, 0 -> clr C */
+                        char *l_true = new_label("bool_true");
+                        char *l_end = new_label("bool_end");
+                        emit_ins2(sec, "mov", "A", vreg(v));
+                        emit_ins1(sec, "jnz", l_true);
+                        emit_ins1(sec, "clr", "C");
+                        emit_ins1(sec, "sjmp", l_end);
+                        emit_label(sec, l_true);
+                        emit_ins1(sec, "setb", "C");
+                        emit_label(sec, l_end);
+                        free(l_true);
+                        free(l_end);
+                    }
             } else if (func && func->ret_type && func->ret_type->size >= 2) {
                 int cval;
                 if (const_map_get(v, &cval)) {
