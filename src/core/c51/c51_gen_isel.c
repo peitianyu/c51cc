@@ -1341,6 +1341,16 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                     pair->hi = 6;  /* R6 - 高字节 */
                     dict_put(g_v16_reg_map, vreg_key(ins->dest), pair);
                 }
+                /* 对于指针参数，需要保存到栈槽以便通过 @r0 访问 */
+                if (pt && pt->type == CTYPE_PTR) {
+                    int addr = v16_addr(ins->dest);
+                    char dst_lo[64], dst_hi[64];
+                    fmt_v16_direct(dst_lo, sizeof(dst_lo), addr);
+                    fmt_v16_direct(dst_hi, sizeof(dst_hi), addr + 1);
+                    emit_ins2(sec, "mov", dst_lo, "r7");
+                    emit_ins2(sec, "mov", dst_hi, "r6");
+                    addr_map_put_stack(ins->dest, addr, pt);
+                }
             } else if (byte_off == 2) {
                 /* 第2个16位参数映射到 R4/R5 (Keil C51约定) */
                 (void)v16_addr(ins->dest);

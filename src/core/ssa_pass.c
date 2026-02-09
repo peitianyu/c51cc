@@ -292,7 +292,6 @@ static bool is_volatile_mem(const Instr *i) {
 
 static bool is_pure_instr(const Instr *i) {
     switch (i->op) {
-    case IROP_PARAM:
     case IROP_CONST:
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
     case IROP_AND: case IROP_OR:  case IROP_XOR:
