@@ -95,6 +95,7 @@ void regalloc_section_asminstrs(Section *sec)
     int *active = gen_alloc(sizeof(int) * active_cap);
     int active_len = 0;
 
+    int next_spill = 0x30;
     for (int i = 0; i < interval_count; ++i) {
         Interval cur = intervals[i];
         for (int j = 0; j < active_len; ) {
@@ -144,7 +145,8 @@ void regalloc_section_asminstrs(Section *sec)
         }
 
         if (spill_candidate >= 0 && spill_end > cur.end) {
-            spill_addr[spill_candidate] = 0x30 + spill_candidate;
+            /* assign a compact spill slot for the spilled virtual register */
+            if (spill_addr[spill_candidate] < 0) spill_addr[spill_candidate] = next_spill++;
             reg_of[cur.v] = reg_of[spill_candidate];
             reg_of[spill_candidate] = -1;
             for (int j = 0; j < active_len; ++j) {
@@ -156,7 +158,8 @@ void regalloc_section_asminstrs(Section *sec)
             }
             active[active_len++] = cur.v;
         } else {
-            spill_addr[cur.v] = 0x30 + cur.v;
+            /* assign a compact spill slot */
+            if (spill_addr[cur.v] < 0) spill_addr[cur.v] = next_spill++;
         }
     }
 

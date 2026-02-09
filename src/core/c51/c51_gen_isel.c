@@ -1305,22 +1305,54 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         int stack_off = 2 + (byte_off - 3);
         
         if (size >= 2) {
-            int addr = v16_addr(ins->dest);
-            for (int b = 0; b < 2; ++b) {
-                int byte_idx = byte_off + b;
-                if (byte_idx < 3) {
-                    char regbuf[8], dst[64];
-                    snprintf(regbuf, sizeof(regbuf), "r%d", 1 + byte_idx);
-                    fmt_v16_direct(dst, sizeof(dst), addr + b);
-                    emit_ins2(sec, "mov", dst, regbuf);
-                } else if (use_stack) {
+            if (byte_off == 0 && !use_stack) {
+                /* 第一个16位参数按照 Keil C51 约定：
+                 * R6 = 高字节, R7 = 低字节
+                 * 这与16位返回值约定一致 (R6=高, R7=低)
+                 * 因此对于这种简单参数传递函数，无需任何 mov 指令
+                 */
+                /* 确保创建 v16 映射，使 is_v16_value 返回 true */
+                (void)v16_addr(ins->dest);
+                if (g_v16_reg_map) {
+                    V16RegPair *pair = gen_alloc(sizeof(V16RegPair));
+                    pair->lo = 7;  /* R7 - 低字节 */
+                    pair->hi = 6;  /* R6 - 高字节 */
+                    dict_put(g_v16_reg_map, vreg_key(ins->dest), pair);
+                }
+            } else if (byte_off == 2) {
+                /* 第2个16位参数映射到 R4/R5 (Keil C51约定) */
+                (void)v16_addr(ins->dest);
+                if (g_v16_reg_map) {
+                    V16RegPair *pair = gen_alloc(sizeof(V16RegPair));
+                    pair->lo = 5;  /* R5 - 低字节 */
+                    pair->hi = 4;  /* R4 - 高字节 */
+                    dict_put(g_v16_reg_map, vreg_key(ins->dest), pair);
+                }
+            } else if (byte_off < 3) {
+                /* 其他寄存器参数 */
+                int addr = v16_addr(ins->dest);
+                for (int b = 0; b < 2; ++b) {
+                    int byte_idx = byte_off + b;
+                    if (byte_idx < 3) {
+                        char regbuf[8], dst[64];
+                        snprintf(regbuf, sizeof(regbuf), "r%d", 1 + byte_idx);
+                        fmt_v16_direct(dst, sizeof(dst), addr + b);
+                        emit_ins2(sec, "mov", dst, regbuf);
+                    }
+                }
+            } else if (use_stack) {
+                int addr = v16_addr(ins->dest);
+                for (int b = 0; b < 2; ++b) {
+                    int byte_idx = byte_off + b;
                     emit_load_stack_param_to_direct(sec, 2 + (byte_idx - 3), addr + b, func && func->stack_size > 0);
                 }
             }
         } else {
+            /* 8位参数映射：第1个->R7, 第2个->R5, 第3个->R3 */
+            static const int r8_param_map[3] = {7, 5, 3};
             if (!use_stack && byte_off >= 0 && byte_off < 3) {
                 char regbuf[8];
-                snprintf(regbuf, sizeof(regbuf), "r%d", 1 + byte_off);
+                snprintf(regbuf, sizeof(regbuf), "r%d", r8_param_map[byte_off]);
                 emit_ins2(sec, "mov", vreg(ins->dest), regbuf);
             } else if (use_stack) {
                 emit_load_stack_param(sec, stack_off, vreg(ins->dest), func && func->stack_size > 0);
@@ -2039,39 +2071,60 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     
     case IROP_CALL: {
         char *fname = list_get(ins->labels, 0);
-        int nargs = ins->args ? ins->args->len : 0, total_bytes = 0;
-        int *arg_off = nargs > 0 ? gen_alloc(sizeof(int) * nargs) : NULL;
+        int nargs = ins->args ? ins->args->len : 0;
         
-        // 计算参数字节数
+        /* Keil C51 参数寄存器映射：
+         * byte 0 -> R7 (第1个参数的低位)
+         * byte 1 -> R6 (第1个16位参数的高位)
+         * byte 2 -> R5 (第2个参数的低位)
+         * byte 3 -> R4 (第2个16位参数的高位)
+         * byte 4 -> R3 (第3个参数的低位)
+         * bytes >= 5 -> 栈
+         */
+        static const int keil_reg_for_byte[5] = {7, 6, 5, 4, 3};
+        
+        int total_bytes = 0;
+        int *arg_off = nargs > 0 ? gen_alloc(sizeof(int) * nargs) : NULL;
+        int *arg_sz = nargs > 0 ? gen_alloc(sizeof(int) * nargs) : NULL;
+        
+        // 计算参数字节数和偏移
         for (int i = 0; i < nargs; i++) {
             ValueName v = GET_ARG(i);
             if (arg_off) arg_off[i] = total_bytes;
-            total_bytes += (val_size(v) >= 2) ? 2 : 1;
+            int sz = (val_size(v) >= 2) ? 2 : 1;
+            if (arg_sz) arg_sz[i] = sz;
+            total_bytes += sz;
         }
-        int extra = total_bytes > 3 ? total_bytes - 3 : 0;
+        int reg_bytes = (total_bytes > 5) ? 5 : total_bytes;
+        int stack_bytes = total_bytes - reg_bytes;
         
-        // 保存寄存器
+        // 保存寄存器 R0-R3
         for (int r = 0; r <= 3; r++) {
             snprintf(buf, sizeof(buf), "r%d", r);
             emit_ins1(sec, "push", buf);
         }
         
-        // 装载寄存器参数（R1-R3，按字节顺序）
+        // 装载寄存器参数（R7, R6, R5, R4, R3）
         for (int i = 0; i < nargs; i++) {
             ValueName v = GET_ARG(i);
-            int sz = val_size(v);
+            int sz = arg_sz[i];
             int cval = 0;
             bool is_const = const_map_get(v, &cval);
+            
             for (int b = 0; b < sz; ++b) {
-                int byte_idx = arg_off ? (arg_off[i] + b) : 0;
-                if (byte_idx >= 3) continue;
+                int byte_idx = arg_off[i] + b;  // 该字节在整个参数列表中的位置
+                if (byte_idx >= 5) continue;    // 超过寄存器范围，跳过
+                
+                int target_reg = keil_reg_for_byte[byte_idx];
                 char rbuf[8];
-                snprintf(rbuf, sizeof(rbuf), "r%d", 1 + byte_idx);
+                snprintf(rbuf, sizeof(rbuf), "r%d", target_reg);
+                
                 if (is_const) {
-                    snprintf(buf, sizeof(buf), "#%d", (b == 0) ? (cval & 0xFF) : ((cval >> 8) & 0xFF));
+                    int byte_val = (b == 0) ? (cval & 0xFF) : ((cval >> 8) & 0xFF);
+                    snprintf(buf, sizeof(buf), "#%d", byte_val);
                     emit_ins2(sec, "mov", rbuf, buf);
                 } else if (sz >= 2) {
-                    AddrPair p; fmt_addr_pair(&p, v16_addr(v));
+                    AddrPair p; fmt_v16_pair(v, &p);
                     emit_ins2(sec, "mov", rbuf, b == 0 ? p.lo : p.hi);
                 } else {
                     emit_ins2(sec, "mov", rbuf, vreg(v));
@@ -2079,37 +2132,29 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
             }
         }
         
-        // 压栈多余参数（超过 R1-R3 的字节）
-        if (total_bytes > 3) {
+        // 压栈多余参数（超过寄存器范围的5个字节）
+        if (stack_bytes > 0) {
             for (int i = nargs - 1; i >= 0; i--) {
                 ValueName v = GET_ARG(i);
-                int sz = val_size(v);
+                int sz = arg_sz[i];
                 int cval = 0;
                 bool is_const = const_map_get(v, &cval);
-                if (sz >= 2) {
-                    AddrPair p; fmt_addr_pair(&p, v16_addr(v));
-                    for (int b = sz - 1; b >= 0; --b) {
-                        int byte_idx = arg_off ? (arg_off[i] + b) : 0;
-                        if (byte_idx < 3) continue;
-                        if (is_const) {
-                            snprintf(buf, sizeof(buf), "#%d", (b == 0) ? (cval & 0xFF) : ((cval >> 8) & 0xFF));
-                            emit_ins2(sec, "mov", "A", buf);
-                        } else {
-                            emit_ins2(sec, "mov", "A", b == 0 ? p.lo : p.hi);
-                        }
-                        emit_ins1(sec, "push", "A");
+                
+                for (int b = sz - 1; b >= 0; --b) {
+                    int byte_idx = arg_off[i] + b;
+                    if (byte_idx < 5) continue;  // 已在寄存器中，跳过
+                    
+                    if (is_const) {
+                        int byte_val = (b == 0) ? (cval & 0xFF) : ((cval >> 8) & 0xFF);
+                        snprintf(buf, sizeof(buf), "#%d", byte_val);
+                        emit_ins2(sec, "mov", "A", buf);
+                    } else if (sz >= 2) {
+                        AddrPair p; fmt_v16_pair(v, &p);
+                        emit_ins2(sec, "mov", "A", b == 0 ? p.lo : p.hi);
+                    } else {
+                        emit_ins2(sec, "mov", "A", vreg(v));
                     }
-                } else {
-                    int byte_idx = arg_off ? arg_off[i] : 0;
-                    if (byte_idx >= 3) {
-                        if (is_const) {
-                            snprintf(buf, sizeof(buf), "#%d", cval & 0xFF);
-                            emit_ins2(sec, "mov", "A", buf);
-                        } else {
-                            emit_ins2(sec, "mov", "A", vreg(v));
-                        }
-                        emit_ins1(sec, "push", "A");
-                    }
+                    emit_ins1(sec, "push", "A");
                 }
             }
         }
@@ -2117,7 +2162,7 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
         emit_ins1(sec, "lcall", fname ? fname : "<null>");
         
         // 清理栈
-        for (int i = 0; i < extra; i++) emit_ins1(sec, "pop", "r0");
+        for (int i = 0; i < stack_bytes; i++) emit_ins1(sec, "pop", "r0");
         for (int r = 3; r >= 0; r--) {
             snprintf(buf, sizeof(buf), "r%d", r);
             emit_ins1(sec, "pop", buf);
@@ -2147,9 +2192,15 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
                     snprintf(buf, sizeof(buf), "#%d", (cval >> 8) & 0xFF);
                     emit_ins2(sec, "mov", "r6", buf);
                 } else if (is_v16_value(v)) {
-                    AddrPair s; fmt_addr_pair(&s, v16_addr(v));
-                    emit_ins2(sec, "mov", "r7", s.lo);
-                    emit_ins2(sec, "mov", "r6", s.hi);
+                    /* 检查值是否已经在返回值寄存器 R6/R7 中 */
+                    int rlo = -1, rhi = -1;
+                    if (v16_reg_pair(v, &rlo, &rhi) && rlo == 7 && rhi == 6) {
+                        /* 值已经在 R7(低字节)/R6(高字节)，无需任何 mov */
+                    } else {
+                        AddrPair s; fmt_v16_pair(v, &s);
+                        emit_ins2(sec, "mov", "r7", s.lo);
+                        emit_ins2(sec, "mov", "r6", s.hi);
+                    }
                 } else {
                     emit_ins2(sec, "mov", "r7", vreg(v));
                     emit_ins2(sec, "mov", "r6", "#0");
