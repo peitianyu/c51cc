@@ -1,13 +1,17 @@
 // Instruction selection tests: arithmetic/bit/shift/compare
 
-int ret_param(int x) {
-    return x;
-}
+// int ret_param(int x) {
+//     return x;
+// }
 
-int add_sub(int a, int b) {
-    int c = a + b;
-    int d = a - b;
-    return c ^ d;
+// int add_sub(int a, int b) {
+//     int c = a + b;
+//     int d = a - b;
+//     return c ^ d;
+// }
+
+int add_ptr(int *p, int x) {
+    return *p + x;
 }
 
 // int mul_div_mod(int a, int b) {

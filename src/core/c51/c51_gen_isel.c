@@ -2182,9 +2182,32 @@ void emit_instr(Section *sec, Instr *ins, Func *func, Block *cur_block)
     }
     
     case IROP_RET: {
+        /* 检测 bool/bit 类型返回 - 使用 Carry Flag */
+        bool is_bool_ret = func && func->ret_type && func->ret_type->type == CTYPE_BOOL;
+        
         if (ins->args && ins->args->len > 0) {
             ValueName v = GET_ARG(0);
-            if (func && func->ret_type && func->ret_type->size >= 2) {
+            if (is_bool_ret) {
+                /* bool 类型通过 Carry Flag 返回: C=1 表示 true, C=0 表示 false */
+                int cval;
+                if (const_map_get(v, &cval)) {
+                        if (cval) emit_ins1(sec, "setb", "C");
+                        else emit_ins1(sec, "clr", "C");
+                    } else {
+                            /* 将值转换为 Carry Flag: 1 -> setb C, 0 -> clr C */
+                            char *l_true = new_label("bool_true");
+                            char *l_end = new_label("bool_end");
+                            emit_ins2(sec, "mov", "A", vreg(v));
+                            emit_ins1(sec, "jnz", l_true);
+                            emit_ins1(sec, "clr", "C");
+                            emit_ins1(sec, "sjmp", l_end);
+                            emit_label(sec, l_true);
+                            emit_ins1(sec, "setb", "C");
+                            emit_label(sec, l_end);
+                            free(l_true);
+                            free(l_end);
+                        }
+            } else if (func && func->ret_type && func->ret_type->size >= 2) {
                 int cval;
                 if (const_map_get(v, &cval)) {
                     snprintf(buf, sizeof(buf), "#%d", cval & 0xFF);
