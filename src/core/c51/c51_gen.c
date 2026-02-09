@@ -868,7 +868,8 @@ void emit_u8(Section *sec, unsigned char b)
 
 void emit_u16(Section *sec, int v)
 {
-    unsigned char b[2] = {(unsigned char)(v & 0xFF), (unsigned char)((v >> 8) & 0xFF)};
+    /* 8051 uses big-endian order for 16-bit immediates (high byte first) */
+    unsigned char b[2] = {(unsigned char)((v >> 8) & 0xFF), (unsigned char)(v & 0xFF)};
     section_append_bytes(sec, b, 2);
 }
 

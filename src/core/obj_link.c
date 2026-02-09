@@ -126,8 +126,9 @@ static int apply_relocs(ObjFile *out)
         }
         case RELOC_ABS16: {
             if (offset + 2 > sec->bytes_len) return -1;
-            sec->bytes[offset] = (unsigned char)(sym_addr & 0xFF);
-            sec->bytes[offset + 1] = (unsigned char)((sym_addr >> 8) & 0xFF);
+            /* store 16-bit absolute in big-endian (high byte first) for 8051 */
+            sec->bytes[offset] = (unsigned char)((sym_addr >> 8) & 0xFF);
+            sec->bytes[offset + 1] = (unsigned char)(sym_addr & 0xFF);
             break;
         }
         case RELOC_REL8: {
@@ -141,8 +142,9 @@ static int apply_relocs(ObjFile *out)
             if (offset + 2 > sec->bytes_len) return -1;
             int pc = offset + 2;
             int relv = sym_addr - pc;
-            sec->bytes[offset] = (unsigned char)(relv & 0xFF);
-            sec->bytes[offset + 1] = (unsigned char)((relv >> 8) & 0xFF);
+            /* store relative 16-bit in big-endian (high byte first) */
+            sec->bytes[offset] = (unsigned char)((relv >> 8) & 0xFF);
+            sec->bytes[offset + 1] = (unsigned char)(relv & 0xFF);
             break;
         }
         default:

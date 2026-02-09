@@ -1,3 +1,9 @@
+void start_up()
+{
+    __asm__(
+        "ljmp main");
+}
+
 register char P1 = 0x90;
 
 void delay()
