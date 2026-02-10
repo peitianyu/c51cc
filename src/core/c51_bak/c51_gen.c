@@ -438,20 +438,20 @@ ObjFile *c51_gen_from_ssa(void *ssa)
     /* 1. 生成全局变量 */
     emit_globals_from_ssa(obj, unit);
 
-    // /* 2. 逐个函数 */
-    // for (Iter fit = list_iter(unit->funcs); !iter_end(fit);) {
-    //     Func *f = iter_next(&fit);
-    //     if (!f) continue;
-    //     process_function_ssa(f, obj);
-    // }
+    /* 2. 逐个函数 */
+    for (Iter fit = list_iter(unit->funcs); !iter_end(fit);) {
+        Func *f = iter_next(&fit);
+        if (!f) continue;
+        process_function_ssa(f, obj);
+    }
 
-    // /* 3. 模块级 MMIO 字典 */
-    // dict_free_kv(g_mmio_map);
-    // g_mmio_map = NULL;
+    /* 3. 模块级 MMIO 字典 */
+    dict_free_kv(g_mmio_map);
+    g_mmio_map = NULL;
 
-    // /* 4. 合并顶层 asm 块（若有） */
-    // ObjFile *asm_out = process_asm_blocks_from_ssa(unit, obj);
-    // if (asm_out) return asm_out;
+    /* 4. 合并顶层 asm 块（若有） */
+    ObjFile *asm_out = process_asm_blocks_from_ssa(unit, obj);
+    if (asm_out) return asm_out;
 
     return obj;
 }
@@ -706,40 +706,8 @@ void emit_global_data(ObjFile *obj, GlobalVar *g)
     Section *sec = get_or_create_section(obj, sec_name, kind);
     int offset = sec->bytes_len;
     int size = g->type ? g->type->size : 1;
-    /* 修正常见基础类型与指针的导出大小，避免生成不一致字节数 */
-    if (g->type) {
-        if (g->type->type == CTYPE_CHAR || g->type->type == CTYPE_BOOL) {
-            size = 1;
-        } else if (g->type->type == CTYPE_INT) {
-            size = 2;
-        } else if (g->type->type == CTYPE_LONG) {
-            size = 4;
-        } else if (g->type->type == CTYPE_PTR) {
-            /* 8051 平台上指针使用 16-bit 地址 */
-            size = 2;
-        } else if (g->type->type == CTYPE_ARRAY || g->type->type == CTYPE_STRUCT) {
-            /* 保持已有 size */
-            size = g->type->size;
-        }
-    }
 
-    if (g->init_instr && !list_empty(g->init_instr->labels)) {
-        /* init 是一个带目标标签的常量（例如指针初始化为字符串字面量）
-           在数据段写入占位字节并为标签添加重定位。 */
-        const char *label = (const char *)list_get(g->init_instr->labels, 0);
-        if (size == 1) {
-            emit_abs8(obj, sec, label);
-        } else if (size == 2) {
-            emit_abs16(obj, sec, label);
-        } else if (size == 4) {
-            /* 对于 32-bit，先写两字节重定位，再写剩余零字节（链接器可扩展） */
-            emit_abs16(obj, sec, label);
-            section_append_zeros(sec, 2);
-        } else {
-            /* 无法识别的大小，填充零 */
-            section_append_zeros(sec, size);
-        }
-    } else if (g->init_instr && g->init_instr->imm.blob.bytes && g->init_instr->imm.blob.len > 0) {
+    if (g->init_instr && g->init_instr->imm.blob.bytes && g->init_instr->imm.blob.len > 0) {
         int copy_len = g->init_instr->imm.blob.len;
         if (copy_len > size) copy_len = size;
         section_append_bytes(sec, g->init_instr->imm.blob.bytes, copy_len);

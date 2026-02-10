@@ -580,26 +580,12 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
         if (!has_asminstrs && sec->bytes && sec->bytes_len > 0) {
             int i = 0;
             while (i < sec->bytes_len) {
-                /* 在每个输出块前先打印此偏移处的所有标签（若有） */
                 write_labels_at(fp, obj, sec_index, i);
-
-                /* 计算到下一个符号边界的最大块长度，最多打印16字节一行 */
-                int next_label = sec->bytes_len;
-                for (Iter sit = list_iter(obj->symbols); !iter_end(sit);) {
-                    Symbol *sym = iter_next(&sit);
-                    if (!sym) continue;
-                    if (sym->section != sec_index) continue;
-                    if (sym->value > i && sym->value < next_label) next_label = sym->value;
-                }
-                int chunk = next_label - i;
-                if (chunk <= 0) chunk = 1;
+                fprintf(fp, ".db ");
+                int chunk = sec->bytes_len - i;
                 if (chunk > 16) chunk = 16;
-
-                /* 与指令对齐（4空格缩进），每行最多16字节 */
-                fprintf(fp, "    .db ");
                 for (int j = 0; j < chunk; ++j) {
                     fprintf(fp, "0x%02X%s", sec->bytes[i + j], (j + 1 == chunk) ? "" : ",");
-                    if (j + 1 < chunk) fprintf(fp, "");
                 }
                 fprintf(fp, "\n");
                 i += chunk;

@@ -1782,14 +1782,49 @@ void ssa_convert_ast(SSABuild *b, Ast *ast) {
             bool has_init = false;
             Instr *init_instr = NULL;
             if (ast->declinit) {
+                /* 如果初始化器是字符串字面量（用于指针或数组），确保把字符串本身作为独立全局加入unit，这样字符串会被导出 */
+                if (ast->declinit->type == AST_STRING && ast->declinit->slabel) {
+                    if (!ssa_find_global(b->unit, ast->declinit->slabel)) {
+                        /* 构造一个持久化的 array 类型用于字符串常量的初始化 */
+                        int slen = (int)strlen(ast->declinit->sval) + 1;
+                        Ctype *sctype = ssa_alloc(sizeof(Ctype));
+                        sctype->type = CTYPE_ARRAY;
+                        sctype->ptr = ctype_char;
+                        sctype->size = slen;
+                        /* 将字符串常量放入 code 段 (.const) */
+                        sctype->attr = (6 << 7); /* ctype_data = 6 */
+                        sctype->bit_offset = 0;
+                        sctype->bit_size = 0;
+                        sctype->fields = NULL;
+                        sctype->len = slen;
+
+                        Instr *sinit = build_global_init_instr(b, sctype, ast->declinit);
+                        bool s_has_init = (sinit != NULL);
+                        ssa_add_global(b, ast->declinit->slabel, sctype, 0, s_has_init, sinit, true, false);
+                    }
+                }
                 if (ast->declinit->type == AST_LITERAL &&
                     is_inttype(ast->declinit->ctype)) {
                     init_val = ast->declinit->ival;
                     has_init = true;
                 }
-                init_instr = build_global_init_instr(b, var->ctype, ast->declinit);
-                if (init_instr && init_instr->imm.blob.bytes && init_instr->imm.blob.len > 0) {
+
+                /* 如果变量是指针并由字符串字面量初始化，创建一个带目标标签的 init_instr，
+                   以便后端为其生成重定位（pointer -> string label） */
+                if (ast->declinit->type == AST_STRING && var->ctype && var->ctype->type == CTYPE_PTR && ast->declinit->slabel) {
+                    Instr *pinit = ssa_make_instr(b, IROP_CONST);
+                    list_push(pinit->labels, ssa_strdup(ast->declinit->slabel));
+                    init_instr = pinit;
+                    /* 将指针变量本身也标记为 code 段，使其符号出现在 .const */
+                    if (var->ctype) {
+                        var->ctype->attr |= (6 << 7);
+                    }
                     has_init = true;
+                } else {
+                    init_instr = build_global_init_instr(b, var->ctype, ast->declinit);
+                    if (init_instr && init_instr->imm.blob.bytes && init_instr->imm.blob.len > 0) {
+                        has_init = true;
+                    }
                 }
             }
             CtypeAttr attr = get_attr(var->ctype->attr);
@@ -2275,9 +2310,39 @@ static void ssa_print_func(FILE *fp, Func *f) {
 
 void ssa_print(FILE *fp, SSAUnit *unit) {
     if (unit->globals && unit->globals->len > 0) {
+        /* 首先构建寄存器字节（sfr）地址 -> 名称映射，用于将 register bool 输出为 sbit */
+        Dict *reg_map = make_dict(NULL);
+        for (Iter it = list_iter(unit->globals); !iter_end(it);) {
+            GlobalVar *g = iter_next(&it);
+            if (!g || !g->type) continue;
+            CtypeAttr a = get_attr(g->type->attr);
+            if (a.ctype_register && g->type->type != CTYPE_BOOL && g->has_init) {
+                char key[8];
+                snprintf(key, sizeof(key), "%02X", (int)(g->init_value & 0xFF));
+                dict_put(reg_map, ssa_strdup(key), ssa_strdup(g->name));
+            }
+        }
+
         fprintf(fp, "@globals {\n");
         for (Iter it = list_iter(unit->globals); !iter_end(it);) {
             GlobalVar *g = iter_next(&it);
+            if (!g) continue;
+            if (g->type && get_attr(g->type->attr).ctype_register && g->type->type == CTYPE_BOOL && g->has_init) {
+                /* 按规则 A：当全局的 init_value 表示位地址（低3位位索引）时，
+                   将其解析为 parent_addr + bit_index 并尝试找父 SFR 名称 */
+                int addr = (int)g->init_value;
+                int base = addr & ~0x7;
+                int bit = addr & 0x7;
+                char key[8];
+                snprintf(key, sizeof(key), "%02X", base & 0xFF);
+                char *parent = (char *)dict_get(reg_map, key);
+                if (parent) {
+                    fprintf(fp, "  sbit %s = %s^%d\n", g->name, parent, bit);
+                    continue;
+                }
+                /* 回退：如果找不到父寄存器，仍以原格式打印 */
+            }
+
             fprintf(fp, "  @%s: %s", g->name, ctype_to_string(g->type));
             if (g->has_init) {
                 if (g->init_instr && g->init_instr->op == IROP_CONST &&
