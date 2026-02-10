@@ -2327,20 +2327,15 @@ void ssa_print(FILE *fp, SSAUnit *unit) {
         for (Iter it = list_iter(unit->globals); !iter_end(it);) {
             GlobalVar *g = iter_next(&it);
             if (!g) continue;
-            if (g->type && get_attr(g->type->attr).ctype_register && g->type->type == CTYPE_BOOL && g->has_init) {
-                /* 按规则 A：当全局的 init_value 表示位地址（低3位位索引）时，
-                   将其解析为 parent_addr + bit_index 并尝试找父 SFR 名称 */
+            if (g->type && get_attr(g->type->attr).ctype_register  && g->has_init) {
                 int addr = (int)g->init_value;
-                int base = addr & ~0x7;
-                int bit = addr & 0x7;
-                char key[8];
-                snprintf(key, sizeof(key), "%02X", base & 0xFF);
-                char *parent = (char *)dict_get(reg_map, key);
-                if (parent) {
-                    fprintf(fp, "  sbit %s = %s^%d\n", g->name, parent, bit);
-                    continue;
+                if(g->type->type == CTYPE_BOOL) {
+                    fprintf(fp, "  @%s sbit = {0x%X}\n", g->name, addr); continue;
+                } else if (g->type->type == CTYPE_CHAR) {
+                    fprintf(fp, "  @%s sfr = {0x%X} ; char\n", g->name, addr); continue;
+                } else if (g->type->type == CTYPE_INT) {
+                    fprintf(fp, "  @%s sfr16 = {0x%X} ; int\n", g->name, addr); continue;
                 }
-                /* 回退：如果找不到父寄存器，仍以原格式打印 */
             }
 
             fprintf(fp, "  @%s: %s", g->name, ctype_to_string(g->type));
