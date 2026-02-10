@@ -9,6 +9,7 @@ register char  B       = 0xF0;
 register char  SCON    = 0x98;
 register char  SBUF    = 0x99;
 register char  IE      = 0xA8;
+register char  TCON    = 0x88;
 
 // ----- 2. SBIT 定义（位寻址）-----
 register bool  P1_0    = 0x90;  // P1.0
@@ -36,14 +37,14 @@ unsigned xdata char * ptr_xdata;
 unsigned code  char * ptr_code;
 unsigned char *cod = "Hello, Code Space!";
 
-// // ----- 6. 基础存储区访问测试 -----
-// int test_data_rw(int v) {
-//     unsigned char data local;
-//     g_data = (unsigned char)v;
-//     local = g_data;
-//     g_data = local + 1;
-//     return g_data;
-// }
+// ----- 6. 基础存储区访问测试 -----
+int test_data_rw(int v) {
+    unsigned char data local;
+    g_data = (unsigned char)v;
+    local = g_data;
+    g_data = local + 1;
+    return g_data;
+}
 
 // int test_idata_rw(int v) {
 //     unsigned char idata local;

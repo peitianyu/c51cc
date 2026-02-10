@@ -438,20 +438,20 @@ ObjFile *c51_gen_from_ssa(void *ssa)
     /* 1. 生成全局变量 */
     emit_globals_from_ssa(obj, unit);
 
-    // /* 2. 逐个函数 */
-    // for (Iter fit = list_iter(unit->funcs); !iter_end(fit);) {
-    //     Func *f = iter_next(&fit);
-    //     if (!f) continue;
-    //     process_function_ssa(f, obj);
-    // }
+    /* 2. 逐个函数 */
+    for (Iter fit = list_iter(unit->funcs); !iter_end(fit);) {
+        Func *f = iter_next(&fit);
+        if (!f) continue;
+        process_function_ssa(f, obj);
+    }
 
-    // /* 3. 模块级 MMIO 字典 */
-    // dict_free_kv(g_mmio_map);
-    // g_mmio_map = NULL;
+    /* 3. 模块级 MMIO 字典 */
+    dict_free_kv(g_mmio_map);
+    g_mmio_map = NULL;
 
-    // /* 4. 合并顶层 asm 块（若有） */
-    // ObjFile *asm_out = process_asm_blocks_from_ssa(unit, obj);
-    // if (asm_out) return asm_out;
+    /* 4. 合并顶层 asm 块（若有） */
+    ObjFile *asm_out = process_asm_blocks_from_ssa(unit, obj);
+    if (asm_out) return asm_out;
 
     return obj;
 }
