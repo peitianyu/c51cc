@@ -2310,7 +2310,6 @@ static void ssa_print_func(FILE *fp, Func *f) {
 
 void ssa_print(FILE *fp, SSAUnit *unit) {
     if (unit->globals && unit->globals->len > 0) {
-        /* 首先构建寄存器字节（sfr）地址 -> 名称映射，用于将 register bool 输出为 sbit */
         Dict *reg_map = make_dict(NULL);
         for (Iter it = list_iter(unit->globals); !iter_end(it);) {
             GlobalVar *g = iter_next(&it);
