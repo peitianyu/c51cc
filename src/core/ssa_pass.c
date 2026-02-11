@@ -2649,7 +2649,7 @@ TEST(test, ssa_opt) {
     for (Iter i = list_iter(toplevels); !iter_end(i);) {
         Ast *v = iter_next(&i);
         printf("ast: %s\n", ast_to_string(v));
-        ssa_convert_ast(b, v);
+        ast_to_ssa(b, v);
     }
     // printf("\n=== SSA Before Optimization ===\n");
     // ssa_print(stdout, b->unit);

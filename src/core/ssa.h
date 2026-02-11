@@ -122,7 +122,7 @@ typedef struct SSABuild {
 
 SSABuild* ssa_build_create(void);
 void      ssa_build_destroy(SSABuild *b);
-void      ssa_convert_ast(SSABuild *b, Ast *ast);
+void      ast_to_ssa(SSABuild *b, Ast *ast);
 
 void      ssa_print_instr(FILE *fp, Instr *i, List *consts);
 void      ssa_print(FILE *fp, SSAUnit *unit);

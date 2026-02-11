@@ -1763,7 +1763,7 @@ static void gen_interrupt_func(SSABuild *b, Ast *ast) {
     }
 }
 
-void ssa_convert_ast(SSABuild *b, Ast *ast) {
+void ast_to_ssa(SSABuild *b, Ast *ast) {
     if (!ast) return;
     switch (ast->type) {
     case AST_FUNC_DEF: gen_func(b, ast); break;
@@ -2390,7 +2390,7 @@ TEST(test, ssa) {
     for (Iter i = list_iter(toplevels); !iter_end(i);) {
         Ast *v = iter_next(&i);
         printf("ast: %s\n", ast_to_string(v));
-        ssa_convert_ast(b, v);
+        ast_to_ssa(b, v);
     }
     
     printf("\n=== SSA Output ===\n");
