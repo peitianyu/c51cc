@@ -1,31 +1,88 @@
-#include "c51_gen_internal.h"
-
+#include "c51_gen.h"
+#include "c51_isel.h"
 #include "c51_gen_global_var.h"
-static void process_global_var(C51GenContext *ctx, GlobalVar *g) 
-{
-    if (!g || !g->name || !ctx)             return;
+#include <stdlib.h>
+#include <string.h>
 
-    if (handle_const_global_var(ctx, g))    return; 
-    if (handle_mmio_global_var(ctx, g))     return;
-    if (handle_extern_global_var(ctx, g))   return;
+/* 上下文管理 */
+C51GenContext* c51_ctx_new(void) {
+    C51GenContext* ctx = calloc(1, sizeof(C51GenContext));
+    if (!ctx) return NULL;
+    
+    ctx->obj = obj_new();
+    ctx->value_to_reg = make_dict(NULL);
+    ctx->value_to_addr = make_dict(NULL);
+    ctx->value_type = make_dict(NULL);
+    ctx->value_to_const = make_dict(NULL);
+    ctx->v16_regs = make_dict(NULL);
+    ctx->mmio_map = make_dict(NULL);
+    ctx->temp_values = make_list();
+    ctx->value_in_acc = -1;
+    ctx->label_counter = 0;
+    
+    return ctx;
+}
+
+void c51_ctx_free(C51GenContext* ctx) {
+    if (!ctx) return;
+    
+    // 注意: ctx->obj 由调用者管理
+    
+    if (ctx->value_to_reg) {
+        dict_free(ctx->value_to_reg, free);
+        ctx->value_to_reg = NULL;
+    }
+    if (ctx->value_to_addr) {
+        dict_free(ctx->value_to_addr, free);
+        ctx->value_to_addr = NULL;
+    }
+    if (ctx->value_type) {
+        dict_free(ctx->value_type, NULL);
+        ctx->value_type = NULL;
+    }
+    if (ctx->value_to_const) {
+        dict_free(ctx->value_to_const, free);
+        ctx->value_to_const = NULL;
+    }
+    if (ctx->v16_regs) {
+        dict_free(ctx->v16_regs, free);
+        ctx->v16_regs = NULL;
+    }
+    if (ctx->mmio_map) {
+        dict_free(ctx->mmio_map, NULL);
+        ctx->mmio_map = NULL;
+    }
+    if (ctx->temp_values) {
+        list_free(ctx->temp_values);
+        ctx->temp_values = NULL;
+    }
+    
+    free(ctx);
+}
+
+/* 处理全局变量 */
+static void process_global_var(C51GenContext *ctx, GlobalVar *g)
+{
+    if (!g || !g->name || !ctx) return;
+
+    if (handle_const_global_var(ctx, g)) return;
+    if (handle_mmio_global_var(ctx, g)) return;
+    if (handle_extern_global_var(ctx, g)) return;
     handle_normal_global_var(ctx, g);
 }
 
-#include "c51_gen_function.h"
-static void process_function(C51GenContext *ctx, Func *f) 
+/* 处理函数 */
+static void process_function(C51GenContext *ctx, Func *f)
 {
-    handle_function_init(ctx, f);
-    handle_function_emit(ctx, f);
-    handle_function_regalloc(ctx, f);
-    handle_function_optimize(ctx, f);
-    handle_function_encode(ctx, f);
-    handle_function_cleanup(ctx, f);
+    isel_function(ctx, f);
 }
 
+/* 代码生成主入口 */
 ObjFile *c51_gen(SSAUnit *unit) {
     if(!unit) return NULL;
 
     C51GenContext *ctx = c51_ctx_new();
+    if (!ctx) return NULL;
 
     for (Iter git = list_iter(unit->globals); !iter_end(git);) {
         GlobalVar *g = iter_next(&git);
@@ -37,7 +94,11 @@ ObjFile *c51_gen(SSAUnit *unit) {
         if (f) process_function(ctx, f);
     }
 
-    return ctx->obj;
+    ObjFile* obj = ctx->obj;
+    ctx->obj = NULL;  // 防止被释放
+    c51_ctx_free(ctx);
+    
+    return obj;
 }
 
 

@@ -719,9 +719,15 @@ static void ssa_build_store(SSABuild *b, ValueName ptr, ValueName val, Ctype *me
     ssa_emit(b, i);
 }
 
+extern List *ctypes;
+static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
+static Ctype *ctype_ptr = &(Ctype){0, CTYPE_PTR, 2, NULL};
+static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
+static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
 static ValueName ssa_build_addr(SSABuild *b, const char *var, Ctype *mem_type) {
     Instr *i = ssa_make_instr(b, IROP_ADDR);
     i->dest = ssa_new_value(b);
+    i->type = ctype_ptr;
     i->mem_type = mem_type;
     ssa_add_label(i, var);
     ssa_emit(b, i);
@@ -741,11 +747,6 @@ static ValueName ssa_build_select(SSABuild *b, ValueName cond, ValueName v_true,
 static inline uint64_t bitmask(int bits) {
     return bits >= 64 ? ~0ULL : ((1ULL << bits) - 1);
 }
-
-extern List *ctypes;
-static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
-static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
-static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
 
 static ValueName gen_bitfield_read(SSABuild *b, ValueName base_ptr,
                                    int byte_offset, int bit_offset, 
@@ -1020,9 +1021,21 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         }
         ValueName lhs = gen_expr(b, ast->left);
         ValueName rhs = gen_expr(b, ast->right);
-        // 类型转换（算术转换）
-        // 简化：假设左右类型相同，实际应查找common type
-        ValueName res = ssa_build_binop_t(b, ast_to_irop(ast->type), lhs, rhs, ast->ctype);
+        /* 类型转换（算术转换）: 选择结果类型。
+           优先策略：如果左右类型相同则使用该类型；
+           如果一侧为窄类型（如char）且另一侧是字面常量，则使用窄类型，
+           否则回退到ast->ctype（当前简化策略）。 */
+        Ctype *rtype = ast->ctype;
+        Ctype *lt = ast->left ? ast->left->ctype : NULL;
+        Ctype *rt = ast->right ? ast->right->ctype : NULL;
+        if (lt && rt && lt->type == rt->type) {
+            rtype = lt;
+        } else if (lt && ast->right && ast->right->type == AST_LITERAL) {
+            rtype = lt;
+        } else if (rt && ast->left && ast->left->type == AST_LITERAL) {
+            rtype = rt;
+        }
+        ValueName res = ssa_build_binop_t(b, ast_to_irop(ast->type), lhs, rhs, rtype);
         return res;
     }
     

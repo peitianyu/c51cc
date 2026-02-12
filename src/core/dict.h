@@ -110,6 +110,27 @@ static inline void dict_clear(Dict *dict)
     free(dict);
 }
 
+static inline void dict_free(Dict *dict, void (*free_val)(void*))
+{
+    if (!dict) return;
+    
+    // 遍历并释放每个 entry
+    ListNode *node = dict->list->head;
+    while (node) {
+        ListNode *next = node->next;
+        DictEntry *entry = (DictEntry *)node->elem;
+        free(entry->key);
+        if (free_val) free_val(entry->val);
+        free(entry);
+        free(node);
+        node = next;
+    }
+    
+    // 释放 list 结构本身
+    free(dict->list);
+    free(dict);
+}
+
 static inline void *dict_parent(Dict *dict)
 {
     void *r = dict->parent;

@@ -1,4 +1,4 @@
-#include "c51_gen_internal.h"
+#include "c51_gen.h"
 
 void c51_optimize(C51GenContext* ctx, Section* sec)
 {

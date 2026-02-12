@@ -926,7 +926,7 @@ static bool pass_inline_consts_into_instrs(Func *f, Stats *s) {
 
 /*---------- 复制传播 ----------*/
 static bool is_copy_instr(const Instr *i) {
-    return i && (i->op == IROP_TRUNC || i->op == IROP_ZEXT || i->op == IROP_SEXT)
+    return i && (i->op == IROP_ZEXT || i->op == IROP_SEXT)
            && i->args && i->args->len == 1;
 }
 
@@ -970,6 +970,35 @@ static bool pass_copy_prop(Func *f, Stats *s) {
                 if (changed) {
                     i->op = IROP_NOP;
                     ++s->fold;
+                }
+            }
+        }
+    }
+    return changed;
+}
+
+/*---------- 删除冗余 trunc ----------*/
+static bool pass_remove_redundant_trunc(Func *f, Stats *s) {
+    if (!f) return false;
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_TRUNC) continue;
+            if (!i->args || i->args->len < 1) continue;
+            ValueName src = get_arg(i, 0);
+            Instr *def = find_def_instr(f, src);
+            Ctype *src_type = def ? def->type : NULL;
+            Ctype *dst_type = i->type;
+            if (!dst_type) continue;
+            if (src_type && src_type->type == dst_type->type && src_type->size == dst_type->size) {
+                replace_all_uses(f, i->dest, src, &changed);
+                if (changed) {
+                    i->op = IROP_NOP;
+                    if (i->args) list_clear(i->args);
+                    if (s) s->fold++;
                 }
             }
         }
@@ -2591,6 +2620,7 @@ void ssa_optimize_func(Func *f, int level) {
         RUN_PASS(pass_dead_local_store_elim);
         RUN_PASS(pass_global_load);
         RUN_PASS(pass_copy_prop);
+        RUN_PASS(pass_remove_redundant_trunc);
         RUN_PASS(pass_inline_func_call);
         RUN_PASS(pass_addr_merge);
         RUN_PASS(pass_local_opts);
