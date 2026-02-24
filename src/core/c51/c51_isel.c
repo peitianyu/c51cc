@@ -170,13 +170,13 @@ static void emit_const(ISelContext* isel, Instr* ins) {
     
     if (size == 1) {
         char imm_str[16];
-        snprintf(imm_str, sizeof(imm_str), "#%XH", val & 0xFF);
+        snprintf(imm_str, sizeof(imm_str), "#%02XH", val & 0xFF);
         emit_mov(isel, isel_reg_name(reg), imm_str, ins);
     } else if (size == 2) {
         char imm_high[16], imm_low[16];
-        snprintf(imm_high, sizeof(imm_high), "#%XH", (val >> 8) & 0xFF);
-        snprintf(imm_low, sizeof(imm_low), "#%XH", val & 0xFF);
-        
+        snprintf(imm_high, sizeof(imm_high), "#%02XH", (val >> 8) & 0xFF);
+        snprintf(imm_low, sizeof(imm_low), "#%02XH", val & 0xFF);
+
         emit_mov(isel, isel_reg_name(reg), imm_high, ins);
         emit_mov(isel, isel_reg_name(reg + 1), imm_low, ins);
     }
