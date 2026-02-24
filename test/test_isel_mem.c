@@ -2,40 +2,40 @@
 // // 精简 C51 存储空间与 SFR 测试套件
 // // ============================================
 
-// // ----- 1. 基础 SFR 定义 (仅保留实际使用的) -----
-// register char  P1      = 0x90;
-// register char  ACC     = 0xE0;
-// register char  B       = 0xF0;
-// register char  SCON    = 0x98;
-// register char  SBUF    = 0x99;
-// register char  IE      = 0xA8;
-// register char  TCON    = 0x88;
+// ----- 1. 基础 SFR 定义 (仅保留实际使用的) -----
+register char  P1      = 0x90;
+register char  ACC     = 0xE0;
+register char  B       = 0xF0;
+register char  SCON    = 0x98;
+register char  SBUF    = 0x99;
+register char  IE      = 0xA8;
+register char  TCON    = 0x88;
 
-// // ----- 2. SBIT 定义（位寻址）-----
-// register bool  P1_0    = 0x90;  // P1.0
-// register bool  P1_7    = 0x97;  // P1.7
-// register bool  EA      = 0xAF;  // IE.7
-// register bool  ES      = 0xAC;  // IE.4
-// register bool  TR0     = 0x8C;  // TCON.4
-// register bool  TI      = 0x99;  // SCON.1
+// ----- 2. SBIT 定义（位寻址）-----
+register bool  P1_0    = 0x90;  // P1.0
+register bool  P1_7    = 0x97;  // P1.7
+register bool  EA      = 0xAF;  // IE.7
+register bool  ES      = 0xAC;  // IE.4
+register bool  TR0     = 0x8C;  // TCON.4
+register bool  TI      = 0x99;  // SCON.1
 
 // // ----- 3. 各存储区变量 -----
 unsigned char data   g_data   = 0x01;
-// unsigned char idata  g_idata  = 0x02;
-// unsigned char xdata  g_xdata  = 0x03;
-// unsigned char code   g_code   = 0x04;
+unsigned char idata  g_idata  = 0x02;
+unsigned char xdata  g_xdata  = 0x03;
+unsigned char code   g_code   = 0x04;
 
-// // ----- 4. 位寻址区变量 -----
-// unsigned char  g_bdata  = 0x00;
-// register bool  g_bit0 = 0x00;
-// register bool  g_bit7 = 0x07;
+// ----- 4. 位寻址区变量 -----
+unsigned char  g_bdata  = 0x00;
+register bool  g_bit0 = 0x00;
+register bool  g_bit7 = 0x07;
 
-// // ----- 5. 指针测试 -----
-// unsigned data  char * ptr_data;
-// unsigned idata char * ptr_idata;
-// unsigned xdata char * ptr_xdata;
-// unsigned code  char * ptr_code;
-// unsigned char *cod = "Hello, Code Space!";
+// ----- 5. 指针测试 -----
+unsigned data  char * ptr_data;
+unsigned idata char * ptr_idata;
+unsigned xdata char * ptr_xdata;
+unsigned code  char * ptr_code;
+unsigned char *cod = "Hello, Code Space!";
 
 // ----- 6. 基础存储区访问测试 -----
 int test_data_rw(int v) {

@@ -156,18 +156,24 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
                 if (sym->flags & SYM_FLAG_BIT) {
                     int base = sym->value & ~0x7;
                     int bit = sym->value & 0x7;
-                    fprintf(fp, "SBIT %s = 0x%02X.%d\n", sym->name, base, bit);
+                    fprintf(fp, "; SBIT %s = 0x%02X.%d\n", sym->name, base, bit);
                     continue;
                 } else if (sym->size == 1) {
-                    fprintf(fp, "SFR %s = 0x%02X\n", sym->name, sym->value);
+                    fprintf(fp, "; SFR %s = 0x%02X\n", sym->name, sym->value);
                     continue;
                 } else if (sym->size == 2) {
-                    fprintf(fp, "SFR16 %s = 0x%04X\n", sym->name, sym->value);
+                    fprintf(fp, "; SFR16 %s = 0x%04X\n", sym->name, sym->value);
                     continue;
                 }
             }
 
-            fprintf(fp, "; %s: %s", sym->name, symbol_kind_name(sym->kind));
+            const char *kind_text = symbol_kind_name(sym->kind);
+            if (sym->kind == SYM_DATA && sym->section >= 0) {
+                Section *s = obj_get_section(obj, sym->section);
+                if (s) kind_text = section_kind_name(s->kind);
+            }
+
+            fprintf(fp, "; %s: %s", sym->name, kind_text);
             if (sym->section >= 0) {
                 fprintf(fp, " [sec=%d, off=%d, size=%d]", 
                         sym->section, sym->value, sym->size);
