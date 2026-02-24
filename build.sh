@@ -1,1 +1,1 @@
-tcc ./src/*.c ./src/core/*.c ./src/core/c51/c51_gen.c ./src/core/c51/c51_isel.c ./src/core/c51/c51_gen_global_var.c ./src/core/c51/c51_output.c ./src/core/c51/c51_encode.c -run -DMINITEST_IMPLEMENTATION
+tcc ./src/*.c ./src/core/*.c ./src/core/c51/*.c -run -DMINITEST_IMPLEMENTATION

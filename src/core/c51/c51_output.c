@@ -43,21 +43,31 @@ static void print_asminstr(FILE *fp, AsmInstr *ins)
         }
         return;
     }
-    
-    fprintf(fp, "        %-8s", ins->op);
-    
+
+    char instrbuf[256];
+    instrbuf[0] = '\0';
+    size_t pos = 0;
+
+    if (ins->op) {
+        pos += snprintf(instrbuf + pos, sizeof(instrbuf) - pos, "%s", ins->op);
+    }
+
     if (ins->args && ins->args->len > 0) {
+        if (pos + 1 < sizeof(instrbuf)) pos += snprintf(instrbuf + pos, sizeof(instrbuf) - pos, " ");
         for (Iter it = list_iter(ins->args); !iter_end(it);) {
             char *arg = iter_next(&it);
-            fprintf(fp, "%s", arg);
-            if (!iter_end(it)) fprintf(fp, ", ");
+            if (pos < sizeof(instrbuf)) pos += snprintf(instrbuf + pos, sizeof(instrbuf) - pos, "%s", arg);
+            if (!iter_end(it) && pos < sizeof(instrbuf)) pos += snprintf(instrbuf + pos, sizeof(instrbuf) - pos, ", ");
         }
     }
-    
+
+    /* indent then instruction field (fixed width) */
+    fprintf(fp, "        %-24s", instrbuf);
+
     if (ins->ssa) {
-        fprintf(fp, "        %s", ins->ssa);
+        fprintf(fp, "%s", ins->ssa);
     }
-    
+
     fprintf(fp, "\n");
 }
 

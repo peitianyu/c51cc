@@ -1,6 +1,6 @@
-#include "c51_gen.h"
+#include "c51_encode.h"
 
-void c51_encode(C51GenContext* ctx, Section* sec)
+void c51_encode(C51GenContext* ctx, ObjFile* obj)
 {
     
 }

@@ -1,6 +1,8 @@
 #include "c51_gen.h"
 #include "c51_isel.h"
 #include "c51_gen_global_var.h"
+#include "c51_optimize.h"
+#include "c51_encode.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -93,6 +95,9 @@ ObjFile *c51_gen(SSAUnit *unit) {
         Func *f = iter_next(&fit);
         if (f) process_function(ctx, f);
     }
+
+    c51_optimize(ctx, ctx->obj);
+    c51_encode(ctx, ctx->obj);
 
     ObjFile* obj = ctx->obj;
     ctx->obj = NULL;  // 防止被释放
