@@ -72,6 +72,17 @@ static bool is_sbit_type(Ctype* mem_type) {
     return a.ctype_register && mem_type->type == CTYPE_BOOL;
 }
 
+static int parse_block_id(const char* label) {
+    if (!label) return -1;
+    int id = -1;
+    if (sscanf(label, "block%d", &id) == 1) return id;
+    return -1;
+}
+
+static void block_label_name(char* out, size_t out_len, int id) {
+    snprintf(out, out_len, "L%d", id);
+}
+
 /* 获取值指定字节偏移的寄存器名称 */
 const char* isel_get_value_reg_at(ISelContext* isel, ValueName val, int offset) {
     int base_reg = isel_get_value_reg(isel, val);
@@ -319,6 +330,247 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
             emit_mov(isel, "R6", "#0", ins);
         }
     }
+}
+
+/* 发射按位与 */
+static void emit_and(ISelContext* isel, Instr* ins) {
+    ValueName src1 = get_src1_value(ins);
+    int size = ins->type ? ins->type->size : 1;
+    int64_t imm_val;
+    bool src2_is_imm = is_imm_operand(ins, &imm_val);
+    ValueName src2 = get_src2_value(ins);
+
+    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(reg);
+
+    const char* src1_lo = isel_get_lo_reg(isel, src1);
+    const char* src1_hi = isel_get_hi_reg(isel, src1);
+
+    // 低字节
+    emit_mov(isel, "A", (char*)src1_lo, ins);
+    if (src2_is_imm) {
+        char imm_str[16];
+        snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
+        isel_emit(isel, "ANL", "A", imm_str, NULL);
+    } else {
+        const char* src2_lo = isel_get_lo_reg(isel, src2);
+        isel_emit(isel, "ANL", "A", (char*)src2_lo, NULL);
+    }
+    emit_mov(isel, (char*)dst_lo, "A", ins);
+
+    if (size == 2) {
+        emit_mov(isel, "A", (char*)src1_hi, ins);
+        if (src2_is_imm) {
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
+            isel_emit(isel, "ANL", "A", imm_str, NULL);
+        } else {
+            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            isel_emit(isel, "ANL", "A", (char*)src2_hi, NULL);
+        }
+        emit_mov(isel, (char*)dst_hi, "A", ins);
+    }
+}
+
+/* 发射按位或 */
+static void emit_or(ISelContext* isel, Instr* ins) {
+    ValueName src1 = get_src1_value(ins);
+    int size = ins->type ? ins->type->size : 1;
+    int64_t imm_val;
+    bool src2_is_imm = is_imm_operand(ins, &imm_val);
+    ValueName src2 = get_src2_value(ins);
+
+    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(reg);
+
+    const char* src1_lo = isel_get_lo_reg(isel, src1);
+    const char* src1_hi = isel_get_hi_reg(isel, src1);
+
+    // 低字节
+    emit_mov(isel, "A", (char*)src1_lo, ins);
+    if (src2_is_imm) {
+        char imm_str[16];
+        snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
+        isel_emit(isel, "ORL", "A", imm_str, NULL);
+    } else {
+        const char* src2_lo = isel_get_lo_reg(isel, src2);
+        isel_emit(isel, "ORL", "A", (char*)src2_lo, NULL);
+    }
+    emit_mov(isel, (char*)dst_lo, "A", ins);
+
+    if (size == 2) {
+        emit_mov(isel, "A", (char*)src1_hi, ins);
+        if (src2_is_imm) {
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
+            isel_emit(isel, "ORL", "A", imm_str, NULL);
+        } else {
+            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            isel_emit(isel, "ORL", "A", (char*)src2_hi, NULL);
+        }
+        emit_mov(isel, (char*)dst_hi, "A", ins);
+    }
+}
+
+/* 发射按位异或 */
+static void emit_xor(ISelContext* isel, Instr* ins) {
+    ValueName src1 = get_src1_value(ins);
+    int size = ins->type ? ins->type->size : 1;
+    int64_t imm_val;
+    bool src2_is_imm = is_imm_operand(ins, &imm_val);
+    ValueName src2 = get_src2_value(ins);
+
+    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(reg);
+
+    const char* src1_lo = isel_get_lo_reg(isel, src1);
+    const char* src1_hi = isel_get_hi_reg(isel, src1);
+
+    // 低字节
+    emit_mov(isel, "A", (char*)src1_lo, ins);
+    if (src2_is_imm) {
+        char imm_str[16];
+        snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
+        isel_emit(isel, "XRL", "A", imm_str, NULL);
+    } else {
+        const char* src2_lo = isel_get_lo_reg(isel, src2);
+        isel_emit(isel, "XRL", "A", (char*)src2_lo, NULL);
+    }
+    emit_mov(isel, (char*)dst_lo, "A", ins);
+
+    if (size == 2) {
+        emit_mov(isel, "A", (char*)src1_hi, ins);
+        if (src2_is_imm) {
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
+            isel_emit(isel, "XRL", "A", imm_str, NULL);
+        } else {
+            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            isel_emit(isel, "XRL", "A", (char*)src2_hi, NULL);
+        }
+        emit_mov(isel, (char*)dst_hi, "A", ins);
+    }
+}
+
+/* 发射不等比较（生成 0/1） */
+static void emit_ne(ISelContext* isel, Instr* ins) {
+    ValueName src1 = get_src1_value(ins);
+    int size = ins->type ? ins->type->size : 1;
+    int64_t imm_val;
+    bool src2_is_imm = is_imm_operand(ins, &imm_val);
+    ValueName src2 = get_src2_value(ins);
+
+    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(reg);
+
+    char* l_true = isel_new_label(isel, "Lne_true");
+    char* l_end = isel_new_label(isel, "Lne_end");
+    char lbuf_true[64];
+    char lbuf_end[64];
+    snprintf(lbuf_true, sizeof(lbuf_true), "%s:", l_true);
+    snprintf(lbuf_end, sizeof(lbuf_end), "%s:", l_end);
+
+    if (size == 2) {
+        const char* src1_hi = isel_get_hi_reg(isel, src1);
+        const char* src1_lo = isel_get_lo_reg(isel, src1);
+
+        emit_mov(isel, "A", (char*)src1_hi, ins);
+        if (src2_is_imm) {
+            char imm_str[32];
+            snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)((imm_val >> 8) & 0xFF), l_true);
+            isel_emit(isel, "CJNE", "A", imm_str, NULL);
+        } else {
+            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            char arg2[64];
+            snprintf(arg2, sizeof(arg2), "%s, %s", src2_hi, l_true);
+            isel_emit(isel, "CJNE", "A", arg2, NULL);
+        }
+
+        emit_mov(isel, "A", (char*)src1_lo, ins);
+        if (src2_is_imm) {
+            char imm_str[32];
+            snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)(imm_val & 0xFF), l_true);
+            isel_emit(isel, "CJNE", "A", imm_str, NULL);
+        } else {
+            const char* src2_lo = isel_get_lo_reg(isel, src2);
+            char arg2[64];
+            snprintf(arg2, sizeof(arg2), "%s, %s", src2_lo, l_true);
+            isel_emit(isel, "CJNE", "A", arg2, NULL);
+        }
+    } else {
+        const char* src1_lo = isel_get_lo_reg(isel, src1);
+        emit_mov(isel, "A", (char*)src1_lo, ins);
+        if (src2_is_imm) {
+            char imm_str[32];
+            snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)(imm_val & 0xFF), l_true);
+            isel_emit(isel, "CJNE", "A", imm_str, NULL);
+        } else {
+            const char* src2_lo = isel_get_lo_reg(isel, src2);
+            char arg2[64];
+            snprintf(arg2, sizeof(arg2), "%s, %s", src2_lo, l_true);
+            isel_emit(isel, "CJNE", "A", arg2, NULL);
+        }
+    }
+
+    isel_emit(isel, "MOV", "A", "#0", NULL);
+    isel_emit(isel, "SJMP", l_end, NULL, NULL);
+    isel_emit(isel, lbuf_true, NULL, NULL, NULL);
+    isel_emit(isel, "MOV", "A", "#1", NULL);
+    isel_emit(isel, lbuf_end, NULL, NULL, NULL);
+
+    emit_mov(isel, (char*)dst_lo, "A", ins);
+    if (size == 2) {
+        emit_mov(isel, (char*)dst_hi, "#0", ins);
+    }
+
+    free(l_true);
+    free(l_end);
+}
+
+/* 发射逻辑非（生成 0/1） */
+static void emit_lnot(ISelContext* isel, Instr* ins) {
+    ValueName src = get_src1_value(ins);
+    int size = ins->type ? ins->type->size : 1;
+
+    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(reg);
+
+    char* l_true = isel_new_label(isel, "Lnot_true");
+    char* l_end = isel_new_label(isel, "Lnot_end");
+    char lbuf_true[64];
+    char lbuf_end[64];
+    snprintf(lbuf_true, sizeof(lbuf_true), "%s:", l_true);
+    snprintf(lbuf_end, sizeof(lbuf_end), "%s:", l_end);
+
+    if (size == 2) {
+        const char* hi = isel_get_hi_reg(isel, src);
+        const char* lo = isel_get_lo_reg(isel, src);
+        emit_mov(isel, "A", (char*)hi, ins);
+        isel_emit(isel, "ORL", "A", (char*)lo, NULL);
+    } else {
+        isel_ensure_in_acc(isel, src);
+    }
+
+    // A == 0 -> true
+    isel_emit(isel, "JZ", l_true, NULL, NULL);
+    isel_emit(isel, "MOV", "A", "#0", NULL);
+    isel_emit(isel, "SJMP", l_end, NULL, NULL);
+    isel_emit(isel, lbuf_true, NULL, NULL, NULL);
+    isel_emit(isel, "MOV", "A", "#1", NULL);
+    isel_emit(isel, lbuf_end, NULL, NULL, NULL);
+
+    emit_mov(isel, (char*)dst_lo, "A", ins);
+    if (size == 2) {
+        emit_mov(isel, (char*)dst_hi, "#0", ins);
+    }
+
+    free(l_true);
+    free(l_end);
 }
 
 /* 发射减法 */
@@ -662,6 +914,49 @@ static void emit_load(ISelContext* isel, Instr* ins) {
     }
 }
 
+/* 发射无条件跳转 */
+static void emit_jmp(ISelContext* isel, Instr* ins) {
+    if (!ins->labels || ins->labels->len < 1) return;
+    const char* lbl = (const char*)list_get(ins->labels, 0);
+    int id = parse_block_id(lbl);
+    if (id < 0) return;
+    char target[32];
+    block_label_name(target, sizeof(target), id);
+    isel_emit(isel, "SJMP", target, NULL, instr_to_ssa_str(ins));
+}
+
+/* 发射条件分支 */
+static void emit_br(ISelContext* isel, Instr* ins) {
+    if (!ins->args || ins->args->len < 1) return;
+    if (!ins->labels || ins->labels->len < 2) return;
+
+    ValueName cond = *(ValueName*)list_get(ins->args, 0);
+    const char* lbl_t = (const char*)list_get(ins->labels, 0);
+    const char* lbl_f = (const char*)list_get(ins->labels, 1);
+    int id_t = parse_block_id(lbl_t);
+    int id_f = parse_block_id(lbl_f);
+    if (id_t < 0 || id_f < 0) return;
+
+    char target_t[32];
+    char target_f[32];
+    block_label_name(target_t, sizeof(target_t), id_t);
+    block_label_name(target_f, sizeof(target_f), id_f);
+
+    int size = get_value_size(isel, cond);
+    if (size == 2) {
+        const char* hi = isel_get_hi_reg(isel, cond);
+        const char* lo = isel_get_lo_reg(isel, cond);
+        if (hi && strcmp(hi, "A") != 0) isel_emit(isel, "MOV", "A", hi, NULL);
+        if (lo) isel_emit(isel, "ORL", "A", lo, NULL);
+    } else {
+        isel_ensure_in_acc(isel, cond);
+    }
+
+    // A != 0 -> true
+    isel_emit(isel, "JNZ", target_t, NULL, instr_to_ssa_str(ins));
+    isel_emit(isel, "SJMP", target_f, NULL, NULL);
+}
+
 /* 单条指令选择 */
 void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins) return;
@@ -688,6 +983,21 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         case IROP_SUB:
             emit_sub(isel, ins, next);
             break;
+        case IROP_AND:
+            emit_and(isel, ins);
+            break;
+        case IROP_OR:
+            emit_or(isel, ins);
+            break;
+        case IROP_XOR:
+            emit_xor(isel, ins);
+            break;
+        case IROP_NE:
+            emit_ne(isel, ins);
+            break;
+        case IROP_LNOT:
+            emit_lnot(isel, ins);
+            break;
         case IROP_TRUNC:
             emit_trunc(isel, ins);
             break;
@@ -699,6 +1009,12 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             break;
         case IROP_LOAD:
             emit_load(isel, ins);
+            break;
+        case IROP_JMP:
+            emit_jmp(isel, ins);
+            break;
+        case IROP_BR:
+            emit_br(isel, ins);
             break;
         case IROP_ADDR:
             emit_addr(isel, ins);
