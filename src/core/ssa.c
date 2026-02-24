@@ -648,6 +648,10 @@ static void ssa_build_ret(SSABuild *b, ValueName val) {
     if (val != 0) {
         ssa_add_arg(i, val);
     }
+    // 设置返回类型为函数的返回类型
+    if (b->cur_func && b->cur_func->ret_type) {
+        i->type = b->cur_func->ret_type;
+    }
     ssa_emit(b, i);
     b->cur_block = NULL;
 }

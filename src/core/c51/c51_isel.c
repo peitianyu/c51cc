@@ -372,18 +372,26 @@ static void emit_trunc(ISelContext* isel, Instr* ins) {
 static void emit_ret(ISelContext* isel, Instr* ins) {
     if (ins->args && ins->args->len > 0) {
         ValueName ret_val = *(ValueName*)list_get(ins->args, 0);
-        int size = ins->type ? ins->type->size : 1;
+        int ret_size = ins->type ? ins->type->size : 1;  // 函数返回类型的大小
+        int val_size = get_value_size(isel, ret_val);    // 实际值的大小
 
-        /* 优先使用已分配寄存器或累加器作为返回源，不强制清零 R6 */
+        /* 移动低字节到 R7 */
         const char* ret_lo = isel_get_lo_reg(isel, ret_val);
         if (ret_lo && strcmp(ret_lo, "R7") != 0) {
             emit_mov(isel, "R7", (char*)ret_lo, ins);
         }
 
-        if (size == 2) {
-            const char* ret_hi = isel_get_hi_reg(isel, ret_val);
-            if (ret_hi && strcmp(ret_hi, "R6") != 0) {
-                emit_mov(isel, "R6", (char*)ret_hi, ins);
+        /* 处理高字节 */
+        if (ret_size == 2) {
+            if (val_size == 2) {
+                // 2字节值返回：复制高字节
+                const char* ret_hi = isel_get_hi_reg(isel, ret_val);
+                if (ret_hi && strcmp(ret_hi, "R6") != 0) {
+                    emit_mov(isel, "R6", (char*)ret_hi, ins);
+                }
+            } else {
+                // 1字节值扩展为2字节返回：高字节置零
+                isel_emit(isel, "MOV", "R6", "#0", NULL);
             }
         }
     }

@@ -38,7 +38,7 @@ unsigned char data   g_data   = 0x01;
 // unsigned char *cod = "Hello, Code Space!";
 
 // ----- 6. 基础存储区访问测试 -----
-char test_data_rw(char v) {
+int test_data_rw(char v) {
     unsigned char data local;
     g_data = v;
     local = g_data;
