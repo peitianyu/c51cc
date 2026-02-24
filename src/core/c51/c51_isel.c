@@ -354,17 +354,38 @@ static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
 /* 发射截断 */
 static void emit_trunc(ISelContext* isel, Instr* ins) {
     ValueName src = get_src1_value(ins);
-    const char* src_lo = isel_get_lo_reg(isel, src);
+    int src_size = get_value_size(isel, src);
     
-    // 复用源寄存器
-    int* reg_num = malloc(sizeof(int));
-    *reg_num = isel_get_value_reg(isel, src);
-    char* key = int_to_key(ins->dest);
-    dict_put(isel->ctx->value_to_reg, key, reg_num);
-    
-    const char* dst_lo = isel_get_lo_reg(isel, ins->dest);
-    if (strcmp(src_lo, dst_lo) != 0) {
-        emit_mov(isel, (char*)dst_lo, (char*)src_lo, ins);
+    if (src_size == 2) {
+        // 从 2字节截断为 1字节：取低字节
+        int src_base = isel_get_value_reg(isel, src);  // 获取源的基址寄存器
+        if (src_base >= 0) {
+            // 低字节在基址+1的位置（大端）
+            int lo_reg = src_base + 1;
+            
+            // 让目标直接使用低字节寄存器
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = lo_reg;
+            char* key = int_to_key(ins->dest);
+            dict_put(isel->ctx->value_to_reg, key, reg_num);
+            
+            // 标记该寄存器被占用
+            if (lo_reg < 8) {
+                isel->reg_busy[lo_reg] = true;
+                isel->reg_val[lo_reg] = ins->dest;
+            }
+        } else {
+            // 源不在寄存器中，需要分配新寄存器
+            int dst_reg = alloc_reg_for_value(isel, ins->dest, 1);
+            const char* src_lo = isel_get_lo_reg(isel, src);
+            emit_mov(isel, (char*)isel_reg_name(dst_reg), (char*)src_lo, ins);
+        }
+    } else {
+        // 1字节到1字节：直接复用源寄存器
+        int* reg_num = malloc(sizeof(int));
+        *reg_num = isel_get_value_reg(isel, src);
+        char* key = int_to_key(ins->dest);
+        dict_put(isel->ctx->value_to_reg, key, reg_num);
     }
 }
 
@@ -498,6 +519,13 @@ static void emit_load(ISelContext* isel, Instr* ins) {
 /* 单条指令选择 */
 void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins) return;
+    
+    // 如果指令有类型信息且产生了目标值，记录类型
+    if (ins->dest > 0 && ins->type && isel->ctx && isel->ctx->value_type) {
+        char* key = int_to_key(ins->dest);
+        dict_put(isel->ctx->value_type, key, ins->type);
+        // key 被 dict 接管，不需要 free
+    }
     
     switch (ins->op) {
         case IROP_NOP:
