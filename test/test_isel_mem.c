@@ -37,12 +37,12 @@ unsigned char data   g_data   = 0x01;
 // unsigned code  char * ptr_code;
 // unsigned char *cod = "Hello, Code Space!";
 
-// ----- 6. 基础存储区访问测试 -----
-int test_data_rw(int v) {
-    g_data = v;
-    g_data++;
-    return g_data;
-}
+// // ----- 6. 基础存储区访问测试 -----
+// char test_data_rw(char v) {
+//     g_data = v;
+//     g_data++;
+//     return g_data;
+// }
 
 // int add3(int a, int b, int c) {
 //     return a + b + c;
