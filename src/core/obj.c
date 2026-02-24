@@ -90,7 +90,7 @@ int obj_add_section(ObjFile *obj, const char *name, SectionKind kind, int size, 
     return obj->sections->len - 1;
 }
 
-Section *obj_get_section(ObjFile *obj, int index)
+Section *obj_get_section(const ObjFile *obj, int index)
 {
     return obj ? list_get(obj->sections, index) : NULL;
 }
