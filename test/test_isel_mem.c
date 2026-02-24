@@ -22,7 +22,7 @@
 // // // ----- 3. 各存储区变量 -----
 // unsigned char data   g_data   = 0x01;
 unsigned char idata  g_idata  = 0x02;
-// unsigned char xdata  g_xdata  = 0x03;
+unsigned char xdata  g_xdata  = 0x03;
 // unsigned char code   g_code   = 0x04;
 
 // // ----- 4. 位寻址区变量 -----
@@ -59,13 +59,12 @@ int test_idata_rw(int v) {
     return g_idata;
 }
 
-// int test_xdata_rw(int v) {
-//     unsigned char xdata local;
-//     g_xdata = (unsigned char)v;
-//     local = g_xdata;
-//     g_xdata = local ^ 0xFF;
-//     return g_xdata;
-// }
+char test_xdata_rw(char v) {
+    g_xdata = (unsigned char)v;
+    unsigned char xdata local = g_xdata;
+    g_xdata = local - 1;
+    return g_xdata;
+}
 
 // int test_code_read(void) {
 //     return g_code + 1;

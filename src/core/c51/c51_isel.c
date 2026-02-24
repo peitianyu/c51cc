@@ -488,6 +488,12 @@ static void emit_store(ISelContext* isel, Instr* ins) {
     
     if (!var_name) return;
     
+    // 获取内存空间类型 (ctype_data 在 bit 7-9)
+    int space = 0;
+    if (ins->mem_type && ins->mem_type->attr) {
+        space = (ins->mem_type->attr >> 7) & 0x7;
+    }
+    
     // 获取值的寄存器
     const char* val_reg = isel_get_lo_reg(isel, val);
     
@@ -496,8 +502,21 @@ static void emit_store(ISelContext* isel, Instr* ins) {
         isel_emit(isel, "MOV", "A", (char*)val_reg, NULL);
     }
     
-    // 直接使用变量名，不添加下划线前缀
-    isel_emit(isel, "MOV", (char*)var_name, "A", instr_to_ssa_str(ins));
+    // 根据内存空间生成不同的指令
+    if (space == 4) {
+        // xdata (4): 使用 MOVX @DPTR
+        char dptr_val[256];
+        snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
+        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+        isel_emit(isel, "MOVX", "@DPTR", "A", instr_to_ssa_str(ins));
+    } else if (space == 2) {
+        // idata (2): 使用 MOV @Ri
+        isel_emit(isel, "MOV", "R0", var_name, NULL);
+        isel_emit(isel, "MOV", "@R0", "A", instr_to_ssa_str(ins));
+    } else {
+        // data (1) 或默认 (0): 使用 MOV direct
+        isel_emit(isel, "MOV", (char*)var_name, "A", instr_to_ssa_str(ins));
+    }
 }
 
 /* 发射地址获取 */
@@ -543,18 +562,60 @@ static void emit_load(ISelContext* isel, Instr* ins) {
     
     if (!var_name) return;
     
+    // 获取内存空间类型 (ctype_data 在 bit 7-9)
+    int space = 0;
+    if (ins->mem_type && ins->mem_type->attr) {
+        space = (ins->mem_type->attr >> 7) & 0x7;
+    }
+    
     int size = ins->type ? ins->type->size : 1;
     int reg = alloc_reg_for_value(isel, ins->dest, size);
     
-    // 加载低字节（或单字节）
-    isel_emit(isel, "MOV", "A", (char*)var_name, instr_to_ssa_str(ins));
+    // 根据内存空间生成不同的加载指令
+    if (space == 4) {
+        // xdata (4): 使用 MOVX A, @DPTR
+        char dptr_val[256];
+        snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
+        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+        isel_emit(isel, "MOVX", "A", "@DPTR", instr_to_ssa_str(ins));
+    } else if (space == 6) {
+        // code (6): 使用 MOVC A, @A+DPTR
+        char dptr_val[256];
+        snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
+        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+        isel_emit(isel, "CLR", "A", NULL, NULL);
+        isel_emit(isel, "MOVC", "A", "@A+DPTR", instr_to_ssa_str(ins));
+    } else if (space == 2) {
+        // idata (2): 使用 MOV A, @Ri
+        isel_emit(isel, "MOV", "R0", var_name, NULL);
+        isel_emit(isel, "MOV", "A", "@R0", instr_to_ssa_str(ins));
+    } else {
+        // data (1) 或默认 (0): 使用 MOV A, direct
+        isel_emit(isel, "MOV", "A", (char*)var_name, instr_to_ssa_str(ins));
+    }
+    
     emit_mov(isel, (char*)isel_reg_name(reg + (size == 2 ? 1 : 0)), "A", ins);
     
     if (size == 2) {
         // 高字节处理
-        char source_hi[256];
-        snprintf(source_hi, sizeof(source_hi), "(_%s + 1)", var_name);
-        isel_emit(isel, "MOV", "A", source_hi, NULL);
+        if (space == 4) {
+            // xdata
+            char dptr_val[256];
+            snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
+            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+            isel_emit(isel, "MOVX", "A", "@DPTR", NULL);
+        } else if (space == 6) {
+            // code
+            char dptr_val[256];
+            snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
+            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+            isel_emit(isel, "CLR", "A", NULL, NULL);
+            isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
+        } else {
+            char source_hi[256];
+            snprintf(source_hi, sizeof(source_hi), "(_%s + 1)", var_name);
+            isel_emit(isel, "MOV", "A", source_hi, NULL);
+        }
         emit_mov(isel, (char*)isel_reg_name(reg), "A", ins);
     }
 }
