@@ -51,6 +51,16 @@ int isel_get_value_reg(ISelContext* isel, ValueName val) {
     return -1;
 }
 
+/* 获取值的大小（字节数） */
+static int get_value_size(ISelContext* isel, ValueName val) {
+    if (!isel || !isel->ctx || !isel->ctx->value_type) return 1;
+    char* key = int_to_key(val);
+    Ctype* type = (Ctype*)dict_get(isel->ctx->value_type, key);
+    free(key);
+    if (type && type->size > 0) return type->size;
+    return 1;  // 默认为单字节
+}
+
 /* 获取值指定字节偏移的寄存器名称 */
 const char* isel_get_value_reg_at(ISelContext* isel, ValueName val, int offset) {
     int base_reg = isel_get_value_reg(isel, val);
@@ -61,11 +71,21 @@ const char* isel_get_value_reg_at(ISelContext* isel, ValueName val, int offset) 
 }
 
 const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
-    return isel_get_value_reg_at(isel, val, 1);  // 大端：低字节在+1位置
+    int size = get_value_size(isel, val);
+    if (size == 1) {
+        // 单字节值：直接返回基址寄存器
+        int base_reg = isel_get_value_reg(isel, val);
+        if (base_reg == -2) return "A";
+        if (base_reg < 0) return "R7";  // 默认返回值寄存器
+        return isel_reg_name(base_reg);
+    }
+    // 双字节值：大端，低字节在+1位置
+    return isel_get_value_reg_at(isel, val, 1);
 }
 
 const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
-    return isel_get_value_reg_at(isel, val, 0);  // 大端：高字节在基址
+    // 高字节总是在基址
+    return isel_get_value_reg_at(isel, val, 0);
 }
 
 /* 生成新标签 */
@@ -396,8 +416,13 @@ static void emit_store(ISelContext* isel, Instr* ins) {
     
     if (!var_name) return;
     
-    // 确保值在累加器中
-    isel_ensure_in_acc(isel, val);
+    // 获取值的寄存器
+    const char* val_reg = isel_get_lo_reg(isel, val);
+    
+    // 先加载值到累加器（如果还没在累加器中）
+    if (strcmp(val_reg, "A") != 0) {
+        isel_emit(isel, "MOV", "A", (char*)val_reg, NULL);
+    }
     
     // 直接使用变量名，不添加下划线前缀
     isel_emit(isel, "MOV", (char*)var_name, "A", instr_to_ssa_str(ins));
@@ -425,8 +450,22 @@ static void emit_addr(ISelContext* isel, Instr* ins) {
 
 /* 发射加载 */
 static void emit_load(ISelContext* isel, Instr* ins) {
+    // load ptr
+    ValueName ptr = -1;
+    if (ins->args && ins->args->len > 0) {
+        ptr = *(ValueName*)list_get(ins->args, 0);
+    }
+    
+    // 从 value_to_addr 查找变量名
     const char* var_name = NULL;
-    if (ins->labels && ins->labels->len > 0) {
+    if (isel->ctx && isel->ctx->value_to_addr && ptr > 0) {
+        char* key = int_to_key(ptr);
+        var_name = (const char*)dict_get(isel->ctx->value_to_addr, key);
+        free(key);
+    }
+    
+    // 如果没有通过 ptr 找到，尝试从 labels 获取
+    if (!var_name && ins->labels && ins->labels->len > 0) {
         var_name = list_get(ins->labels, 0);
     }
     
@@ -435,10 +474,8 @@ static void emit_load(ISelContext* isel, Instr* ins) {
     int size = ins->type ? ins->type->size : 1;
     int reg = alloc_reg_for_value(isel, ins->dest, size);
     
-    // 直接使用变量名，不添加下划线前缀
-    const char* source = var_name;
-    
-    isel_emit(isel, "MOV", "A", source, instr_to_ssa_str(ins));
+    // 加载低字节（或单字节）
+    isel_emit(isel, "MOV", "A", (char*)var_name, instr_to_ssa_str(ins));
     emit_mov(isel, (char*)isel_reg_name(reg + (size == 2 ? 1 : 0)), "A", ins);
     
     if (size == 2) {
