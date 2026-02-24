@@ -20,8 +20,8 @@
 // register bool  TI      = 0x99;  // SCON.1
 
 // // // ----- 3. 各存储区变量 -----
-unsigned char data   g_data   = 0x01;
-// unsigned char idata  g_idata  = 0x02;
+// unsigned char data   g_data   = 0x01;
+unsigned char idata  g_idata  = 0x02;
 // unsigned char xdata  g_xdata  = 0x03;
 // unsigned char code   g_code   = 0x04;
 
@@ -52,13 +52,12 @@ unsigned char data   g_data   = 0x01;
 //     return a - b - c;
 // }
 
-// int test_idata_rw(int v) {
-//     unsigned char idata local;
-//     g_idata = (unsigned char)v;
-//     local = g_idata;
-//     g_idata = local - 1;
-//     return g_idata;
-// }
+int test_idata_rw(int v) {
+    g_idata = (unsigned char)v;
+    unsigned char idata local = g_idata;
+    g_idata = local + 1;
+    return g_idata;
+}
 
 // int test_xdata_rw(int v) {
 //     unsigned char xdata local;

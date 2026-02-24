@@ -217,9 +217,14 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     isel_ensure_in_acc(isel, src1);
     
     if (src2_is_imm) {
-        char imm_str[16];
-        snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
-        isel_emit(isel, "ADD", "A", imm_str, instr_to_ssa_str(ins));
+        // 优化：+1 使用 INC A
+        if ((imm_val & 0xFF) == 1 && size == 1) {
+            isel_emit(isel, "INC", "A", NULL, instr_to_ssa_str(ins));
+        } else {
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
+            isel_emit(isel, "ADD", "A", imm_str, instr_to_ssa_str(ins));
+        }
     } else {
         ValueName src2 = get_src2_value(ins);
         const char* src2_lo = isel_get_lo_reg(isel, src2);
@@ -301,29 +306,53 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
 /* 发射减法 */
 static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
-    ValueName src2 = get_src2_value(ins);
     int size = ins->type ? ins->type->size : 1;
+    int64_t imm_val;
+    bool src2_is_imm = is_imm_operand(ins, &imm_val);
     
     const char* src1_lo = isel_get_lo_reg(isel, src1);
-    const char* src2_lo = isel_get_lo_reg(isel, src2);
     
     // 分配目标寄存器并保存，以便后续获取高字节
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     
-    isel_emit(isel, "CLR", "C", NULL, NULL);
-    
     emit_mov(isel, "A", (char*)src1_lo, ins);
-    isel_emit(isel, "SUBB", "A", (char*)src2_lo, instr_to_ssa_str(ins));
+    
+    if (src2_is_imm) {
+        // 优化：-1 使用 DEC A
+        if ((imm_val & 0xFF) == 1 && size == 1) {
+            isel_emit(isel, "DEC", "A", NULL, instr_to_ssa_str(ins));
+        } else {
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
+            isel_emit(isel, "SUBB", "A", imm_str, instr_to_ssa_str(ins));
+        }
+    } else {
+        isel_emit(isel, "CLR", "C", NULL, NULL);
+        ValueName src2 = get_src2_value(ins);
+        const char* src2_lo = isel_get_lo_reg(isel, src2);
+        isel_emit(isel, "SUBB", "A", (char*)src2_lo, instr_to_ssa_str(ins));
+    }
+    
     emit_mov(isel, (char*)dst_lo, "A", ins);
     
     if (size == 2) {
         const char* src1_hi = isel_get_hi_reg(isel, src1);
-        const char* src2_hi = isel_get_hi_reg(isel, src2);
         const char* dst_hi = isel_reg_name(dst_reg);
         
         emit_mov(isel, "A", (char*)src1_hi, ins);
-        isel_emit(isel, "SUBB", "A", (char*)src2_hi, NULL);
+        
+        if (src2_is_imm) {
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
+            isel_emit(isel, "SUBB", "A", imm_str, NULL);
+        } else {
+            ValueName src2 = get_src2_value(ins);
+            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            isel_emit(isel, "SUBB", "A", (char*)src2_hi, NULL);
+        }
+        
         emit_mov(isel, (char*)dst_hi, "A", ins);
     }
     

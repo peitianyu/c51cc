@@ -149,36 +149,70 @@ static int peephole_redundant_swap(List* instrs, int start) {
 /* 前向声明 */
 static bool reg_read_before_write_or_end(List* instrs, int start, const char* reg);
 
-/* 窥孔优化：MOV Rx, src; MOV A, Rx -> MOV A, src (如果 Rx 之后不再使用) */
+/* 检查指令是否不修改指定寄存器 */
+static bool instr_does_not_modify_reg(AsmInstr* ins, const char* reg) {
+    if (!ins || !reg) return true;
+    
+    // CLR C, SETB C 等不修改寄存器
+    if (ins->op && (strcmp(ins->op, "CLR") == 0 || strcmp(ins->op, "SETB") == 0)) {
+        return true;
+    }
+    
+    // 检查目标操作数是否是该寄存器
+    if (is_mov(ins)) {
+        const char* dst = get_operand(ins, 0);
+        return !operands_equal(dst, reg);
+    }
+    
+    return false;
+}
+
+/* 窥孔优化：MOV Rx, src; [CLR C]; MOV A, Rx -> [CLR C]; MOV A, src (如果 Rx 之后不再使用) */
 static int peephole_eliminate_temp_reg(List* instrs, int start) {
     if (start + 1 >= instrs->len) return 0;
     
     AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
-    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
-    
-    if (!is_mov(ins1) || !is_mov(ins2)) return 0;
+    if (!is_mov(ins1)) return 0;
     
     const char* dst1 = get_operand(ins1, 0);
     const char* src1 = get_operand(ins1, 1);
-    const char* dst2 = get_operand(ins2, 0);
-    const char* src2 = get_operand(ins2, 1);
     
-    // MOV Rx, src; MOV A, Rx -> MOV A, src
-    if (dst1 && dst1[0] == 'R' && 
-        operands_equal(dst2, "A") && 
-        operands_equal(src2, dst1) &&
-        !operands_equal(src1, "A")) {
+    // 第一条必须是 MOV Rx, src
+    if (!dst1 || dst1[0] != 'R' || operands_equal(src1, "A")) {
+        return 0;
+    }
+    
+    // 查找下一条 MOV A, Rx 指令（可能跨越 CLR C 等非破坏性指令）
+    int offset = 1;
+    while (start + offset < instrs->len && offset <= 2) {
+        AsmInstr* ins_next = (AsmInstr*)list_get(instrs, start + offset);
         
-        // 检查 Rx 之后是否还被使用
-        if (!reg_read_before_write_or_end(instrs, start + 2, dst1)) {
-            // 修改第二条指令的源操作数为第一条的源
-            free(ins2->args->head->next->elem);
-            ins2->args->head->next->elem = strdup(src1);
+        if (is_mov(ins_next)) {
+            const char* dst_next = get_operand(ins_next, 0);
+            const char* src_next = get_operand(ins_next, 1);
             
-            // 删除第一条指令
-            remove_instr(instrs, start);
-            return 1;
+            // 找到 MOV A, Rx
+            if (operands_equal(dst_next, "A") && operands_equal(src_next, dst1)) {
+                // 检查 Rx 之后是否还被使用
+                if (!reg_read_before_write_or_end(instrs, start + offset + 1, dst1)) {
+                    // 修改 MOV A, Rx 为 MOV A, src
+                    free(ins_next->args->head->next->elem);
+                    ins_next->args->head->next->elem = strdup(src1);
+                    
+                    // 删除 MOV Rx, src
+                    remove_instr(instrs, start);
+                    return 1;
+                }
+            }
+            break;  // 遇到其他 MOV，停止查找
         }
+        
+        // 检查中间指令是否修改了 Rx 或 src
+        if (!instr_does_not_modify_reg(ins_next, dst1)) {
+            break;
+        }
+        
+        offset++;
     }
     
     return 0;
