@@ -55,7 +55,7 @@ unsigned char idata  g_idata  = 0x02;
 int test_idata_rw(int v) {
     g_idata = (unsigned char)v;
     unsigned char idata local = g_idata;
-    g_idata = local + 1;
+    g_idata = local - 2;
     return g_idata;
 }
 

@@ -217,12 +217,19 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     isel_ensure_in_acc(isel, src1);
     
     if (src2_is_imm) {
+        int imm_low = (int)(imm_val & 0xFF);
         // 优化：+1 使用 INC A
-        if ((imm_val & 0xFF) == 1 && size == 1) {
+        if (imm_low == 1 && size == 1) {
             isel_emit(isel, "INC", "A", NULL, instr_to_ssa_str(ins));
-        } else {
+        } 
+        // 优化：+2 使用 INC A; INC A
+        else if (imm_low == 2 && size == 1) {
+            isel_emit(isel, "INC", "A", NULL, instr_to_ssa_str(ins));
+            isel_emit(isel, "INC", "A", NULL, NULL);
+        } 
+        else {
             char imm_str[16];
-            snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
+            snprintf(imm_str, sizeof(imm_str), "#%d", imm_low);
             isel_emit(isel, "ADD", "A", imm_str, instr_to_ssa_str(ins));
         }
     } else {
@@ -319,13 +326,20 @@ static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     emit_mov(isel, "A", (char*)src1_lo, ins);
     
     if (src2_is_imm) {
+        int imm_low = (int)(imm_val & 0xFF);
         // 优化：-1 使用 DEC A
-        if ((imm_val & 0xFF) == 1 && size == 1) {
+        if (imm_low == 1 && size == 1) {
             isel_emit(isel, "DEC", "A", NULL, instr_to_ssa_str(ins));
-        } else {
+        } 
+        // 优化：-2 使用 DEC A; DEC A
+        else if (imm_low == 2 && size == 1) {
+            isel_emit(isel, "DEC", "A", NULL, instr_to_ssa_str(ins));
+            isel_emit(isel, "DEC", "A", NULL, NULL);
+        } 
+        else {
             isel_emit(isel, "CLR", "C", NULL, NULL);
             char imm_str[16];
-            snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
+            snprintf(imm_str, sizeof(imm_str), "#%d", imm_low);
             isel_emit(isel, "SUBB", "A", imm_str, instr_to_ssa_str(ins));
         }
     } else {
