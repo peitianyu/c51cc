@@ -3,7 +3,7 @@
 // // ============================================
 
 // // ----- 1. 基础 SFR 定义 (仅保留实际使用的) -----
-// register char  P1      = 0x90;
+register char  P1      = 0x90;
 // register char  ACC     = 0xE0;
 // register char  B       = 0xF0;
 // register char  SCON    = 0x98;
@@ -12,8 +12,8 @@
 // register char  TCON    = 0x88;
 
 // // ----- 2. SBIT 定义（位寻址）-----
-// register bool  P1_0    = 0x90;  // P1.0
-// register bool  P1_7    = 0x97;  // P1.7
+register bool  P1_0    = 0x90;  // P1.0
+register bool  P1_7    = 0x97;  // P1.7
 // register bool  EA      = 0xAF;  // IE.7
 // register bool  ES      = 0xAC;  // IE.4
 // register bool  TR0     = 0x8C;  // TCON.4
@@ -21,14 +21,14 @@
 
 // // // ----- 3. 各存储区变量 -----
 // unsigned char data   g_data   = 0x01;
-unsigned char idata  g_idata  = 0x02;
-unsigned char xdata  g_xdata  = 0x03;
+// unsigned char idata  g_idata  = 0x02;
+// unsigned char xdata  g_xdata  = 0x03;
 // unsigned char code   g_code   = 0x04;
 
-// // ----- 4. 位寻址区变量 -----
-// unsigned char  g_bdata  = 0x00;
-// register bool  g_bit0 = 0x00;
-// register bool  g_bit7 = 0x07;
+// ----- 4. 位寻址区变量 -----
+unsigned char  g_bdata  = 0x00;
+register bool  g_bit0 = 0x00;
+register bool  g_bit7 = 0x07;
 
 // // ----- 5. 指针测试 -----
 // unsigned data  char * ptr_data;
@@ -52,45 +52,45 @@ unsigned char xdata  g_xdata  = 0x03;
 //     return a - b - c;
 // }
 
-int test_idata_rw(int v) {
-    g_idata = (unsigned char)v;
-    unsigned char idata local = g_idata;
-    g_idata = local - 2;
-    return g_idata;
-}
+// int test_idata_rw(int v) {
+//     g_idata = (unsigned char)v;
+//     unsigned char idata local = g_idata;
+//     g_idata = local - 2;
+//     return g_idata;
+// }
 
-char test_xdata_rw(char v) {
-    g_xdata = (unsigned char)v;
-    unsigned char xdata local = g_xdata;
-    g_xdata = local - 1;
-    return g_xdata;
-}
+// char test_xdata_rw(char v) {
+//     g_xdata = (unsigned char)v;
+//     unsigned char xdata local = g_xdata;
+//     g_xdata = local - 1;
+//     return g_xdata;
+// }
 
 // int test_code_read(void) {
 //     return g_code + 1;
 // }
 
-// // ----- 7. 位操作测试 -----
-// int test_bit_operations(void) {
-//     int result = 0;
+// ----- 7. 位操作测试 -----
+int test_bit_operations(void) {
+    int result = 0;
     
-//     g_bdata = 0x00;
-//     g_bit0 = 1;
-//     if (g_bit0) result |= 0x01;
+    g_bdata = 0x00;
+    g_bit0 = 1;
+    if (g_bit0) result |= 0x01;
     
-//     g_bit7 = 1;
-//     if (g_bit7) result |= 0x80;
+    g_bit7 = 1;
+    if (g_bit7) result |= 0x80;
     
-//     P1 = 0x00;
-//     P1_0 = 1;
-//     P1_7 = 1;
-//     if (P1_0 && P1_7) result |= 0x02;
+    P1 = 0x00;
+    P1_0 = 1;
+    P1_7 = 1;
+    if (P1_0 && P1_7) result |= 0x02;
     
-//     g_bit0 = 0;
-//     if (!g_bit0) result |= 0x04;
+    g_bit0 = 0;
+    if (!g_bit0) result |= 0x04;
     
-//     return result;
-// }
+    return result;
+}
 
 // // ----- 8. SFR 复杂操作测试 -----
 // int test_sfr_complex(int v) {

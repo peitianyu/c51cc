@@ -61,6 +61,17 @@ static int get_value_size(ISelContext* isel, ValueName val) {
     return 1;  // 默认为单字节
 }
 
+static int get_mem_space(Ctype* mem_type) {
+    if (!mem_type) return 0;
+    return (mem_type->attr >> 7) & 0x7; // ctype_data
+}
+
+static bool is_sbit_type(Ctype* mem_type) {
+    if (!mem_type) return false;
+    CtypeAttr a = get_attr(mem_type->attr);
+    return a.ctype_register && mem_type->type == CTYPE_BOOL;
+}
+
 /* 获取值指定字节偏移的寄存器名称 */
 const char* isel_get_value_reg_at(ISelContext* isel, ValueName val, int offset) {
     int base_reg = isel_get_value_reg(isel, val);
@@ -482,17 +493,36 @@ static void emit_store(ISelContext* isel, Instr* ins) {
         free(key);
     }
     
+    const char* label = NULL;
     if (!var_name && ins->labels && ins->labels->len > 0) {
-        var_name = list_get(ins->labels, 0);
+        label = list_get(ins->labels, 0);
+        if (label && label[0] == '@') {
+            var_name = label + 1;
+        } else {
+            var_name = label;
+        }
     }
     
     if (!var_name) return;
+
+    // 处理直接常量存储（labels[0] 以 @ 开头，args 可能被清空）
+    if (label && label[0] == '@' && (!ins->args || ins->args->len == 0)) {
+        if (is_sbit_type(ins->mem_type)) {
+            if (ins->imm.ival) {
+                isel_emit(isel, "SETB", (char*)var_name, NULL, instr_to_ssa_str(ins));
+            } else {
+                isel_emit(isel, "CLR", (char*)var_name, NULL, instr_to_ssa_str(ins));
+            }
+        } else {
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%ld", ins->imm.ival);
+            isel_emit(isel, "MOV", (char*)var_name, imm_str, instr_to_ssa_str(ins));
+        }
+        return;
+    }
     
     // 获取内存空间类型 (ctype_data 在 bit 7-9)
-    int space = 0;
-    if (ins->mem_type && ins->mem_type->attr) {
-        space = (ins->mem_type->attr >> 7) & 0x7;
-    }
+    int space = get_mem_space(ins->mem_type);
     
     // 获取值的寄存器
     const char* val_reg = isel_get_lo_reg(isel, val);
@@ -502,6 +532,13 @@ static void emit_store(ISelContext* isel, Instr* ins) {
         isel_emit(isel, "MOV", "A", (char*)val_reg, NULL);
     }
     
+    // sbit 写入：MOV C, ACC.0; MOV bit, C
+    if (is_sbit_type(ins->mem_type)) {
+        isel_emit(isel, "MOV", "C", "ACC.0", NULL);
+        isel_emit(isel, "MOV", (char*)var_name, "C", instr_to_ssa_str(ins));
+        return;
+    }
+
     // 根据内存空间生成不同的指令
     if (space == 4) {
         // xdata (4): 使用 MOVX @DPTR
@@ -557,20 +594,25 @@ static void emit_load(ISelContext* isel, Instr* ins) {
     
     // 如果没有通过 ptr 找到，尝试从 labels 获取
     if (!var_name && ins->labels && ins->labels->len > 0) {
-        var_name = list_get(ins->labels, 0);
+        const char* label = list_get(ins->labels, 0);
+        if (label && label[0] == '@') var_name = label + 1;
+        else var_name = label;
     }
     
     if (!var_name) return;
     
     // 获取内存空间类型 (ctype_data 在 bit 7-9)
-    int space = 0;
-    if (ins->mem_type && ins->mem_type->attr) {
-        space = (ins->mem_type->attr >> 7) & 0x7;
-    }
+    int space = get_mem_space(ins->mem_type);
     
     int size = ins->type ? ins->type->size : 1;
     int reg = alloc_reg_for_value(isel, ins->dest, size);
     
+    // sbit 读取：MOV C, bit; CLR A; RLC A
+    if (is_sbit_type(ins->mem_type)) {
+        isel_emit(isel, "MOV", "C", (char*)var_name, instr_to_ssa_str(ins));
+        isel_emit(isel, "CLR", "A", NULL, NULL);
+        isel_emit(isel, "RLC", "A", NULL, NULL);
+    } else
     // 根据内存空间生成不同的加载指令
     if (space == 4) {
         // xdata (4): 使用 MOVX A, @DPTR
