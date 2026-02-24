@@ -245,24 +245,39 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         isel_emit(isel, "ADD", "A", src2_lo, NULL);
     }
     
+    int dst_reg = -1;
     if (keep_in_acc) {
-        // 记录结果在累加器中，不分配物理寄存器
-        int* reg_num = malloc(sizeof(int));
-        *reg_num = -2;  // -2 表示在累加器中
-        char* key = int_to_key(ins->dest);
-        dict_put(isel->ctx->value_to_reg, key, reg_num);
-        isel->acc_busy = true;
-        isel->acc_val = ins->dest;
+        // 如果是单字节值，可以保留在累加器中
+        if (size == 1) {
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = -2;  // -2 表示在累加器中
+            char* key = int_to_key(ins->dest);
+            dict_put(isel->ctx->value_to_reg, key, reg_num);
+            isel->acc_busy = true;
+            isel->acc_val = ins->dest;
+        } else {
+            // 对于 2 字节的值，仍然为目标分配寄存器并把低字节存回，
+            // 以避免后续高字节计算覆盖低字节
+            dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+            const char* dst_lo = isel_reg_name(dst_reg + 1);
+            emit_mov(isel, (char*)dst_lo, "A", ins);
+        }
     } else {
         // 只有不保留在累加器时才分配寄存器
-        const char* dst_lo = isel_reg_name(alloc_reg_for_value(isel, ins->dest, size));
+        dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+        const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
         emit_mov(isel, (char*)dst_lo, "A", ins);
     }
     
     if (size == 2) {
         const char* src1_hi = isel_get_hi_reg(isel, src1);
-        const char* dst_hi = isel_reg_name(isel_get_value_reg(isel, ins->dest));
-        
+        const char* dst_hi = NULL;
+        if (dst_reg >= 0) {
+            dst_hi = isel_reg_name(dst_reg);
+        } else {
+            dst_hi = isel_reg_name(isel_get_value_reg(isel, ins->dest));
+        }
+
         emit_mov(isel, "A", (char*)src1_hi, ins);
         
         if (src2_is_imm) {
@@ -276,6 +291,29 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         }
         
         emit_mov(isel, (char*)dst_hi, "A", ins);
+    }
+
+    /* 如果下一条是返回指令，提前把结果放到返回寄存器 R7:R6 */
+    if (next && next->op == IROP_RET) {
+        const char* ret_lo = NULL;
+        const char* ret_hi = NULL;
+        if (dst_reg >= 0) {
+            ret_lo = isel_reg_name(dst_reg + 1);
+            ret_hi = isel_reg_name(dst_reg);
+        } else {
+            ret_lo = isel_get_lo_reg(isel, ins->dest);
+            ret_hi = isel_get_hi_reg(isel, ins->dest);
+        }
+        if (ret_lo && strcmp(ret_lo, "R7") != 0) {
+            emit_mov(isel, "R7", (char*)ret_lo, ins);
+        }
+        if (size == 2) {
+            if (ret_hi && strcmp(ret_hi, "R6") != 0) {
+                emit_mov(isel, "R6", (char*)ret_hi, ins);
+            }
+        } else {
+            emit_mov(isel, "R6", "#0", ins);
+        }
     }
 }
 
@@ -327,21 +365,19 @@ static void emit_trunc(ISelContext* isel, Instr* ins) {
 static void emit_ret(ISelContext* isel, Instr* ins) {
     if (ins->args && ins->args->len > 0) {
         ValueName ret_val = *(ValueName*)list_get(ins->args, 0);
+        int size = ins->type ? ins->type->size : 1;
+
+        /* 优先使用已分配寄存器或累加器作为返回源，不强制清零 R6 */
         const char* ret_lo = isel_get_lo_reg(isel, ret_val);
-        
-        // 返回值放入R7（约定）
-        if (strcmp(ret_lo, "R7") != 0) {
+        if (ret_lo && strcmp(ret_lo, "R7") != 0) {
             emit_mov(isel, "R7", (char*)ret_lo, ins);
         }
-        
-        int size = ins->type ? ins->type->size : 1;
+
         if (size == 2) {
             const char* ret_hi = isel_get_hi_reg(isel, ret_val);
-            if (strcmp(ret_hi, "R6") != 0) {
+            if (ret_hi && strcmp(ret_hi, "R6") != 0) {
                 emit_mov(isel, "R6", (char*)ret_hi, ins);
             }
-        } else {
-            emit_mov(isel, "R6", "#0", ins);
         }
     }
     
