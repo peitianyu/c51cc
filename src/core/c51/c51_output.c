@@ -65,7 +65,21 @@ static void print_asminstr(FILE *fp, AsmInstr *ins)
     fprintf(fp, "        %-24s", instrbuf);
 
     if (ins->ssa) {
-        fprintf(fp, "%s", ins->ssa);
+        const char *s = ins->ssa;
+        while (*s == ' ' || *s == '\t') s++;
+
+        /* 跳过可能的注释前缀 ';' */
+        if (*s == ';') s++;
+        while (*s == ' ' || *s == '\t') s++;
+
+        /* 如果 ssa 字符串以指令文本开头，跳过重复部分 */
+        size_t instr_len = strlen(instrbuf);
+        if (instr_len > 0 && strncmp(s, instrbuf, instr_len) == 0) {
+            s += instr_len;
+            while (*s == ' ' || *s == '\t' || *s == ',' ) s++;
+        }
+
+        fprintf(fp, "; %s", s);
     }
 
     fprintf(fp, "\n");

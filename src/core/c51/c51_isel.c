@@ -3,10 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* C51参数寄存器约定 */
-const int param_regs_char[] = {7, 5, 3, 2, 4, 6};
-const int param_regs_int_h[] = {6, 4, 2};
-const int param_regs_int_l[] = {7, 5, 3};
+/* 寄存器分配相关接口在 c51_regalloc.c 中实现 */
+#include "c51_regalloc.h"
 
 /* 辅助函数：将整数键转换为字符串 */
 char* int_to_key(int n) {
@@ -131,44 +129,7 @@ bool isel_can_keep_in_acc(ISelContext* isel, Instr* ins, Instr* next) {
 }
 
 /* 为值分配寄存器 */
-static int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
-    if (!isel || !isel->ctx) return -1;
-    
-    // 检查是否已分配
-    int existing = isel_get_value_reg(isel, val);
-    if (existing >= 0) return existing;
-    
-    // 找空闲寄存器（优先使用高编号 R7-R0）
-    for (int reg = 7; reg >= 0; reg--) {
-        if (reg + size > 8) continue;
-        
-        bool available = true;
-        for (int j = 0; j < size; j++) {
-            if (isel->reg_busy[reg + j]) {
-                available = false;
-                break;
-            }
-        }
-        
-        if (available) {
-            for (int j = 0; j < size; j++) {
-                isel->reg_busy[reg + j] = true;
-                isel->reg_val[reg + j] = val;
-            }
-            
-            // 记录到上下文
-            int* reg_num = malloc(sizeof(int));
-            *reg_num = reg;
-            char* key = int_to_key(val);
-            dict_put(isel->ctx->value_to_reg, key, reg_num);
-            // key已被dict接管
-            
-            return reg;
-        }
-    }
-    
-    return 0; // 使用R0作为溢出
-}
+/* alloc_reg_for_value 在 c51_regalloc.c 中提供 */
 
 /* 获取指令源操作数 */
 static ValueName get_src1_value(Instr* ins) {
@@ -209,12 +170,12 @@ static void emit_const(ISelContext* isel, Instr* ins) {
     
     if (size == 1) {
         char imm_str[16];
-        snprintf(imm_str, sizeof(imm_str), "#%d", val & 0xFF);
+        snprintf(imm_str, sizeof(imm_str), "#%XH", val & 0xFF);
         emit_mov(isel, isel_reg_name(reg), imm_str, ins);
     } else if (size == 2) {
         char imm_high[16], imm_low[16];
-        snprintf(imm_high, sizeof(imm_high), "#%d", (val >> 8) & 0xFF);
-        snprintf(imm_low, sizeof(imm_low), "#%d", val & 0xFF);
+        snprintf(imm_high, sizeof(imm_high), "#%XH", (val >> 8) & 0xFF);
+        snprintf(imm_low, sizeof(imm_low), "#%XH", val & 0xFF);
         
         emit_mov(isel, isel_reg_name(reg), imm_high, ins);
         emit_mov(isel, isel_reg_name(reg + 1), imm_low, ins);
@@ -503,6 +464,79 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 isel_emit(isel, "; ASM", NULL, asm_text, NULL);
             }
             break;
+        case IROP_CALL: {
+            if (!ins->labels || ins->labels->len < 1) break;
+            const char* fname = list_get(ins->labels, 0);
+
+            // 布置参数到约定寄存器
+            for (int k = 0; ins->args && k < ins->args->len; k++) {
+                ValueName v = *(ValueName*)list_get(ins->args, k);
+                char* key = int_to_key(v);
+                Ctype* t = NULL;
+                if (isel->ctx && isel->ctx->value_type) {
+                    t = (Ctype*)dict_get(isel->ctx->value_type, key);
+                }
+                free(key);
+                int size = t ? t->size : 1;
+
+                if (size == 1) {
+                    if (k >= 6) continue;
+                    int targ = param_regs_char[k];
+                    const char* src_lo = isel_get_lo_reg(isel, v);
+                    const char* dst = isel_reg_name(targ);
+                    if (src_lo && strcmp(src_lo, dst) != 0) {
+                        emit_mov(isel, (char*)dst, (char*)src_lo, ins);
+                    }
+                } else {
+                    if (k >= 3) continue;
+                    int targ_hi = param_regs_int_h[k];
+                    int targ_lo = param_regs_int_l[k];
+                    const char* src_hi = isel_get_hi_reg(isel, v);
+                    const char* src_lo = isel_get_lo_reg(isel, v);
+                    const char* dst_hi = isel_reg_name(targ_hi);
+                    const char* dst_lo = isel_reg_name(targ_lo);
+                    if (src_hi && strcmp(src_hi, dst_hi) != 0) emit_mov(isel, (char*)dst_hi, (char*)src_hi, ins);
+                    if (src_lo && strcmp(src_lo, dst_lo) != 0) emit_mov(isel, (char*)dst_lo, (char*)src_lo, ins);
+                }
+            }
+
+            // 发出调用
+            char callee[256];
+            snprintf(callee, sizeof(callee), "_%s", fname);
+            isel_emit(isel, "LCALL", callee, NULL, instr_to_ssa_str(ins));
+
+            // 将返回值（如果有）分配到目标寄存器
+            if (ins->dest > 0) {
+                int size = ins->type ? ins->type->size : 1;
+
+                /*
+                 * 优化: 如果紧接着的下一条指令是返回，并且该返回返回的正是
+                 * 本次调用的结果（例如 pattern: call; ret v），则无需把
+                 * R7:R6 的返回值先拷贝到临时寄存器再在 emit_ret 中拷贝回 R7:R6。
+                 * 直接让 emit_ret 从 R7:R6 读取并返回，避免多余的 MOV 指令。
+                 */
+                bool skip_copy_back = false;
+                if (next && next->op == IROP_RET && next->args && next->args->len > 0) {
+                    ValueName ret_arg = *(ValueName*)list_get(next->args, 0);
+                    if (ret_arg == ins->dest) {
+                        skip_copy_back = true;
+                    }
+                }
+
+                if (!skip_copy_back) {
+                    int reg = alloc_reg_for_value(isel, ins->dest, size);
+                    if (size == 1) {
+                        const char* lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+                        if (strcmp("R7", lo) != 0) emit_mov(isel, (char*)lo, "R7", ins);
+                    } else if (size == 2) {
+                        const char* lo = isel_reg_name(reg + 1);
+                        const char* hi = isel_reg_name(reg);
+                        if (strcmp("R7", lo) != 0) emit_mov(isel, (char*)lo, "R7", ins);
+                        if (strcmp("R6", hi) != 0) emit_mov(isel, (char*)hi, "R6", ins);
+                    }
+                }
+            }
+        } break;
         default:
             break;
     }
@@ -537,50 +571,7 @@ void isel_block(ISelContext* isel, Block* block) {
 }
 
 /* 为参数分配寄存器 */
-static void alloc_param_regs(ISelContext* isel, Func* f) {
-    if (!f->params || !f->param_types) return;
-    
-    int param_idx = 0;
-    Iter pit = list_iter(f->params);
-    Iter tit = list_iter(f->param_types);
-    
-    while (!iter_end(pit) && !iter_end(tit)) {
-        char* param_name = iter_next(&pit);
-        Ctype* param_type = iter_next(&tit);
-        
-        // 在entry块查找PARAM指令
-        if (f->entry && f->entry->instrs) {
-            for (Iter it = list_iter(f->entry->instrs); !iter_end(it);) {
-                Instr* ins = iter_next(&it);
-                if (ins && ins->op == IROP_PARAM && ins->labels && ins->labels->len > 0) {
-                    const char* name = list_get(ins->labels, 0);
-                    if (name && param_name && strcmp(name, param_name) == 0) {
-                        int size = param_type ? param_type->size : 1;
-                        int reg;
-                        
-                        if (size == 1) {
-                            reg = (param_idx < 6) ? param_regs_char[param_idx] : 7;
-                        } else {
-                            reg = (param_idx < 3) ? param_regs_int_h[param_idx] : 6;
-                        }
-                        
-                        int* reg_num = malloc(sizeof(int));
-                        *reg_num = reg;
-                        dict_put(isel->ctx->value_to_reg, int_to_key(ins->dest), reg_num);
-                        
-                        // 标记寄存器已用
-                        for (int j = 0; j < size && (reg + j) < 8; j++) {
-                            isel->reg_busy[reg + j] = true;
-                            isel->reg_val[reg + j] = ins->dest;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        param_idx++;
-    }
-}
+/* alloc_param_regs 在 c51_regalloc.c 中提供 */
 
 /* 函数指令选择主入口 */
 void isel_function(C51GenContext* ctx, Func* func) {
