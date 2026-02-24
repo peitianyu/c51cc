@@ -290,6 +290,12 @@ static bool is_volatile_mem(const Instr *i) {
     return a.ctype_volatile || a.ctype_register;
 }
 
+static bool is_local_var(Func *f, const char *name) {
+    if (!f || !name || !f->stack_offsets) return false;
+    void *p = dict_get(f->stack_offsets, (char*)name);
+    return (p != NULL);
+}
+
 static bool is_pure_instr(const Instr *i) {
     switch (i->op) {
     case IROP_CONST:
@@ -1371,17 +1377,24 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
                     Instr *bdef = find_def_instr(f, base);
                     if (bdef && bdef->op == IROP_ADDR && bdef->labels && bdef->labels->len > 0)
                         name = (const char *)list_get(bdef->labels, 0);
-                    for (int k = 0; k < store_count; k++) {
-                        if (stores[k].offset != off) continue;
-                        bool match = (name && stores[k].use_name && stores[k].name && !strcmp(stores[k].name, name)) ||
-                                     (!name && !stores[k].use_name && stores[k].base == base);
-                        if (match) {
-                            i->op = IROP_TRUNC;
-                            list_clear(i->args);
-                            ValueName *p = pass_alloc(sizeof *p); *p = stores[k].val;
-                            list_push(i->args, p);
-                            changed = true; s->fold++;
-                            break;
+                    
+                    // 禁止对全局变量进行 store-to-load forwarding
+                    // 因为全局变量可能被其他代码/中断修改，即使在单个基本块内也不安全
+                    bool is_global = (bdef && bdef->op == IROP_ADDR && name && !is_local_var(f, name));
+                    
+                    if (!is_global) {
+                        for (int k = 0; k < store_count; k++) {
+                            if (stores[k].offset != off) continue;
+                            bool match = (name && stores[k].use_name && stores[k].name && !strcmp(stores[k].name, name)) ||
+                                         (!name && !stores[k].use_name && stores[k].base == base);
+                            if (match) {
+                                i->op = IROP_TRUNC;
+                                list_clear(i->args);
+                                ValueName *p = pass_alloc(sizeof *p); *p = stores[k].val;
+                                list_push(i->args, p);
+                                changed = true; s->fold++;
+                                break;
+                            }
                         }
                     }
                 }
