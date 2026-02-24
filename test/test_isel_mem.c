@@ -20,7 +20,7 @@
 // register bool  TI      = 0x99;  // SCON.1
 
 // // // ----- 3. 各存储区变量 -----
-// unsigned char data   g_data   = 0x01;
+unsigned char data   g_data   = 0x01;
 // unsigned char idata  g_idata  = 0x02;
 // unsigned char xdata  g_xdata  = 0x03;
 // unsigned char code   g_code   = 0x04;
@@ -37,18 +37,22 @@
 // unsigned code  char * ptr_code;
 // unsigned char *cod = "Hello, Code Space!";
 
-// // ----- 6. 基础存储区访问测试 -----
-// int test_data_rw(int v) {
-//     unsigned char data local;
-//     g_data = (unsigned char)v;
-//     local = g_data;
-//     g_data = local + 1;
-//     return g_data;
+// ----- 6. 基础存储区访问测试 -----
+int test_data_rw(int v) {
+    unsigned char data local;
+    g_data = (unsigned char)v;
+    local = g_data;
+    g_data = local + 1;
+    return g_data;
+}
+
+// int add3(int a, int b, int c) {
+//     return a + b + c;
 // }
 
-int add3(int a, int b, int c) {
-    return a + b + c;
-}
+// int sub3(int a, int b, int c) {
+//     return a - b - c;
+// }
 
 // int test_idata_rw(int v) {
 //     unsigned char idata local;

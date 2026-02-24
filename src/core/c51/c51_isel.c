@@ -279,14 +279,17 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
 }
 
 /* 发射减法 */
-static void emit_sub(ISelContext* isel, Instr* ins) {
+static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     ValueName src2 = get_src2_value(ins);
     int size = ins->type ? ins->type->size : 1;
     
     const char* src1_lo = isel_get_lo_reg(isel, src1);
     const char* src2_lo = isel_get_lo_reg(isel, src2);
-    const char* dst_lo = isel_reg_name(alloc_reg_for_value(isel, ins->dest, size));
+    
+    // 分配目标寄存器并保存，以便后续获取高字节
+    int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     
     isel_emit(isel, "CLR", "C", NULL, NULL);
     
@@ -297,11 +300,34 @@ static void emit_sub(ISelContext* isel, Instr* ins) {
     if (size == 2) {
         const char* src1_hi = isel_get_hi_reg(isel, src1);
         const char* src2_hi = isel_get_hi_reg(isel, src2);
-        const char* dst_hi = isel_reg_name(isel_get_value_reg(isel, ins->dest));
+        const char* dst_hi = isel_reg_name(dst_reg);
         
         emit_mov(isel, "A", (char*)src1_hi, ins);
         isel_emit(isel, "SUBB", "A", (char*)src2_hi, NULL);
         emit_mov(isel, (char*)dst_hi, "A", ins);
+    }
+    
+    /* 如果下一条是返回指令，提前把结果放到返回寄存器 R7:R6 */
+    if (next && next->op == IROP_RET) {
+        const char* ret_lo = NULL;
+        const char* ret_hi = NULL;
+        if (dst_reg >= 0) {
+            ret_lo = isel_reg_name(dst_reg + 1);
+            ret_hi = isel_reg_name(dst_reg);
+        } else {
+            ret_lo = isel_get_lo_reg(isel, ins->dest);
+            ret_hi = isel_get_hi_reg(isel, ins->dest);
+        }
+        if (ret_lo && strcmp(ret_lo, "R7") != 0) {
+            emit_mov(isel, "R7", (char*)ret_lo, ins);
+        }
+        if (size == 2) {
+            if (ret_hi && strcmp(ret_hi, "R6") != 0) {
+                emit_mov(isel, "R6", (char*)ret_hi, ins);
+            }
+        } else {
+            emit_mov(isel, "R6", "#0", ins);
+        }
     }
 }
 
@@ -441,7 +467,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_add(isel, ins, next);
             break;
         case IROP_SUB:
-            emit_sub(isel, ins);
+            emit_sub(isel, ins, next);
             break;
         case IROP_TRUNC:
             emit_trunc(isel, ins);
