@@ -614,7 +614,7 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     
     /* 如果下一条是返回指令，提前把结果放到返回寄存器 R7:R6 */
     if (next && next->op == IROP_RET) {
-        const char* ret_lo = isel_reg_name(dst_reg + 1);
+        const char* ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
         const char* ret_hi = isel_reg_name(dst_reg);
         
         if (strcmp(ret_lo, "R7") != 0) {
@@ -1010,7 +1010,7 @@ static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         const char* ret_lo = NULL;
         const char* ret_hi = NULL;
         if (dst_reg >= 0) {
-            ret_lo = isel_reg_name(dst_reg + 1);
+            ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
             ret_hi = isel_reg_name(dst_reg);
         } else {
             ret_lo = isel_get_lo_reg(isel, ins->dest);

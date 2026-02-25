@@ -405,15 +405,18 @@ static void optimize_section(Section* sec) {
 
 void c51_optimize(C51GenContext* ctx, ObjFile* obj)
 {
-    if (!obj || !obj->sections) return;
-    
-    // 对每个代码段执行窥孔优化
-    for (Iter it = list_iter(obj->sections); !iter_end(it);) {
-        Section* sec = iter_next(&it);
-        if (sec && sec->kind == SEC_CODE) {
-            optimize_section(sec);
-        }
-    }
+    (void)ctx;
+    (void)obj;
+
+    /*
+     * 临时禁用 C51 窥孔优化。
+     *
+     * 当前优化规则（尤其是基于 MOV 的传播/删除）在寄存器重用、
+     * 返回值约定与跨指令数据流上仍不够保守，可能删除语义必需的
+     * 赋值，导致生成汇编出现“使用未更新寄存器值”的错误。
+     *
+     * 在补齐完整的数据流/活性分析前，优先保证代码正确性。
+     */
 }
 
 /* 判断操作数是否是寄存器（R0-R7 或 A） */
