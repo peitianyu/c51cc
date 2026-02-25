@@ -1051,8 +1051,8 @@ static void emit_cmp_eq(ISelContext* isel, Instr* ins) {
 static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, bool is_gt) {
     ValueName a = get_src1_value(ins);
     ValueName b = get_src2_value(ins);
-    ValueName lhs = is_gt ? b : a;
-    ValueName rhs = is_gt ? a : b;
+    ValueName lhs = a;
+    ValueName rhs = b;
 
     int size = ins->type ? ins->type->size : 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
@@ -1064,30 +1064,109 @@ static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, bool is_gt) {
     snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
+    /* 统一以 lhs - rhs 形式比较，分别处理 LT/GT 逻辑以保持直观方向 */
     if (w == 1) {
         const char* llo = isel_get_lo_reg(isel, lhs);
         const char* rlo = isel_get_lo_reg(isel, rhs);
+
+        /* 计算 A = llo - rlo (带借位)，随后根据 is_gt/is_lt 判断 */
         isel_emit(isel, "CLR", "C", NULL, NULL);
         emit_mov(isel, "A", (char*)llo, ins);
         isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
+
+        if (!is_gt) {
+            /* LT: borrow -> true, else false */
+            isel_emit(isel, "JC", l_true, NULL, NULL);
+            emit_set_bool_result(isel, ins, dst_reg, size, false);
+            isel_emit(isel, "SJMP", l_end, NULL, NULL);
+            isel_emit(isel, lb_true, NULL, NULL, NULL);
+            emit_set_bool_result(isel, ins, dst_reg, size, true);
+            isel_emit(isel, lb_end, NULL, NULL, NULL);
+        } else {
+            /* GT: if borrow -> false; if A==0 -> equal -> false; else true */
+            char* l_false = isel_new_label(isel, "Lcmp_false_tmp");
+            char lb_false[64]; snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
+
+            isel_emit(isel, "JC", l_false, NULL, NULL); /* lhs < rhs -> false */
+            isel_emit(isel, "JZ", l_false, NULL, NULL); /* equal -> false */
+            isel_emit(isel, "SJMP", l_true, NULL, NULL);
+
+            isel_emit(isel, lb_false, NULL, NULL, NULL);
+            emit_set_bool_result(isel, ins, dst_reg, size, false);
+            isel_emit(isel, "SJMP", l_end, NULL, NULL);
+
+            isel_emit(isel, lb_true, NULL, NULL, NULL);
+            emit_set_bool_result(isel, ins, dst_reg, size, true);
+            isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+            free(l_false);
+        }
     } else {
         const char* llo = isel_get_lo_reg(isel, lhs);
         const char* lhi = isel_get_hi_reg(isel, lhs);
         const char* rlo = isel_get_lo_reg(isel, rhs);
         const char* rhi = isel_get_hi_reg(isel, rhs);
-        isel_emit(isel, "CLR", "C", NULL, NULL);
-        emit_mov(isel, "A", (char*)llo, ins);
-        isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
-        emit_mov(isel, "A", (char*)lhi, NULL);
-        isel_emit(isel, "SUBB", "A", (char*)rhi, NULL);
-    }
 
-    isel_emit(isel, "JC", l_true, NULL, NULL);
-    emit_set_bool_result(isel, ins, dst_reg, size, false);
-    isel_emit(isel, "SJMP", l_end, NULL, NULL);
-    isel_emit(isel, lb_true, NULL, NULL, NULL);
-    emit_set_bool_result(isel, ins, dst_reg, size, true);
-    isel_emit(isel, lb_end, NULL, NULL, NULL);
+        /* 先比较高字节，再在相等情况下比较低字节，使用 SUBB 以获得借位信息 */
+        isel_emit(isel, "CLR", "C", NULL, NULL);
+        emit_mov(isel, "A", (char*)lhi, ins);
+        isel_emit(isel, "SUBB", "A", (char*)rhi, NULL);
+
+        if (!is_gt) {
+            /* LT: if borrow from high -> true; if high equal -> check low */
+            char* l_check_low_1 = isel_new_label(isel, "Lcheck_low_1");
+            char lb_check_low_1[64]; snprintf(lb_check_low_1, sizeof(lb_check_low_1), "%s:", l_check_low_1);
+
+            isel_emit(isel, "JC", l_true, NULL, NULL);
+            isel_emit(isel, "JZ", l_check_low_1, NULL, NULL);
+            /* high > -> false */
+            emit_set_bool_result(isel, ins, dst_reg, size, false);
+            isel_emit(isel, "SJMP", l_end, NULL, NULL);
+            /* high equal: compare low */
+            isel_emit(isel, lb_check_low_1, NULL, NULL, NULL);
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            emit_mov(isel, "A", (char*)llo, NULL);
+            isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
+            isel_emit(isel, "JC", l_true, NULL, NULL);
+            emit_set_bool_result(isel, ins, dst_reg, size, false);
+            isel_emit(isel, "SJMP", l_end, NULL, NULL);
+            isel_emit(isel, lb_true, NULL, NULL, NULL);
+            emit_set_bool_result(isel, ins, dst_reg, size, true);
+            isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+            free(l_check_low_1);
+        } else {
+            /* GT: if borrow from high -> false; if high equal -> check low; else true */
+            char* l_false = isel_new_label(isel, "Lcmp_false_tmp");
+            char lb_false[64]; snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
+            char* l_check_low = isel_new_label(isel, "Lcheck_low");
+            char lb_check_low[64]; snprintf(lb_check_low, sizeof(lb_check_low), "%s:", l_check_low);
+
+            isel_emit(isel, "JC", l_false, NULL, NULL); /* lhs < rhs -> false */
+            isel_emit(isel, "JZ", l_check_low, NULL, NULL); /* high equal -> check low */
+            /* high > -> true */
+            isel_emit(isel, "SJMP", l_true, NULL, NULL);
+
+            isel_emit(isel, lb_check_low, NULL, NULL, NULL);
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            emit_mov(isel, "A", (char*)llo, NULL);
+            isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
+            isel_emit(isel, "JC", l_false, NULL, NULL); /* low borrow -> false */
+            isel_emit(isel, "JZ", l_false, NULL, NULL); /* equal -> false */
+            isel_emit(isel, "SJMP", l_true, NULL, NULL);
+
+            isel_emit(isel, lb_false, NULL, NULL, NULL);
+            emit_set_bool_result(isel, ins, dst_reg, size, false);
+            isel_emit(isel, "SJMP", l_end, NULL, NULL);
+
+            isel_emit(isel, lb_true, NULL, NULL, NULL);
+            emit_set_bool_result(isel, ins, dst_reg, size, true);
+            isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+            free(l_false);
+            free(l_check_low);
+        }
+    }
 
     free(l_true); free(l_end);
 }
@@ -1432,14 +1511,58 @@ static void emit_select(ISelContext* isel, Instr* ins) {
         isel_ensure_in_acc(isel, cond);
     }
 
+    /* 仅在必要时分配临时寄存器：当源位于 A（会被比较覆写）或源与 dst 重用时 */
+    const char* src_tv_lo = isel_get_lo_reg(isel, tv);
+    const char* src_tv_hi = isel_get_hi_reg(isel, tv);
+    const char* src_fv_lo = isel_get_lo_reg(isel, fv);
+    const char* src_fv_hi = isel_get_hi_reg(isel, fv);
+
+    bool need_temp_tv = (strcmp(src_tv_lo, "A") == 0) || (strcmp(src_tv_lo, dst_lo) == 0);
+    bool need_temp_fv = (strcmp(src_fv_lo, "A") == 0) || (strcmp(src_fv_lo, dst_lo) == 0);
+
+    int tr_tv = -1, tr_fv = -1;
+    const char* tv_lo_src = src_tv_lo;
+    const char* tv_hi_src = src_tv_hi;
+    const char* fv_lo_src = src_fv_lo;
+    const char* fv_hi_src = src_fv_hi;
+
+    if (need_temp_tv) {
+        tr_tv = alloc_temp_reg(isel, tv, size);
+        if (tr_tv >= 0) {
+            tv_lo_src = isel_reg_name(tr_tv + (size == 2 ? 1 : 0));
+            tv_hi_src = isel_reg_name(tr_tv);
+            /* 拷贝到临时 */
+            if (size == 2) isel_emit(isel, "MOV", (char*)tv_hi_src, (char*)src_tv_hi, NULL);
+            isel_emit(isel, "MOV", (char*)tv_lo_src, (char*)src_tv_lo, NULL);
+        } else {
+            /* 无法分配临时则退回到原始寄存器（最差情况） */
+            tv_lo_src = src_tv_lo; tv_hi_src = src_tv_hi;
+        }
+    }
+    if (need_temp_fv) {
+        tr_fv = alloc_temp_reg(isel, fv, size);
+        if (tr_fv >= 0) {
+            fv_lo_src = isel_reg_name(tr_fv + (size == 2 ? 1 : 0));
+            fv_hi_src = isel_reg_name(tr_fv);
+            if (size == 2) isel_emit(isel, "MOV", (char*)fv_hi_src, (char*)src_fv_hi, NULL);
+            isel_emit(isel, "MOV", (char*)fv_lo_src, (char*)src_fv_lo, NULL);
+        } else {
+            fv_lo_src = src_fv_lo; fv_hi_src = src_fv_hi;
+        }
+    }
+
+    /* 正常使用 emit_mov，避免重复的 MOV；只有在比较分支选择后再写入 dst */
     isel_emit(isel, "JNZ", l_true, NULL, NULL);
-    emit_mov(isel, (char*)dst_lo, (char*)isel_get_lo_reg(isel, fv), ins);
-    if (size == 2) emit_mov(isel, (char*)dst_hi, (char*)isel_get_hi_reg(isel, fv), NULL);
+    emit_mov(isel, (char*)dst_lo, (char*)fv_lo_src, ins);
+    if (size == 2) emit_mov(isel, (char*)dst_hi, (char*)fv_hi_src, NULL);
     isel_emit(isel, "SJMP", l_end, NULL, NULL);
     isel_emit(isel, lb_true, NULL, NULL, NULL);
-    emit_mov(isel, (char*)dst_lo, (char*)isel_get_lo_reg(isel, tv), NULL);
-    if (size == 2) emit_mov(isel, (char*)dst_hi, (char*)isel_get_hi_reg(isel, tv), NULL);
+    emit_mov(isel, (char*)dst_lo, (char*)tv_lo_src, ins);
+    if (size == 2) emit_mov(isel, (char*)dst_hi, (char*)tv_hi_src, NULL);
     isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+    if (tr_tv >= 0) free_temp_reg(isel, tr_tv, size);
+    if (tr_fv >= 0) free_temp_reg(isel, tr_fv, size);
 
     free(l_true); free(l_end);
 }

@@ -17,17 +17,17 @@
 //     return m + d + k + n;
 // }
 
-char shift_mix(char x, char s) {
-    char l = x << s;
-    char r = x >> s;
-    return l ^ r;
-}
-
-// char select_mix(char a, char b, char c) {
-//     char x = (a > b) ? a : b;
-//     char y = (x > c) ? x : c;
-//     return y;
+// char shift_mix(char x, char s) {
+//     char l = x << s;
+//     char r = x >> s;
+//     return l ^ r;
 // }
+
+char select_mix(char a, char b, char c) {
+    char x = (a > b) ? a : b;
+    char y = (x > c) ? x : c;
+    return y;
+}
 
 // char cast_mix(char c, unsigned char uc) {
 //     char s = (char)c;
