@@ -1244,6 +1244,11 @@ void isel_block(ISelContext* isel, Block* block) {
 void isel_function(C51GenContext* ctx, Func* func) {
     if (!ctx || !func) return;
     
+    /* 使用线性扫描寄存器分配 */
+    LinearScanContext* lsc = linscan_create();
+    linscan_compute_intervals(lsc, func, ctx);
+    linscan_allocate(lsc, ctx);
+    
     // 创建代码段
     int sec_idx = obj_add_section(ctx->obj, "?PR?", SEC_CODE, 0, 1);
     Section* sec = obj_get_section(ctx->obj, sec_idx);
@@ -1278,4 +1283,7 @@ void isel_function(C51GenContext* ctx, Func* func) {
         Block* block = iter_next(&it);
         isel_block(&isel, block);
     }
+    
+    /* 清理线性扫描分配器 */
+    linscan_destroy(lsc);
 }
