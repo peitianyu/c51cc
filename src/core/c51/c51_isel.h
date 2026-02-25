@@ -18,6 +18,7 @@ char* int_to_key(int n);
 typedef struct ISelContext {
     C51GenContext* ctx;
     Section* sec;
+    int current_block_id;
     
     /* 寄存器分配状态 */
     bool reg_busy[8];       /* R0-R7 占用状态 */
