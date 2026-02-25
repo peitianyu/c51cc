@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 /* 寄存器分配相关接口在 c51_regalloc.c 中实现 */
 #include "c51_regalloc.h"
@@ -2645,8 +2646,74 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         case IROP_ASM:
             if (ins->labels && ins->labels->len > 0) {
                 char* asm_text = list_get(ins->labels, 0);
-                /* 直接将 asm 文本作为指令文本发射，这样输出里会包含原始汇编 */
-                isel_emit(isel, asm_text, NULL, NULL, NULL);
+                if (!asm_text) break;
+
+                /* 解析 asm 文本为 opcode 和参数 */
+                char *s = strdup(asm_text);
+                char *p = s;
+                /* trim leading whitespace */
+                while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+                /* empty -> emit as comment */
+                if (*p == '\0') {
+                    isel_emit(isel, "; ASM", NULL, NULL, asm_text);
+                    free(s);
+                    break;
+                }
+
+                /* if ends with ':' treat as label */
+                size_t len = strlen(p);
+                char *end = p + len - 1;
+                while (end > p && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) *end-- = '\0';
+                if (*end == ':') {
+                    /* emit label */
+                    char *lbl = strdup(p);
+                    isel_emit(isel, lbl, NULL, NULL, NULL);
+                    free(lbl);
+                    free(s);
+                    break;
+                }
+
+                /* split first token as opcode */
+                char *op = p;
+                char *rest = NULL;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                if (*p) {
+                    *p++ = '\0';
+                    rest = p;
+                    /* trim leading spaces of rest */
+                    while (*rest == ' ' || *rest == '\t') rest++;
+                    if (*rest == '\0') rest = NULL;
+                }
+
+                /* uppercase opcode for consistency */
+                for (char *q = op; *q; q++) *q = toupper((unsigned char)*q);
+
+                if (!rest) {
+                    isel_emit(isel, op, NULL, NULL, NULL);
+                } else {
+                    /* try to split args by comma into arg1,arg2 */
+                    char *arg1 = NULL, *arg2 = NULL;
+                    char *comma = strchr(rest, ',');
+                    if (comma) {
+                        *comma = '\0';
+                        arg1 = rest;
+                        arg2 = comma + 1;
+                        while (*arg1 == ' ' || *arg1 == '\t') arg1++;
+                        while (*arg2 == ' ' || *arg2 == '\t') arg2++;
+                        /* trim trailing spaces */
+                        char *t1 = arg1 + strlen(arg1) - 1;
+                        while (t1 > arg1 && (*t1 == ' ' || *t1 == '\t')) *t1-- = '\0';
+                        char *t2 = arg2 + strlen(arg2) - 1;
+                        while (t2 > arg2 && (*t2 == ' ' || *t2 == '\t')) *t2-- = '\0';
+                    } else {
+                        arg1 = rest;
+                        char *t1 = arg1 + strlen(arg1) - 1;
+                        while (t1 > arg1 && (*t1 == ' ' || *t1 == '\t')) *t1-- = '\0';
+                    }
+                    isel_emit(isel, op, arg1, arg2, NULL);
+                }
+
+                free(s);
             }
             break;
         case IROP_CALL: {
@@ -2887,7 +2954,7 @@ void isel_function(C51GenContext* ctx, Func* func) {
     
     // 输出函数标签
     char label[256];
-    snprintf(label, sizeof(label), "_%s:", func->name);
+    snprintf(label, sizeof(label), "%s:", func->name);
     isel_emit(&isel, label, NULL, NULL, NULL);
     
     // 第一步：为参数分配寄存器
