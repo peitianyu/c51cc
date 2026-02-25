@@ -1,13 +1,13 @@
-char cmp_pack(char a, char b) {
-    char r = 0;
-    r += (a == b);
-    r += (a != b);
-    r += (a < b);
-    r += (a <= b);
-    r += (a > b);
-    r += (a >= b);
-    return r;
-}
+// char cmp_pack(char a, char b) {
+//     char r = 0;
+//     r += (a == b);
+//     r += (a != b);
+//     r += (a < b);
+//     r += (a <= b);
+//     r += (a > b);
+//     r += (a >= b);
+//     return r;
+// }
 
 // char arith_mix(char a, char b) {
 //     char m = a * b;
@@ -17,11 +17,11 @@ char cmp_pack(char a, char b) {
 //     return m + d + k + n;
 // }
 
-// char shift_mix(char x, char s) {
-//     char l = x << s;
-//     char r = x >> s;
-//     return l ^ r;
-// }
+char shift_mix(char x, char s) {
+    char l = x << s;
+    char r = x >> s;
+    return l ^ r;
+}
 
 // char select_mix(char a, char b, char c) {
 //     char x = (a > b) ? a : b;

@@ -1202,9 +1202,8 @@ static void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     }
 
     ValueName cntv = get_src2_value(ins);
-    int t = alloc_temp_reg(isel, -1, 1);
-    const char* tcnt = (t >= 0) ? isel_reg_name(t) : "R0";
-    emit_mov(isel, (char*)tcnt, (char*)isel_get_lo_reg(isel, cntv), ins);
+    /* 直接使用计数的低字节寄存器，避免分配与目标冲突的临时寄存器 */
+    const char* tcnt = isel_get_lo_reg(isel, cntv);
 
     char* l_loop = isel_new_label(isel, "Lsh_loop");
     char* l_end = isel_new_label(isel, "Lsh_end");
@@ -1252,7 +1251,6 @@ static void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     isel_emit(isel, lb_end, NULL, NULL, NULL);
 
     free(l_loop); free(l_end);
-    if (t >= 0) free_temp_reg(isel, t, 1);
 }
 
 static void emit_mul(ISelContext* isel, Instr* ins) {
