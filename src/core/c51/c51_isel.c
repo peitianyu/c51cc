@@ -2645,7 +2645,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         case IROP_ASM:
             if (ins->labels && ins->labels->len > 0) {
                 char* asm_text = list_get(ins->labels, 0);
-                isel_emit(isel, "; ASM", NULL, asm_text, NULL);
+                /* 直接将 asm 文本作为指令文本发射，这样输出里会包含原始汇编 */
+                isel_emit(isel, asm_text, NULL, NULL, NULL);
             }
             break;
         case IROP_CALL: {

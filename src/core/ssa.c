@@ -2145,31 +2145,32 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
         print_arg(fp, *c, consts);
         fprintf(fp, ": ");
         fprintf(fp, "select ");
-        print_arg(fp, *c, consts);
-        fprintf(fp, ", ");
-        /* if this select has immediate labels like "imm1=..." or "imm2=...", print them */
+        /* print true/false args; labels can override with imm1=/imm2= */
         if (i->labels) {
-            bool printed_t = false, printed_f = false;
+            const char *imm1 = NULL, *imm2 = NULL;
             for (Iter lt = list_iter(i->labels); !iter_end(lt);) {
                 char *lbl = iter_next(&lt);
                 if (!lbl) continue;
-                char key1[16], key2[16];
-                snprintf(key1, sizeof(key1), "imm1=");
-                snprintf(key2, sizeof(key2), "imm2=");
-                if (!printed_t && strncmp(lbl, key1, strlen(key1)) == 0) {
-                    fprintf(fp, "const %s", lbl + strlen(key1));
-                    printed_t = true;
+                if (strncmp(lbl, "imm1=", 5) == 0) {
+                    imm1 = lbl + 5;
                     continue;
                 }
-                if (!printed_f && strncmp(lbl, key2, strlen(key2)) == 0) {
-                    if (!printed_t) { /* ensure separator */ }
-                    fprintf(fp, ", const %s", lbl + strlen(key2));
-                    printed_f = true;
+                if (strncmp(lbl, "imm2=", 5) == 0) {
+                    imm2 = lbl + 5;
                     continue;
                 }
             }
-            if (!printed_t) { print_arg(fp, *t, consts); }
-            if (!printed_f) { fprintf(fp, ", "); print_arg(fp, *f, consts); }
+            if (imm1) {
+                fprintf(fp, "const %s", imm1);
+            } else {
+                print_arg(fp, *t, consts);
+            }
+            fprintf(fp, ", ");
+            if (imm2) {
+                fprintf(fp, "const %s", imm2);
+            } else {
+                print_arg(fp, *f, consts);
+            }
         } else {
             print_arg(fp, *t, consts);
             fprintf(fp, ", ");

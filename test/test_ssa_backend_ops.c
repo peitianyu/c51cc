@@ -42,15 +42,15 @@
 //     return p[0] + p[1] + p[2] + p[3];
 // }
 
-char loop_phi(char n) {
-    char i = 0;
-    char s = 0;
-    while (i < n) {
-        s = s + i;
-        i = i + 1;
-    }
-    return s;
-}
+// char loop_phi(char n) {
+//     char i = 0;
+//     char s = 0;
+//     while (i < n) {
+//         s = s + i;
+//         i = i + 1;
+//     }
+//     return s;
+// }
 
 // char main(void) {
 //     char r = 0;
