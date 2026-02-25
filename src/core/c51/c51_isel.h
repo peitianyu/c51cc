@@ -27,6 +27,10 @@ typedef struct ISelContext {
     /* 累加器状态 */
     bool acc_busy;
     ValueName acc_val;
+    /* 最近加载的立即数缓存（用于常量短期重用） */
+    int last_const_reg; /* 寄存器编号，-100 表示无效 */
+    int last_const_val; /* 立即数值 */
+    int last_const_size; /* 大小（字节） */
     
     /* 标签计数器 */
     int label_counter;

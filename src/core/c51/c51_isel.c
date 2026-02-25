@@ -43,6 +43,9 @@ const char* isel_reg_name(int reg) {
 
 /* 前向声明 */
 static void emit_mov(ISelContext* isel, const char* dst, const char* src, Instr* ins);
+static void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr* ins);
+static Block* find_block_by_id(Func* f, int id);
+static int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, int size);
 
 typedef struct {
     int dst;
@@ -593,9 +596,20 @@ static void emit_const(ISelContext* isel, Instr* ins) {
     int size = ins->type ? ins->type->size : 1;
     int val = (int)(ins->imm.ival & 0xFFFF);
     
+    /* 常量短期重用：如果刚刚加载过相同大小和值的立即数并且仍在寄存器中，直接复用 */
+    if (isel && isel->last_const_reg != -100 && isel->last_const_size == size && isel->last_const_val == val) {
+        if (isel->ctx && isel->ctx->value_to_reg) {
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = isel->last_const_reg;
+            char* k = int_to_key(ins->dest);
+            dict_put(isel->ctx->value_to_reg, k, reg_num);
+        }
+        return;
+    }
+
     // 为目标分配寄存器
     int reg = alloc_reg_for_value(isel, ins->dest, size);
-    
+
     if (size == 1) {
         char imm_str[16];
         snprintf(imm_str, sizeof(imm_str), "#%d", val & 0xFF);
@@ -607,6 +621,13 @@ static void emit_const(ISelContext* isel, Instr* ins) {
 
         emit_mov(isel, isel_reg_name(reg), imm_high, ins);
         emit_mov(isel, isel_reg_name(reg + 1), imm_low, ins);
+    }
+
+    /* 更新最近常量缓存 */
+    if (isel) {
+        isel->last_const_reg = reg;
+        isel->last_const_val = val;
+        isel->last_const_size = size;
     }
 }
 
@@ -621,6 +642,50 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
     if (dst_reg < 0) dst_reg = 0;  /* 分配失败，使用R0 */
+    /* 优化：如果下一条是跳回到某个块（通常是 loop backedge），并且该目标块的 PHI
+       使用本条指令的结果作为输入且 PHI 的目标已有固定寄存器，直接把结果写入
+       PHI 目标寄存器以避免后续的 MOV 临时寄存器。 */
+    if (next && next->op == IROP_JMP && next->labels && next->labels->len > 0 && isel->ctx && isel->ctx->current_func) {
+        const char* lbl = list_get(next->labels, 0);
+        int succ_id = parse_block_id(lbl);
+        if (succ_id >= 0) {
+            Block* succ = find_block_by_id(isel->ctx->current_func, succ_id);
+            if (succ && succ->phis) {
+                for (Iter it = list_iter(succ->phis); !iter_end(it);) {
+                    Instr* phi = iter_next(&it);
+                    if (!phi || phi->op != IROP_PHI || !phi->args || !phi->labels) continue;
+                    int n = phi->labels->len;
+                    for (int i = 0; i < n; i++) {
+                        const char* l = (const char*)list_get(phi->labels, i);
+                        if (!l) continue;
+                        char pred_lbl[32]; snprintf(pred_lbl, sizeof(pred_lbl), "block%d", isel->current_block_id);
+                        if (strcmp(l, pred_lbl) != 0) continue;
+                        if (i >= phi->args->len) continue;
+                        ValueName arg = *(ValueName*)list_get(phi->args, i);
+                        if (arg == ins->dest) {
+                            /* 找到使用本结果的 PHI：获取 PHI 目标的寄存器 */
+                            int phi_dst_reg = isel_get_value_reg(isel, phi->dest);
+                            if (phi_dst_reg >= 0) {
+                                /* 确保寄存器对能够容纳 size */
+                                if (phi_dst_reg + size - 1 < 8) {
+                                    dst_reg = phi_dst_reg;
+                                    /* 更新全局映射，表示 ins->dest 现在位于 dst_reg */
+                                    if (isel->ctx && isel->ctx->value_to_reg) {
+                                        int* reg_num = malloc(sizeof(int));
+                                        *reg_num = dst_reg;
+                                        char* k = int_to_key(ins->dest);
+                                        dict_put(isel->ctx->value_to_reg, k, reg_num);
+                                    }
+                                }
+                            }
+                            goto found_phi_target_for_add;
+                        }
+                    }
+                }
+            }
+        }
+    }
+found_phi_target_for_add:;
     
     /* 计算低字节 */
     const char* src1_lo = isel_get_lo_reg(isel, src1);
@@ -695,7 +760,7 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
 }
 
 /* 发射按位与 */
-static void emit_and(ISelContext* isel, Instr* ins) {
+static void emit_and(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
     int64_t imm_val;
@@ -703,6 +768,8 @@ static void emit_and(ISelContext* isel, Instr* ins) {
     ValueName src2 = get_src2_value(ins);
 
     int reg = alloc_reg_for_value(isel, ins->dest, size);
+    int try_reg = try_bind_result_to_phi_target(isel, ins, next, size);
+    if (try_reg >= 0) reg = try_reg;
     const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(reg);
 
@@ -736,7 +803,7 @@ static void emit_and(ISelContext* isel, Instr* ins) {
 }
 
 /* 发射按位或 */
-static void emit_or(ISelContext* isel, Instr* ins) {
+static void emit_or(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
     int64_t imm_val;
@@ -744,6 +811,8 @@ static void emit_or(ISelContext* isel, Instr* ins) {
     ValueName src2 = get_src2_value(ins);
 
     int reg = alloc_reg_for_value(isel, ins->dest, size);
+    int try_reg = try_bind_result_to_phi_target(isel, ins, next, size);
+    if (try_reg >= 0) reg = try_reg;
     const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(reg);
 
@@ -777,7 +846,7 @@ static void emit_or(ISelContext* isel, Instr* ins) {
 }
 
 /* 发射按位异或 */
-static void emit_xor(ISelContext* isel, Instr* ins) {
+static void emit_xor(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
     int64_t imm_val;
@@ -785,6 +854,8 @@ static void emit_xor(ISelContext* isel, Instr* ins) {
     ValueName src2 = get_src2_value(ins);
 
     int reg = alloc_reg_for_value(isel, ins->dest, size);
+    int try_reg = try_bind_result_to_phi_target(isel, ins, next, size);
+    if (try_reg >= 0) reg = try_reg;
     const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(reg);
 
@@ -818,12 +889,16 @@ static void emit_xor(ISelContext* isel, Instr* ins) {
 }
 
 /* 发射按位取反 */
-static void emit_not(ISelContext* isel, Instr* ins) {
+static void emit_not(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     int src_size = get_value_size(isel, src1);  // 源操作数的大小
     int dst_size = ins->type ? ins->type->size : 1;  // 目标操作数的大小
 
     int reg = safe_alloc_reg_for_value(isel, ins->dest, dst_size);
+    int try_reg = try_bind_result_to_phi_target(isel, ins, next, dst_size);
+    if (try_reg >= 0 && try_reg + dst_size - 1 < 8) {
+        reg = try_reg;
+    }
     
     // 如果寄存器分配成功，设置目标寄存器名
     const char* dst_lo = NULL;
@@ -1048,7 +1123,7 @@ static void emit_cmp_eq(ISelContext* isel, Instr* ins) {
     free(l_true); free(l_false); free(l_end);
 }
 
-static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, bool is_gt) {
+static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
     ValueName a = get_src1_value(ins);
     ValueName b = get_src2_value(ins);
     ValueName lhs = a;
@@ -1065,11 +1140,51 @@ static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, bool is_gt) {
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
     /* 统一以 lhs - rhs 形式比较，分别处理 LT/GT 逻辑以保持直观方向 */
+    /* 如果紧接着是基于本比较结果的分支（pattern: cmp; br cond），直接生成条件跳转 */
+    if (next && next->op == IROP_BR && next->args && next->args->len > 0) {
+        ValueName cond = *(ValueName*)list_get(next->args, 0);
+        if (cond == ins->dest) {
+            const char* lbl_t = (const char*)list_get(next->labels, 0);
+            const char* lbl_f = (const char*)list_get(next->labels, 1);
+            int id_t = parse_block_id(lbl_t);
+            int id_f = parse_block_id(lbl_f);
+            char target_t[32]; char target_f[32];
+            block_label_name(target_t, sizeof(target_t), id_t);
+            block_label_name(target_f, sizeof(target_f), id_f);
+
+            if (w == 1) {
+                const char* llo = isel_get_lo_reg(isel, lhs);
+                const char* rlo = isel_get_lo_reg(isel, rhs);
+                isel_emit(isel, "CLR", "C", NULL, NULL);
+                emit_mov(isel, "A", (char*)llo, ins);
+                isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
+
+                if (!is_gt) {
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "JC", target_t, NULL, instr_to_ssa_str(ins));
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                    isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                } else {
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                    isel_emit(isel, "JC", target_f, NULL, instr_to_ssa_str(ins));
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                    isel_emit(isel, "JZ", target_f, NULL, NULL);
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                }
+
+                /* 标记下条 BR 已处理，避免重复生成 */
+                next->op = IROP_NOP;
+                return;
+            }
+            /* 对于宽字比较，落回到普通路径（下面的代码） */
+        }
+    }
+
     if (w == 1) {
         const char* llo = isel_get_lo_reg(isel, lhs);
         const char* rlo = isel_get_lo_reg(isel, rhs);
 
-        /* 计算 A = llo - rlo (带借位)，随后根据 is_gt/is_lt 判断 */
         isel_emit(isel, "CLR", "C", NULL, NULL);
         emit_mov(isel, "A", (char*)llo, ins);
         isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
@@ -1083,12 +1198,12 @@ static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, bool is_gt) {
             emit_set_bool_result(isel, ins, dst_reg, size, true);
             isel_emit(isel, lb_end, NULL, NULL, NULL);
         } else {
-            /* GT: if borrow -> false; if A==0 -> equal -> false; else true */
+            /* GT: borrow -> false; zero -> false; otherwise true */
             char* l_false = isel_new_label(isel, "Lcmp_false_tmp");
             char lb_false[64]; snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
 
-            isel_emit(isel, "JC", l_false, NULL, NULL); /* lhs < rhs -> false */
-            isel_emit(isel, "JZ", l_false, NULL, NULL); /* equal -> false */
+            isel_emit(isel, "JC", l_false, NULL, NULL);
+            isel_emit(isel, "JZ", l_false, NULL, NULL);
             isel_emit(isel, "SJMP", l_true, NULL, NULL);
 
             isel_emit(isel, lb_false, NULL, NULL, NULL);
@@ -1107,23 +1222,21 @@ static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, bool is_gt) {
         const char* rlo = isel_get_lo_reg(isel, rhs);
         const char* rhi = isel_get_hi_reg(isel, rhs);
 
-        /* 先比较高字节，再在相等情况下比较低字节，使用 SUBB 以获得借位信息 */
         isel_emit(isel, "CLR", "C", NULL, NULL);
         emit_mov(isel, "A", (char*)lhi, ins);
         isel_emit(isel, "SUBB", "A", (char*)rhi, NULL);
 
         if (!is_gt) {
-            /* LT: if borrow from high -> true; if high equal -> check low */
-            char* l_check_low_1 = isel_new_label(isel, "Lcheck_low_1");
-            char lb_check_low_1[64]; snprintf(lb_check_low_1, sizeof(lb_check_low_1), "%s:", l_check_low_1);
+            /* LT: high borrow -> true; high > -> false; high equal -> check low */
+            char* l_check_low = isel_new_label(isel, "Lcheck_low");
+            char lb_check_low[64]; snprintf(lb_check_low, sizeof(lb_check_low), "%s:", l_check_low);
 
             isel_emit(isel, "JC", l_true, NULL, NULL);
-            isel_emit(isel, "JZ", l_check_low_1, NULL, NULL);
-            /* high > -> false */
+            isel_emit(isel, "JZ", l_check_low, NULL, NULL);
             emit_set_bool_result(isel, ins, dst_reg, size, false);
             isel_emit(isel, "SJMP", l_end, NULL, NULL);
-            /* high equal: compare low */
-            isel_emit(isel, lb_check_low_1, NULL, NULL, NULL);
+
+            isel_emit(isel, lb_check_low, NULL, NULL, NULL);
             isel_emit(isel, "CLR", "C", NULL, NULL);
             emit_mov(isel, "A", (char*)llo, NULL);
             isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
@@ -1134,25 +1247,24 @@ static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, bool is_gt) {
             emit_set_bool_result(isel, ins, dst_reg, size, true);
             isel_emit(isel, lb_end, NULL, NULL, NULL);
 
-            free(l_check_low_1);
+            free(l_check_low);
         } else {
-            /* GT: if borrow from high -> false; if high equal -> check low; else true */
+            /* GT: high borrow -> false; high equal -> check low; high > -> true */
             char* l_false = isel_new_label(isel, "Lcmp_false_tmp");
             char lb_false[64]; snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
             char* l_check_low = isel_new_label(isel, "Lcheck_low");
             char lb_check_low[64]; snprintf(lb_check_low, sizeof(lb_check_low), "%s:", l_check_low);
 
-            isel_emit(isel, "JC", l_false, NULL, NULL); /* lhs < rhs -> false */
-            isel_emit(isel, "JZ", l_check_low, NULL, NULL); /* high equal -> check low */
-            /* high > -> true */
+            isel_emit(isel, "JC", l_false, NULL, NULL);
+            isel_emit(isel, "JZ", l_check_low, NULL, NULL);
             isel_emit(isel, "SJMP", l_true, NULL, NULL);
 
             isel_emit(isel, lb_check_low, NULL, NULL, NULL);
             isel_emit(isel, "CLR", "C", NULL, NULL);
             emit_mov(isel, "A", (char*)llo, NULL);
             isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
-            isel_emit(isel, "JC", l_false, NULL, NULL); /* low borrow -> false */
-            isel_emit(isel, "JZ", l_false, NULL, NULL); /* equal -> false */
+            isel_emit(isel, "JC", l_false, NULL, NULL);
+            isel_emit(isel, "JZ", l_false, NULL, NULL);
             isel_emit(isel, "SJMP", l_true, NULL, NULL);
 
             isel_emit(isel, lb_false, NULL, NULL, NULL);
@@ -1171,7 +1283,7 @@ static void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, bool is_gt) {
     free(l_true); free(l_end);
 }
 
-static void emit_cmp_le_ge(ISelContext* isel, Instr* ins, bool is_ge) {
+static void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
     ValueName a = get_src1_value(ins);
     ValueName b = get_src2_value(ins);
     ValueName lhs = is_ge ? a : b;
@@ -1186,6 +1298,73 @@ static void emit_cmp_le_ge(ISelContext* isel, Instr* ins, bool is_ge) {
     char lb_true[64], lb_end[64];
     snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+
+    /* 如果下一条是基于比较结果的分支，直接产生条件跳转以避免生成 0/1 */
+    if (next && next->op == IROP_BR && next->args && next->args->len > 0) {
+        ValueName cond = *(ValueName*)list_get(next->args, 0);
+        if (cond == ins->dest) {
+            const char* lbl_t = (const char*)list_get(next->labels, 0);
+            const char* lbl_f = (const char*)list_get(next->labels, 1);
+            int id_t = parse_block_id(lbl_t);
+            int id_f = parse_block_id(lbl_f);
+            char target_t[32]; char target_f[32];
+            block_label_name(target_t, sizeof(target_t), id_t);
+            block_label_name(target_f, sizeof(target_f), id_f);
+
+            if (w == 1) {
+                const char* llo = isel_get_lo_reg(isel, lhs);
+                const char* rlo = isel_get_lo_reg(isel, rhs);
+                isel_emit(isel, "CLR", "C", NULL, NULL);
+                emit_mov(isel, "A", (char*)llo, ins);
+                isel_emit(isel, "SUBB", "A", (char*)rlo, NULL);
+
+                /* LE/GE 使用 JNC 判定（无借位表示 <= 或 >=，取决于方向） */
+                if (is_ge) {
+                    /* GE: JNC -> true */
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "JNC", target_t, NULL, instr_to_ssa_str(ins));
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                    isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                } else {
+                    /* LE: JNC -> true */
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "JNC", target_t, NULL, instr_to_ssa_str(ins));
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                    isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                }
+
+                next->op = IROP_NOP;
+                return;
+            } else {
+                /* 宽字：先比较高字，再比较低字，保留原处理但合并为条件跳转 */
+                const char* llo = isel_get_lo_reg(isel, lhs);
+                const char* lhi = isel_get_hi_reg(isel, lhs);
+                const char* rlo = isel_get_lo_reg(isel, rhs);
+                const char* rhi = isel_get_hi_reg(isel, rhs);
+
+                isel_emit(isel, "CLR", "C", NULL, NULL);
+                emit_mov(isel, "A", (char*)lhi, ins);
+                isel_emit(isel, "SUBB", "A", (char*)rhi, NULL);
+
+                if (is_ge) {
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "JNC", target_t, NULL, instr_to_ssa_str(ins));
+                    /* high equal -> check low */
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                    isel_emit(isel, "JZ", target_f, NULL, NULL);
+                    isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                } else {
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "JC", target_t, NULL, instr_to_ssa_str(ins));
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                    isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                }
+
+                next->op = IROP_NOP;
+                return;
+            }
+        }
+    }
 
     if (w == 1) {
         const char* llo = isel_get_lo_reg(isel, lhs);
@@ -1240,6 +1419,9 @@ static void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     ValueName src = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+    /* 尝试把结果直接绑定到回边目标块的 PHI 已分配寄存器，避免临时 */
+    int try_reg = try_bind_result_to_phi_target(isel, ins, NULL, size);
+    if (try_reg >= 0) dst_reg = try_reg;
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(dst_reg);
     emit_copy_value(isel, ins, src, dst_reg, size);
@@ -1332,11 +1514,14 @@ static void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     free(l_loop); free(l_end);
 }
 
-static void emit_mul(ISelContext* isel, Instr* ins) {
+static void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName a = get_src1_value(ins);
     ValueName b = get_src2_value(ins);
     int size = ins->type ? ins->type->size : 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+    /* 尝试把结果直接绑定到回边目标块的 PHI 已分配寄存器，避免临时 */
+    int try_reg = try_bind_result_to_phi_target(isel, ins, next, size);
+    if (try_reg >= 0) dst_reg = try_reg;
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(dst_reg);
 
@@ -1679,6 +1864,9 @@ static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     
     // 分配目标寄存器并保存，以便后续获取高字节
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+    /* 尝试把结果直接绑定到回边目标块的 PHI 已分配寄存器，避免临时 */
+    int try_reg = try_bind_result_to_phi_target(isel, ins, next, size);
+    if (try_reg >= 0) dst_reg = try_reg;
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     
     emit_mov(isel, "A", (char*)src1_lo, ins);
@@ -2145,6 +2333,46 @@ static Block* find_block_by_id(Func* f, int id) {
     return NULL;
 }
 
+/* 如果下一条是跳回到某个块，且该块的 PHI 使用本条指令的结果，尝试把
+   本条指令的结果直接绑定到 PHI 的目标寄存器（若已分配），返回新寄存器编号或 -1 */
+static int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, int size) {
+    if (!isel || !ins || !next || next->op != IROP_JMP || !next->labels || next->labels->len == 0) return -1;
+    const char* lbl = list_get(next->labels, 0);
+    int succ_id = parse_block_id(lbl);
+    if (succ_id < 0 || !isel->ctx || !isel->ctx->current_func) return -1;
+
+    Func* f = isel->ctx->current_func;
+    Block* succ = find_block_by_id(f, succ_id);
+    if (!succ || !succ->phis) return -1;
+
+    char pred_lbl[32]; snprintf(pred_lbl, sizeof(pred_lbl), "block%d", isel->current_block_id);
+
+    for (Iter it = list_iter(succ->phis); !iter_end(it);) {
+        Instr* phi = iter_next(&it);
+        if (!phi || phi->op != IROP_PHI || !phi->args || !phi->labels) continue;
+        int n = phi->labels->len;
+        for (int i = 0; i < n; i++) {
+            const char* l = (const char*)list_get(phi->labels, i);
+            if (!l || strcmp(l, pred_lbl) != 0) continue;
+            if (i >= phi->args->len) continue;
+            ValueName arg = *(ValueName*)list_get(phi->args, i);
+            if (arg != ins->dest) continue;
+            int phi_dst_reg = isel_get_value_reg(isel, phi->dest);
+            if (phi_dst_reg >= 0 && phi_dst_reg + size - 1 < 8) {
+                /* 更新全局映射，表示 ins->dest 现在位于 phi_dst_reg */
+                if (isel->ctx && isel->ctx->value_to_reg) {
+                    int* reg_num = malloc(sizeof(int));
+                    *reg_num = phi_dst_reg;
+                    char* k = int_to_key(ins->dest);
+                    dict_put(isel->ctx->value_to_reg, k, reg_num);
+                }
+                return phi_dst_reg;
+            }
+        }
+    }
+    return -1;
+}
+
 static void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr* ins) {
     if (!isel || !isel->ctx || !isel->ctx->current_func) return;
     Func* f = isel->ctx->current_func;
@@ -2155,6 +2383,12 @@ static void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id
     int move_count = 0;
     char pred_label[32];
     snprintf(pred_label, sizeof(pred_label), "block%d", pred_id);
+
+    /* 收集非寄存器(内存/符号)源，避免重复从内存多次加载 */
+    char* mem_srcs[64];
+    int mem_src_cnt = 0;
+    const char* mem_dsts[64][8];
+    int mem_dst_cnt[64];
 
     for (Iter it = list_iter(succ->phis); !iter_end(it);) {
         Instr* phi = iter_next(&it);
@@ -2182,7 +2416,21 @@ static void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id
         if (src_lo_reg >= 0 && dst_lo_reg >= 0) {
             if (move_count < 64) moves[move_count++] = (RegMove){ .dst = dst_lo_reg, .src = src_lo_reg };
         } else if (src_lo && strcmp(src_lo, dst_lo) != 0) {
-            emit_mov(isel, (char*)dst_lo, (char*)src_lo, ins);
+            /* 如果源是内存/符号，延迟合并加载，否则直接发 MOV */
+            if (is_memory_operand_local(src_lo)) {
+                int found = -1;
+                for (int m = 0; m < mem_src_cnt; m++) {
+                    if (strcmp(mem_srcs[m], src_lo) == 0) { found = m; break; }
+                }
+                if (found < 0 && mem_src_cnt < 64) {
+                    mem_srcs[mem_src_cnt] = strdup(src_lo);
+                    mem_dst_cnt[mem_src_cnt] = 0;
+                    found = mem_src_cnt++;
+                }
+                if (found >= 0 && mem_dst_cnt[found] < 8) mem_dsts[found][mem_dst_cnt[found]++] = dst_lo;
+            } else {
+                emit_mov(isel, (char*)dst_lo, (char*)src_lo, ins);
+            }
         }
 
         if (size == 2) {
@@ -2194,13 +2442,40 @@ static void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id
             if (src_hi_reg >= 0 && dst_hi_reg >= 0) {
                 if (move_count < 64) moves[move_count++] = (RegMove){ .dst = dst_hi_reg, .src = src_hi_reg };
             } else if (src_hi && strcmp(src_hi, dst_hi) != 0) {
-                emit_mov(isel, (char*)dst_hi, (char*)src_hi, ins);
+                if (is_memory_operand_local(src_hi)) {
+                    int found = -1;
+                    for (int m = 0; m < mem_src_cnt; m++) {
+                        if (strcmp(mem_srcs[m], src_hi) == 0) { found = m; break; }
+                    }
+                    if (found < 0 && mem_src_cnt < 64) {
+                        mem_srcs[mem_src_cnt] = strdup(src_hi);
+                        mem_dst_cnt[mem_src_cnt] = 0;
+                        found = mem_src_cnt++;
+                    }
+                    if (found >= 0 && mem_dst_cnt[found] < 8) mem_dsts[found][mem_dst_cnt[found]++] = dst_hi;
+                } else {
+                    emit_mov(isel, (char*)dst_hi, (char*)src_hi, ins);
+                }
             }
         }
     }
 
+    /* 首先处理寄存器间的并行拷贝 */
     if (move_count > 0) {
         emit_parallel_reg_moves(isel, moves, move_count, ins);
+    }
+
+    /* 对于每个内存源，仅加载一次到 A，然后写回所有目标寄存器 */
+    for (int m = 0; m < mem_src_cnt; m++) {
+        if (!mem_srcs[m]) continue;
+        char* ssa = instr_to_ssa_str(ins);
+        isel_emit(isel, "MOV", "A", mem_srcs[m], ssa);
+        free(ssa);
+        for (int d = 0; d < mem_dst_cnt[m]; d++) {
+            const char* dst = mem_dsts[m][d];
+            if (dst && strcmp(dst, "A") != 0) emit_mov(isel, (char*)dst, "A", ins);
+        }
+        free(mem_srcs[m]);
     }
 }
 
@@ -2276,7 +2551,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_sub(isel, ins, next);
             break;
         case IROP_MUL:
-            emit_mul(isel, ins);
+            emit_mul(isel, ins, next);
             break;
         case IROP_DIV:
             emit_div_mod(isel, ins, false);
@@ -2288,16 +2563,16 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_neg(isel, ins);
             break;
         case IROP_AND:
-            emit_and(isel, ins);
+            emit_and(isel, ins, next);
             break;
         case IROP_OR:
-            emit_or(isel, ins);
+            emit_or(isel, ins, next);
             break;
         case IROP_XOR:
-            emit_xor(isel, ins);
+            emit_xor(isel, ins, next);
             break;
         case IROP_NOT:
-            emit_not(isel, ins);
+            emit_not(isel, ins, next);
             break;
         case IROP_SHL:
             emit_shift(isel, ins, false);
@@ -2309,16 +2584,16 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_cmp_eq(isel, ins);
             break;
         case IROP_LT:
-            emit_cmp_lt_gt(isel, ins, false);
+            emit_cmp_lt_gt(isel, ins, next, false);
             break;
         case IROP_GT:
-            emit_cmp_lt_gt(isel, ins, true);
+            emit_cmp_lt_gt(isel, ins, next, true);
             break;
         case IROP_LE:
-            emit_cmp_le_ge(isel, ins, false);
+            emit_cmp_le_ge(isel, ins, next, false);
             break;
         case IROP_GE:
-            emit_cmp_le_ge(isel, ins, true);
+            emit_cmp_le_ge(isel, ins, next, true);
             break;
         case IROP_NE:
             emit_ne(isel, ins);
@@ -2599,6 +2874,10 @@ void isel_function(C51GenContext* ctx, Func* func) {
     isel.ctx = ctx;
     isel.sec = sec;
     isel.label_counter = 0;
+    /* 初始化最近常量缓存为无效 */
+    isel.last_const_reg = -100;
+    isel.last_const_val = 0;
+    isel.last_const_size = 0;
     
     // 初始化寄存器状态
     for (int i = 0; i < 8; i++) {

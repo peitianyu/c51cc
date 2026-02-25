@@ -36,21 +36,21 @@
 //     return (char)t + s + u;
 // }
 
-char ptr_mix(void) {
-    char arr[4] = {3, 5, 7, 11};
-    char* p = arr;
-    return p[0] + p[1] + p[2] + p[3];
-}
-
-// char loop_phi(char n) {
-//     char i = 0;
-//     char s = 0;
-//     while (i < n) {
-//         s = s + i;
-//         i = i + 1;
-//     }
-//     return s;
+// char ptr_mix(void) {
+//     char arr[4] = {3, 5, 7, 11};
+//     char* p = arr;
+//     return p[0] + p[1] + p[2] + p[3];
 // }
+
+char loop_phi(char n) {
+    char i = 0;
+    char s = 0;
+    while (i < n) {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
 
 // char main(void) {
 //     char r = 0;
