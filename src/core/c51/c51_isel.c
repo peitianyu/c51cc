@@ -904,20 +904,9 @@ static void emit_ne(ISelContext* isel, Instr* ins) {
     snprintf(lbuf_end, sizeof(lbuf_end), "%s:", l_end);
 
     if (size == 2) {
-        const char* src1_hi = isel_get_hi_reg(isel, src1);
+        /* 比较顺序：先低字节再高字节，保证借位/进位语义正确 */
         const char* src1_lo = isel_get_lo_reg(isel, src1);
-
-        emit_mov(isel, "A", (char*)src1_hi, ins);
-        if (src2_is_imm) {
-            char imm_str[32];
-            snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)((imm_val >> 8) & 0xFF), l_true);
-            isel_emit(isel, "CJNE", "A", imm_str, NULL);
-        } else {
-            const char* src2_hi = isel_get_hi_reg(isel, src2);
-            char arg2[64];
-            snprintf(arg2, sizeof(arg2), "%s, %s", src2_hi, l_true);
-            isel_emit(isel, "CJNE", "A", arg2, NULL);
-        }
+        const char* src1_hi = isel_get_hi_reg(isel, src1);
 
         emit_mov(isel, "A", (char*)src1_lo, ins);
         if (src2_is_imm) {
@@ -928,6 +917,18 @@ static void emit_ne(ISelContext* isel, Instr* ins) {
             const char* src2_lo = isel_get_lo_reg(isel, src2);
             char arg2[64];
             snprintf(arg2, sizeof(arg2), "%s, %s", src2_lo, l_true);
+            isel_emit(isel, "CJNE", "A", arg2, NULL);
+        }
+
+        emit_mov(isel, "A", (char*)src1_hi, NULL);
+        if (src2_is_imm) {
+            char imm_str[32];
+            snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)((imm_val >> 8) & 0xFF), l_true);
+            isel_emit(isel, "CJNE", "A", imm_str, NULL);
+        } else {
+            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            char arg2[64];
+            snprintf(arg2, sizeof(arg2), "%s, %s", src2_hi, l_true);
             isel_emit(isel, "CJNE", "A", arg2, NULL);
         }
     } else {

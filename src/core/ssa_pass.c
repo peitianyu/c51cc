@@ -1119,7 +1119,48 @@ static bool pass_local_opts(Func *f, Stats *s) {
 
             ValueName a = get_arg(i, 0), bv = get_arg(i, 1);
             int64_t b_val = 0;
-            bool has_b = i->args->len >= 2 && get_const_value(f, bv, &b_val);
+            bool has_b = false;
+            /* 先尝试通过常量定义获取立即数 */
+            if (i->args->len >= 2 && get_const_value(f, bv, &b_val)) {
+                has_b = true;
+            } else if (i->labels) {
+                /* 再尝试从指令标签中解析内联立即数 imm1=... 或 imm0=... */
+                for (Iter lt = list_iter(i->labels); !iter_end(lt);) {
+                    char *lbl = iter_next(&lt);
+                    if (!lbl) continue;
+                    const char *key = "imm1=";
+                    if (strncmp(lbl, key, strlen(key)) == 0) {
+                        b_val = strtoll(lbl + strlen(key), NULL, 10);
+                        has_b = true; break;
+                    }
+                }
+            }
+            /* 额外尝试：如果第二个参数直接由 CONST 定义，也视为常量 */
+            if (!has_b && bv != 0) {
+                Instr *defbv = find_def_instr(f, bv);
+                if (defbv && defbv->op == IROP_CONST) {
+                    b_val = defbv->imm.ival; has_b = true;
+                }
+            }
+            /* 也尝试检测第0个参数是否为内联立即数（用于常量在第一个位置的情况） */
+            int64_t a_val = 0; bool has_a = false;
+            if (i->args->len >= 1 && get_const_value(f, a, &a_val)) has_a = true;
+            else if (i->labels) {
+                for (Iter lt = list_iter(i->labels); !iter_end(lt);) {
+                    char *lbl = iter_next(&lt);
+                    if (!lbl) continue;
+                    const char *key0 = "imm0=";
+                    if (strncmp(lbl, key0, strlen(key0)) == 0) {
+                        a_val = strtoll(lbl + strlen(key0), NULL, 10);
+                        has_a = true; break;
+                    }
+                }
+            }
+            /* 额外尝试：如果第一个参数直接由 CONST 定义，也视为常量 */
+            if (!has_a && a != 0) {
+                Instr *defa = find_def_instr(f, a);
+                if (defa && defa->op == IROP_CONST) { a_val = defa->imm.ival; has_a = true; }
+            }
 
             /* x - x = 0, x ^ x = 0 */
             if (i->args->len >= 2 && a == bv) {
@@ -1908,8 +1949,13 @@ static bool pass_binop_const_inline(Func *f, Stats *s) {
             list_clear(i->labels);
             char *tag = pass_alloc(4); strcpy(tag, "imm");
             list_push(i->labels, tag);
-
-            if (!keep_args) {
+            /* 如果是立即数为 0 的加/减，直接简化为单操作数（x+0/x-0 -> x） */
+            if ((i->op == IROP_ADD || i->op == IROP_SUB) && i->imm.ival == 0) {
+                list_clear(i->args);
+                ValueName *p = pass_alloc(sizeof *p); *p = lhs;
+                list_push(i->args, p);
+                i->op = IROP_TRUNC; /* 保持类型一致，表示单操作数传递 */
+            } else if (!keep_args) {
                 list_clear(i->args);
                 ValueName *p = pass_alloc(sizeof *p); *p = lhs;
                 list_push(i->args, p);
