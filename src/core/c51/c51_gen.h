@@ -20,6 +20,10 @@ typedef struct C51GenContext {
     Dict* v16_regs;
     int next_v16_offset;
 
+    /* spill 管理：ValueName -> spill 符号名 */
+    Dict* value_to_spill;
+    int next_spill_id;
+
     Dict* mmio_map;
     int label_counter;
 

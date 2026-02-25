@@ -382,9 +382,9 @@ static void optimize_section(Section* sec) {
             removed = peephole_mov_chain(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
             
-            // 死代码消除放在最后
-            removed = peephole_dead_code(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            // FIXME: 该规则在当前寄存器分配/调用约定下仍可能误删关键MOV
+            // removed = peephole_dead_code(sec->asminstrs, i);
+            // if (removed) { changed = 1; continue; }
         }
     }
 }

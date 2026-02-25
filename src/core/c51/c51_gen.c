@@ -16,6 +16,8 @@ C51GenContext* c51_ctx_new(void) {
     ctx->value_to_addr = make_dict(NULL);
     ctx->value_type = make_dict(NULL);
     ctx->value_to_const = make_dict(NULL);
+    ctx->value_to_spill = make_dict(NULL);
+    ctx->next_spill_id = 0;
     ctx->v16_regs = make_dict(NULL);
     ctx->mmio_map = make_dict(NULL);
     ctx->temp_values = make_list();
@@ -37,6 +39,10 @@ void c51_ctx_free(C51GenContext* ctx) {
     if (ctx->value_to_addr) {
         dict_free(ctx->value_to_addr, free);
         ctx->value_to_addr = NULL;
+    }
+    if (ctx->value_to_spill) {
+        dict_free(ctx->value_to_spill, free);
+        ctx->value_to_spill = NULL;
     }
     if (ctx->value_type) {
         dict_free(ctx->value_type, NULL);

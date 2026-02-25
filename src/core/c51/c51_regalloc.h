@@ -29,9 +29,9 @@ typedef struct {
     int interval_count;         /* 活跃区间数量 */
     int interval_capacity;      /* 数组容量 */
     
-    /* 活跃寄存器跟踪 */
-    int active_regs[3];         /* R0, R1, R2 当前分配的值 */
-    int active_reg_end[3];      /* R0, R1, R2 中值的结束位置 */
+    /* 活跃寄存器跟踪 (R0-R7) */
+    int active_regs[8];         /* R0-R7 当前分配的值 */
+    int active_reg_end[8];      /* R0-R7 中值的结束位置 */
     
     /* 位置信息 */
     int instr_idx;              /* 当前正在处理的指令序号 */

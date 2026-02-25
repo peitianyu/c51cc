@@ -28,11 +28,15 @@ static inline void *make_dict(void *parent)
 static inline void *dict_get(Dict *dict, char *key)
 {
     for (; dict; dict = dict->parent) {
+        void *found = NULL;
         for (Iter i = list_iter(dict->list); !iter_end(i);) {
             DictEntry *e = iter_next(&i);
-            if (!strcmp(key, e->key))
-                return e->val;
+            if (!strcmp(key, e->key)) {
+                /* 语义：同一作用域后写覆盖先写，返回最后一个匹配项 */
+                found = e->val;
+            }
         }
+        if (found) return found;
     }
     return NULL;
 }
