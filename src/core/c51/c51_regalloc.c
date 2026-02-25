@@ -14,8 +14,9 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
     int existing = isel_get_value_reg(isel, val);
     if (existing >= 0) return existing;
 
-    for (int reg = 7; reg >= 0; reg--) {
-        if (reg + size > 8) continue;
+    /* 使用R0、R1、R2作为临时寄存器（不用R3-R7，它们保留给参数） */
+    for (int reg = 2; reg >= 0; reg--) {
+        if (reg + size > 3) continue;  /* 只使用R0、R1、R2 */
 
         bool available = true;
         for (int j = 0; j < size; j++) {
@@ -37,7 +38,7 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
         }
     }
 
-    return 0;
+    return -1;  /* 不再默认返回0，返回-1表示分配失败，让调用者使用默认值 */
 }
 
 /* 为函数参数分配寄存器（扫描 entry 中的 PARAM 指令） */

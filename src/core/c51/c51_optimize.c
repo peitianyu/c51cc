@@ -365,11 +365,13 @@ static void optimize_section(Section* sec) {
             removed = peephole_redundant_swap(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
             
-            removed = peephole_redundant_load(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            // FIXME: 此优化会错误地删除需要的MOV A, Rx指令
+            // removed = peephole_redundant_load(sec->asminstrs, i);
+            // if (removed) { changed = 1; continue; }
             
-            removed = peephole_eliminate_temp_reg(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            // FIXME: 此优化会错误地删除SFR load后的寄存器保存指令
+            // removed = peephole_eliminate_temp_reg(sec->asminstrs, i);
+            // if (removed) { changed = 1; continue; }
             
             removed = peephole_mem_to_reg(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }

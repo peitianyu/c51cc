@@ -9,7 +9,7 @@
 /* 辅助函数：将整数键转换为字符串 */
 char* int_to_key(int n) {
     char buf[32];
-    snprintf(buf, sizeof(buf), "%d", n);
+    snprintf(buf, sizeof(buf), "%02XH", n);
     return strdup(buf);
 }
 
@@ -108,6 +108,22 @@ const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
 const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
     // 高字节总是在基址
     return isel_get_value_reg_at(isel, val, 0);
+}
+
+/* 为值分配寄存器的安全包装：分配失败时使用累加器 */
+static int safe_alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
+    int reg = alloc_reg_for_value(isel, val, size);
+    if (reg < 0) {
+        /* 寄存器分配失败，将值记录在累加器中 */
+        if (isel->ctx && isel->ctx->value_to_reg) {
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = -2;  /* -2 表示值在累加器A中 */
+            char* key = int_to_key(val);
+            dict_put(isel->ctx->value_to_reg, key, reg_num);
+        }
+        return -2;  /* 返回-2表示值在A中 */
+    }
+    return reg;
 }
 
 /* 生成新标签 */
@@ -212,12 +228,12 @@ static void emit_const(ISelContext* isel, Instr* ins) {
     
     if (size == 1) {
         char imm_str[16];
-        snprintf(imm_str, sizeof(imm_str), "#%02XH", val & 0xFF);
+        snprintf(imm_str, sizeof(imm_str), "#%d", val & 0xFF);
         emit_mov(isel, isel_reg_name(reg), imm_str, ins);
     } else if (size == 2) {
         char imm_high[16], imm_low[16];
-        snprintf(imm_high, sizeof(imm_high), "#%02XH", (val >> 8) & 0xFF);
-        snprintf(imm_low, sizeof(imm_low), "#%02XH", val & 0xFF);
+        snprintf(imm_high, sizeof(imm_high), "#%d", (val >> 8) & 0xFF);
+        snprintf(imm_low, sizeof(imm_low), "#%d", val & 0xFF);
 
         emit_mov(isel, isel_reg_name(reg), imm_high, ins);
         emit_mov(isel, isel_reg_name(reg + 1), imm_low, ins);
@@ -455,6 +471,73 @@ static void emit_xor(ISelContext* isel, Instr* ins) {
     }
 }
 
+/* 发射按位取反 */
+static void emit_not(ISelContext* isel, Instr* ins) {
+    ValueName src1 = get_src1_value(ins);
+    int src_size = get_value_size(isel, src1);  // 源操作数的大小
+    int dst_size = ins->type ? ins->type->size : 1;  // 目标操作数的大小
+
+    int reg = safe_alloc_reg_for_value(isel, ins->dest, dst_size);
+    
+    // 如果寄存器分配成功，设置目标寄存器名
+    const char* dst_lo = NULL;
+    const char* dst_hi = NULL;
+    if (reg >= 0) {
+        dst_lo = isel_reg_name(reg + (dst_size == 2 ? 1 : 0));
+        dst_hi = isel_reg_name(reg);
+    } else if (reg == -2) {
+        // 值在A中
+        dst_lo = "A";
+        dst_hi = NULL;  // 高字节暂时没地方放
+    }
+
+    // 直接使用 isel_get_lo_reg/hi_reg，它们会根据值的大小正确处理
+    // 注意：这里必须根据源操作数的实际大小来获取寄存器
+    int src_reg = isel_get_value_reg(isel, src1);
+    const char* src1_lo;
+    const char* src1_hi;
+    
+    if (src_size == 1) {
+        // 单字节源：直接使用基址寄存器
+        if (src_reg >= 0) {
+            src1_lo = isel_reg_name(src_reg);
+        } else {
+            // 寄存器未分配，使用 isel_get_lo_reg 的默认行为
+            src1_lo = isel_get_lo_reg(isel, src1);
+        }
+        src1_hi = NULL;
+    } else {
+        // 双字节源：大端模式
+        if (src_reg >= 0) {
+            src1_lo = isel_reg_name(src_reg + 1);
+            src1_hi = isel_reg_name(src_reg);
+        } else {
+            src1_lo = isel_get_lo_reg(isel, src1);
+            src1_hi = isel_get_hi_reg(isel, src1);
+        }
+    }
+
+    // 低字节
+    emit_mov(isel, "A", (char*)src1_lo, ins);
+    isel_emit(isel, "CPL", "A", NULL, NULL);
+    if (dst_lo) {
+        emit_mov(isel, (char*)dst_lo, "A", ins);
+    }
+
+    // 高字节（如果目标是双字节且有地方存放）
+    if (dst_size == 2 && dst_hi) {
+        if (src_size == 2 && src1_hi) {
+            // 源也是双字节，取反高字节
+            emit_mov(isel, "A", (char*)src1_hi, ins);
+            isel_emit(isel, "CPL", "A", NULL, NULL);
+        } else {
+            // 源是单字节，高字节填充0xFF（因为单字节char被提升为int时高字节为0，取反后为0xFF）
+            isel_emit(isel, "MOV", "A", "#0FFH", NULL);
+        }
+        emit_mov(isel, (char*)dst_hi, "A", ins);
+    }
+}
+
 /* 发射不等比较（生成 0/1） */
 static void emit_ne(ISelContext* isel, Instr* ins) {
     ValueName src1 = get_src1_value(ins);
@@ -524,7 +607,7 @@ static void emit_ne(ISelContext* isel, Instr* ins) {
 
     emit_mov(isel, (char*)dst_lo, "A", ins);
     if (size == 2) {
-        emit_mov(isel, (char*)dst_hi, "#0", ins);
+        emit_mov(isel, (char*)dst_hi, "#00H", ins);
     }
 
     free(l_true);
@@ -652,7 +735,7 @@ static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
                 emit_mov(isel, "R6", (char*)ret_hi, ins);
             }
         } else {
-            emit_mov(isel, "R6", "#0", ins);
+            emit_mov(isel, "R6", "#00H", ins);
         }
     }
 }
@@ -680,11 +763,19 @@ static void emit_trunc(ISelContext* isel, Instr* ins) {
                 isel->reg_busy[lo_reg] = true;
                 isel->reg_val[lo_reg] = ins->dest;
             }
+        } else if (src_base == -2) {
+            // 源在A中，目标也是A（直接关联到A）
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = -2;
+            char* key = int_to_key(ins->dest);
+            dict_put(isel->ctx->value_to_reg, key, reg_num);
         } else {
             // 源不在寄存器中，需要分配新寄存器
-            int dst_reg = alloc_reg_for_value(isel, ins->dest, 1);
-            const char* src_lo = isel_get_lo_reg(isel, src);
-            emit_mov(isel, (char*)isel_reg_name(dst_reg), (char*)src_lo, ins);
+            int dst_reg = safe_alloc_reg_for_value(isel, ins->dest, 1);
+            if (dst_reg >= 0) {
+                const char* src_lo = isel_get_lo_reg(isel, src);
+                emit_mov(isel, (char*)isel_reg_name(dst_reg), (char*)src_lo, ins);
+            }
         }
     } else {
         // 1字节到1字节：直接复用源寄存器
@@ -767,7 +858,7 @@ static void emit_store(ISelContext* isel, Instr* ins) {
             }
         } else {
             char imm_str[16];
-            snprintf(imm_str, sizeof(imm_str), "#%ld", ins->imm.ival);
+            snprintf(imm_str, sizeof(imm_str), "#%d", (int)(ins->imm.ival & 0xFF));
             isel_emit(isel, "MOV", (char*)var_name, imm_str, instr_to_ssa_str(ins));
         }
         return;
@@ -857,7 +948,7 @@ static void emit_load(ISelContext* isel, Instr* ins) {
     int space = get_mem_space(ins->mem_type);
     
     int size = ins->type ? ins->type->size : 1;
-    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    int reg = safe_alloc_reg_for_value(isel, ins->dest, size);
     
     // sbit 读取：MOV C, bit; CLR A; RLC A
     if (is_sbit_type(ins->mem_type)) {
@@ -888,9 +979,18 @@ static void emit_load(ISelContext* isel, Instr* ins) {
         isel_emit(isel, "MOV", "A", (char*)var_name, instr_to_ssa_str(ins));
     }
     
-    emit_mov(isel, (char*)isel_reg_name(reg + (size == 2 ? 1 : 0)), "A", ins);
+    // 将加载的值从A保存到分配的寄存器（仅当reg >= 0时）
+    // 当reg == -2时值已经在A中，不需要额外的MOV
+    if (reg >= 0) {
+        const char* dst_reg = isel_reg_name(reg + (size == 2 ? 1 : 0));
+        if (dst_reg && strcmp(dst_reg, "A") != 0) {
+            char* ssa = instr_to_ssa_str(ins);
+            isel_emit(isel, "MOV", dst_reg, "A", ssa);
+            free(ssa);
+        }
+    }
     
-    if (size == 2) {
+    if (size == 2 && reg >= 0) {
         // 高字节处理
         if (space == 4) {
             // xdata
@@ -910,7 +1010,10 @@ static void emit_load(ISelContext* isel, Instr* ins) {
             snprintf(source_hi, sizeof(source_hi), "(_%s + 1)", var_name);
             isel_emit(isel, "MOV", "A", source_hi, NULL);
         }
-        emit_mov(isel, (char*)isel_reg_name(reg), "A", ins);
+        const char* dst_reg_hi = isel_reg_name(reg);
+        if (dst_reg_hi && strcmp(dst_reg_hi, "A") != 0) {
+            isel_emit(isel, "MOV", dst_reg_hi, "A", NULL);
+        }
     }
 }
 
@@ -991,6 +1094,9 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             break;
         case IROP_XOR:
             emit_xor(isel, ins);
+            break;
+        case IROP_NOT:
+            emit_not(isel, ins);
             break;
         case IROP_NE:
             emit_ne(isel, ins);

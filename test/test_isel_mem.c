@@ -4,8 +4,6 @@
 
 // // ----- 1. 基础 SFR 定义 (仅保留实际使用的) -----
 register char  P1      = 0x90;
-// register char  ACC     = 0xE0;
-// register char  B       = 0xF0;
 // register char  SCON    = 0x98;
 // register char  SBUF    = 0x99;
 // register char  IE      = 0xA8;
@@ -70,51 +68,41 @@ register bool  g_bit7 = 0x07;
 //     return g_code + 1;
 // }
 
-// ----- 7. 位操作测试 -----
-int test_bit_operations(void) {
-    int result = 0;
-    
-    g_bdata = 0x00;
-    g_bit0 = 1;
-    if (g_bit0) result |= 0x01;
-    
-    g_bit7 = 1;
-    if (g_bit7) result |= 0x80;
-    
-    P1 = 0x00;
-    P1_0 = 1;
-    P1_7 = 1;
-    if (P1_0 && P1_7) result |= 0x02;
-    
-    g_bit0 = 0;
-    if (!g_bit0) result |= 0x04;
-    
-    return result;
-}
-
-// // ----- 8. SFR 复杂操作测试 -----
-// int test_sfr_complex(int v) {
+// // ----- 7. 位操作测试 -----
+// int test_bit_operations(void) {
 //     int result = 0;
     
-//     P1 = (char)v;
-//     P1 = P1 & 0x0F;
-//     P1 = P1 | 0x30;
-//     P1 = P1 ^ 0x01;
-//     P1 = ~P1;
-//     result = P1;
+//     g_bdata = 0x00;
+//     g_bit0 = 1;
+//     if (g_bit0) result |= 0x01;
     
-//     ACC = (char)v;
-//     ACC = ACC + 1;
-//     ACC = ACC << 1;
-//     result += ACC;
+//     g_bit7 = 1;
+//     if (g_bit7) result |= 0x80;
     
-//     B = (char)v;
-//     ACC = B;
-//     B = B + ACC;
-//     result += B;
+//     P1 = 0x00;
+//     P1_0 = 1;
+//     P1_7 = 1;
+//     if (P1_0 && P1_7) result |= 0x02;
+    
+//     g_bit0 = 0;
+//     if (!g_bit0) result |= 0x04;
     
 //     return result;
 // }
+
+// ----- 8. SFR 复杂操作测试 -----
+int test_sfr_complex(int v) {
+    int result = 0;
+    
+    P1 = (char)v;
+    P1 = P1 & 0x0F;
+    P1 = P1 | 0x30;
+    P1 = P1 ^ 0x01;
+    P1 = ~P1;
+    result = P1;
+    
+    return result;
+}
 
 // // ----- 9. 中断控制测试 -----
 // int test_interrupt_control(int enable) {
