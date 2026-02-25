@@ -107,9 +107,9 @@ void ssa_build_write(SSABuild *b, const char *var, ValueName val) {
     if (!b->cur_block) return;
     // 先删除已存在的条目，避免dict_get返回旧值
     dict_remove(b->cur_block->var_map, (char*)var);
-    ValueName *p = ssa_alloc(sizeof(ValueName));
-    *p = val;
-    dict_put(b->cur_block->var_map, ssa_strdup(var), p);
+        ValueName *p = ssa_alloc(sizeof(ValueName));
+        *p = val;
+        dict_put(b->cur_block->var_map, ssa_strdup(var), p);
 }
 
 static ValueName ssa_read_recursive(SSABuild *b, const char *var, Block *blk);
@@ -312,6 +312,9 @@ SSABuild* ssa_build_create(void) {
     b->unit->asm_blocks = make_list();
     return b;
 }
+
+/* counter for synthesized global initializers */
+static int __init_arr_counter = 0;
 
 // 添加全局变量到SSA Unit
 void ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init,
@@ -1340,6 +1343,7 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
     case AST_DECL: {
         Ast *var = ast->declvar;
         if (var && var->type == AST_LVAR) {
+            (void)0;
             if (var->ctype && (var->ctype->type == CTYPE_STRUCT || var->ctype->type == CTYPE_ARRAY)) {
                 if (ast->declinit) {
                     ValueName base = ssa_build_addr(b, var->varname, var->ctype);
@@ -1350,6 +1354,36 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
                 }
             } else {
                 if (ast->declinit) {
+                    /* 如果解析错误把数组当作指针（例如 parser 将局部数组误识为指针），
+                       则把数组初始值放到一个合成的全局常量中，然后把局部指针指向该全局地址。*/
+                    if ((var->ctype->type == CTYPE_PTR) &&
+                        (ast->declinit->type == AST_ARRAY_INIT || ast->declinit->type == AST_STRING)) {
+                        Ctype *elem = var->ctype->ptr;
+                        int len = 0;
+                        if (ast->declinit->type == AST_STRING && elem->type == CTYPE_CHAR) {
+                            len = (int)strlen(ast->declinit->sval) + 1;
+                        } else if (ast->declinit->type == AST_ARRAY_INIT) {
+                            len = list_len(ast->declinit->arrayinit);
+                        }
+                        if (len > 0) {
+                            Ctype *gtype = ssa_alloc(sizeof(Ctype));
+                            gtype->type = CTYPE_ARRAY;
+                            gtype->ptr = elem;
+                            gtype->len = len;
+                            gtype->size = elem->size * len;
+                            gtype->attr = (6 << 7); /* place in code/.const */
+
+                            Instr *ginit = build_global_init_instr(b, gtype, ast->declinit);
+                            char namebuf[64];
+                            snprintf(namebuf, sizeof(namebuf), "__init_arr_%d", ++__init_arr_counter);
+                            ssa_add_global(b, ssa_strdup(namebuf), gtype, 0, (ginit != NULL), ginit, true, false);
+
+                            ValueName addr = ssa_build_addr(b, ssa_strdup(namebuf), gtype);
+                            ssa_build_write(b, var->varname, addr);
+                            break;
+                        }
+                    }
+
                     ValueName val = gen_expr(b, ast->declinit);
                     val = gen_type_cast(b, val, ast->declinit->ctype, var->ctype);
                     ssa_build_write(b, var->varname, val);
@@ -1695,6 +1729,7 @@ static void assign_stack_offsets(Func *f, List *localvars)
     for (Iter it = list_iter(localvars); !iter_end(it);) {
         Ast *v = iter_next(&it);
         if (!v || v->type != AST_LVAR || !v->ctype) continue;
+        (void)0;
         if (v->ctype->type != CTYPE_STRUCT && v->ctype->type != CTYPE_ARRAY)
             continue;
         int size = v->ctype->size;

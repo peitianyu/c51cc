@@ -23,11 +23,11 @@
 //     return l ^ r;
 // }
 
-char select_mix(char a, char b, char c) {
-    char x = (a > b) ? a : b;
-    char y = (x > c) ? x : c;
-    return y;
-}
+// char select_mix(char a, char b, char c) {
+//     char x = (a > b) ? a : b;
+//     char y = (x > c) ? x : c;
+//     return y;
+// }
 
 // char cast_mix(char c, unsigned char uc) {
 //     char s = (char)c;
@@ -36,11 +36,11 @@ char select_mix(char a, char b, char c) {
 //     return (char)t + s + u;
 // }
 
-// char ptr_mix(void) {
-//     char arr[4] = {3, 5, 7, 11};
-//     char* p = arr;
-//     return p[0] + p[1] + p[2] + p[3];
-// }
+char ptr_mix(void) {
+    char arr[4] = {3, 5, 7, 11};
+    char* p = arr;
+    return p[0] + p[1] + p[2] + p[3];
+}
 
 // char loop_phi(char n) {
 //     char i = 0;

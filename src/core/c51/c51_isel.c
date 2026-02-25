@@ -1609,15 +1609,63 @@ static void emit_offset(ISelContext* isel, Instr* ins) {
     int dst_reg = alloc_reg_for_value(isel, ins->dest, 2);
     const char* dst_hi = isel_reg_name(dst_reg);
     const char* dst_lo = isel_reg_name(dst_reg + 1);
+
+    /* 先把 base 拷贝到目标寄存器对 */
     emit_mov(isel, (char*)dst_hi, (char*)isel_get_hi_reg(isel, base), ins);
     emit_mov(isel, (char*)dst_lo, (char*)isel_get_lo_reg(isel, base), NULL);
 
+    /* 获取 idx 的低/高字节寄存器名 */
+    const char* idx_lo = isel_get_lo_reg(isel, idx);
+    const char* idx_hi = isel_get_hi_reg(isel, idx);
+
+    /* 如果 idx 所用寄存器与目标重叠，复制 idx 到临时寄存器以避免自加 */
+    int tmp_idx = -1;
+    const char* idx_lo_src = idx_lo;
+    const char* idx_hi_src = idx_hi;
+
+    bool overlap_low = (idx_lo && dst_lo && strcmp(idx_lo, dst_lo) == 0);
+    bool overlap_high = (idx_hi && dst_hi && strcmp(idx_hi, dst_hi) == 0);
+    bool idx_in_acc = (idx_lo && strcmp(idx_lo, "A") == 0) || (idx_hi && strcmp(idx_hi, "A") == 0);
+
+    if (overlap_low || overlap_high || idx_in_acc) {
+        tmp_idx = alloc_temp_reg(isel, idx, 2);
+        if (tmp_idx >= 0) {
+            idx_lo_src = isel_reg_name(tmp_idx + 1);
+            idx_hi_src = isel_reg_name(tmp_idx);
+            /* 复制高/低字节到临时寄存器，注意 A 的情况 */
+            if (idx_hi) {
+                if (strcmp(idx_hi, "A") == 0) {
+                    isel_emit(isel, "MOV", idx_hi_src, "A", NULL);
+                } else {
+                    isel_emit(isel, "MOV", idx_hi_src, (char*)idx_hi, NULL);
+                }
+            }
+            if (idx_lo) {
+                if (strcmp(idx_lo, "A") == 0) {
+                    isel_emit(isel, "MOV", idx_lo_src, "A", NULL);
+                } else {
+                    isel_emit(isel, "MOV", idx_lo_src, (char*)idx_lo, NULL);
+                }
+            }
+        } else {
+            /* 无法分配临时：确保索引在累加器中并使用 A 参与加法 */
+            isel_ensure_in_acc(isel, idx);
+            idx_lo_src = "A";
+            idx_hi_src = "A";
+        }
+    }
+
+    /* 低字节相加 */
     emit_mov(isel, "A", (char*)dst_lo, NULL);
-    isel_emit(isel, "ADD", "A", (char*)isel_get_lo_reg(isel, idx), NULL);
+    isel_emit(isel, "ADD", "A", (char*)idx_lo_src, NULL);
     emit_mov(isel, (char*)dst_lo, "A", NULL);
+
+    /* 高字节带进位相加 */
     emit_mov(isel, "A", (char*)dst_hi, NULL);
-    isel_emit(isel, "ADDC", "A", (char*)isel_get_hi_reg(isel, idx), NULL);
+    isel_emit(isel, "ADDC", "A", (char*)idx_hi_src, NULL);
     emit_mov(isel, (char*)dst_hi, "A", NULL);
+
+    if (tmp_idx >= 0) free_temp_reg(isel, tmp_idx, 2);
 }
 
 /* 发射减法 */
@@ -1928,6 +1976,89 @@ static void emit_load(ISelContext* isel, Instr* ins) {
         const char* label = list_get(ins->labels, 0);
         if (label && label[0] == '@') var_name = label + 1;
         else var_name = label;
+    }
+
+    /* 如果还是没有找到符号名，尝试识别 ptr 是由 "addr @sym" 加常量偏移构成（IROP_OFFSET），
+       这样可以发射 MOVC 从 code 段读取：MOV DPTR,#sym; MOV A,#off; MOVC A,@A+DPTR */
+    if (!var_name && ptr > 0 && isel->ctx && isel->ctx->current_func) {
+        Func *f = isel->ctx->current_func;
+        Instr *def = NULL;
+        for (Iter it = list_iter(f->blocks); !iter_end(it) && !def;) {
+            Block *b = iter_next(&it);
+            if (!b) continue;
+            for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+                Instr *ii = iter_next(&jt);
+                if (ii && ii->dest == ptr) { def = ii; break; }
+            }
+            for (Iter jt = list_iter(b->phis); !iter_end(jt) && !def;) {
+                Instr *p = iter_next(&jt);
+                if (p && p->dest == ptr) { def = p; break; }
+            }
+        }
+
+        if (def && def->op == IROP_OFFSET && def->args && def->args->len >= 2) {
+            ValueName base = *(ValueName*)list_get(def->args, 0);
+            ValueName offv = *(ValueName*)list_get(def->args, 1);
+            /* 检查 base 是否为 addr @sym */
+            char *key = int_to_key(base);
+            const char *sym = NULL;
+            if (isel->ctx->value_to_addr) sym = (const char*)dict_get(isel->ctx->value_to_addr, key);
+            free(key);
+            if (sym) {
+                /* 查找常量偏移的定义 */
+                Instr *cdef = NULL;
+                for (Iter it = list_iter(f->blocks); !iter_end(it) && !cdef;) {
+                    Block *b = iter_next(&it);
+                    if (!b) continue;
+                    for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+                        Instr *ii = iter_next(&jt);
+                        if (ii && ii->dest == offv) { cdef = ii; break; }
+                    }
+                }
+                if (cdef && cdef->op == IROP_CONST) {
+                    int off = (int)cdef->imm.ival;
+                    /* 仅处理 code 段读取（MOVC）情况：检查 base 的 mem_type 来判断地址空间 */
+                    int space = 0;
+                    /* 查找 base 的定义以获取 mem_type */
+                    Instr *basedef = NULL;
+                    for (Iter it = list_iter(f->blocks); !iter_end(it) && !basedef;) {
+                        Block *bb = iter_next(&it);
+                        if (!bb) continue;
+                        for (Iter jt = list_iter(bb->instrs); !iter_end(jt);) {
+                            Instr *ii = iter_next(&jt);
+                            if (ii && ii->dest == base) { basedef = ii; break; }
+                        }
+                    }
+                    if (basedef && basedef->mem_type) space = get_mem_space(basedef->mem_type);
+                    if (space == 6) {
+                        /* 设置 DPTR 到全局符号 */
+                        char dptr_val[256];
+                        snprintf(dptr_val, sizeof(dptr_val), "#%s", sym);
+                        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+                        if (off == 0) {
+                            isel_emit(isel, "CLR", "A", NULL, instr_to_ssa_str(ins));
+                        } else if (off >= 0 && off <= 255) {
+                            char offvstr[32]; snprintf(offvstr, sizeof(offvstr), "#%d", off);
+                            isel_emit(isel, "MOV", "A", offvstr, instr_to_ssa_str(ins));
+                        } else {
+                            /* 大偏移暂不处理，回退到默认行为 */
+                        }
+                        /* 从 code 中读取字节 */
+                        isel_emit(isel, "MOVC", "A", "@A+DPTR", instr_to_ssa_str(ins));
+                        /* 将 A 写回目标寄存器 */
+                        const char* dst_lo = NULL;
+                        int size = ins->type ? ins->type->size : 1;
+                        int reg = safe_alloc_reg_for_value(isel, ins->dest, size);
+                        if (reg >= 0) dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+                        else dst_lo = "A";
+                        if (dst_lo && strcmp(dst_lo, "A") != 0) {
+                            isel_emit(isel, "MOV", (char*)dst_lo, "A", NULL);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
     }
     
     if (!var_name) return;
