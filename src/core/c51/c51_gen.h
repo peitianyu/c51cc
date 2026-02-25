@@ -24,6 +24,11 @@ typedef struct C51GenContext {
     Dict* value_to_spill;
     int next_spill_id;
 
+    /* spill 目标配置：选择默认的节 (SEC_DATA / SEC_IDATA / SEC_XDATA)
+     * 如果 spill_use_xdata_for_large 为 true，则对于 size>1 的值使用 SEC_XDATA。 */
+    SectionKind spill_section;
+    int spill_use_xdata_for_large;
+
     Dict* mmio_map;
     int label_counter;
 

@@ -18,6 +18,9 @@ C51GenContext* c51_ctx_new(void) {
     ctx->value_to_const = make_dict(NULL);
     ctx->value_to_spill = make_dict(NULL);
     ctx->next_spill_id = 0;
+    /* 默认 spill 区使用 IDATA，较大（size>1）时使用 XDATA */
+    ctx->spill_section = SEC_IDATA;
+    ctx->spill_use_xdata_for_large = 1;
     ctx->v16_regs = make_dict(NULL);
     ctx->mmio_map = make_dict(NULL);
     ctx->temp_values = make_list();

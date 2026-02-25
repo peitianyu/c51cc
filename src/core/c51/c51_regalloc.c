@@ -340,9 +340,18 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                     char* key = int_to_key(interval->val);
                     dict_put(genctx->value_to_addr, key, name);
 
-                    /* 在数据段创建/追加空间并注册符号 */
+                    /* 在目标 ObjFile 中为 spill 符号创建合适的 section 并注册符号 */
                     if (genctx->obj) {
-                        int sec_idx = obj_add_section(genctx->obj, "?DT?", SEC_DATA, 0, 1);
+                        SectionKind use_kind = genctx->spill_section;
+                        if (genctx->spill_use_xdata_for_large && interval->size > 1) {
+                            use_kind = SEC_XDATA;
+                        }
+                        const char* sec_name = "?DT?";
+                        if (use_kind == SEC_IDATA) sec_name = "?ID?";
+                        else if (use_kind == SEC_XDATA) sec_name = "?XD?";
+                        else if (use_kind == SEC_DATA) sec_name = "?DT?";
+
+                        int sec_idx = obj_add_section(genctx->obj, sec_name, use_kind, 0, 1);
                         Section* sec = obj_get_section(genctx->obj, sec_idx);
                         int offset = sec->size;
                         /* 追加零字节作为占位 */

@@ -88,6 +88,19 @@ static int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* 
 
     if (!var_name) return -2;
 
+    /* 如果累加器已经持有该值，直接返回 A，避免重复加载 */
+    if (isel->acc_busy && isel->acc_val == val) {
+        return -2;
+    }
+
+    /* 如果已经存在映射且不是标记为 spill(-3)，直接返回映射，避免重复重载 */
+    if (isel->ctx && isel->ctx->value_to_reg) {
+        char* k = int_to_key(val);
+        int* existing = (int*)dict_get(isel->ctx->value_to_reg, k);
+        free(k);
+        if (existing && *existing != -3) return *existing;
+    }
+
     int reg = alloc_temp_reg(isel, val, size);
     const char* ssa = ins ? instr_to_ssa_str(ins) : NULL;
 
@@ -188,8 +201,23 @@ static int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* 
         return reg;
     } else {
         /* 无寄存器可用，直接把值加载到 A */
+        /* 再次检查累加器，避免重复加载（并发场景） */
+        if (isel->acc_busy && isel->acc_val == val) {
+            if (ssa) free((void*)ssa);
+            return -2;
+        }
         isel_emit(isel, "MOV", "A", var_name, ssa);
         if (ssa) free((void*)ssa);
+
+        /* 记录该值现在位于 A（映射 -2），避免后续重复重载 */
+        if (isel->ctx && isel->ctx->value_to_reg) {
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = -2;
+            char* k = int_to_key(val);
+            dict_put(isel->ctx->value_to_reg, k, reg_num);
+        }
+        isel->acc_busy = true;
+        isel->acc_val = val;
         return -2;
     }
 }
@@ -893,12 +921,11 @@ static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         else if (imm_low == 2 && size == 1) {
             isel_emit(isel, "DEC", "A", NULL, instr_to_ssa_str(ins));
             isel_emit(isel, "DEC", "A", NULL, NULL);
-        } 
-        else {
+        } else {
             isel_emit(isel, "CLR", "C", NULL, NULL);
-            char imm_str[16];
-            snprintf(imm_str, sizeof(imm_str), "#%d", imm_low);
-            isel_emit(isel, "SUBB", "A", imm_str, instr_to_ssa_str(ins));
+            ValueName src2 = get_src2_value(ins);
+            const char* src2_lo = isel_get_lo_reg(isel, src2);
+            isel_emit(isel, "SUBB", "A", (char*)src2_lo, instr_to_ssa_str(ins));
         }
     } else {
         isel_emit(isel, "CLR", "C", NULL, NULL);
