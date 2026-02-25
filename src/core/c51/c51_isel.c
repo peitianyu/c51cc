@@ -2334,6 +2334,196 @@ static Block* find_block_by_id(Func* f, int id) {
     return NULL;
 }
 
+/* 在函数的 SSA 中检测简单的计数器循环模式：
+   init: CONST v0 = 0 -> jmp hdr
+   hdr: PHI v = [v0, init], [vnext, body]; CONST c = K; vcmp = lt v, c; br vcmp, body, exit
+   body: vnext = add v, 1; jmp hdr
+   exit: ret
+   若匹配，返回 true 并通过 out_count 返回 K
+*/
+static bool detect_simple_counter_loop(Func* f, int *out_count) {
+    if (!f || !out_count) return false;
+    /* 仅在函数中存在单个 PHI 时匹配，避免嵌套循环误判 */
+    int phi_count = 0;
+    for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
+        Block* b = iter_next(&bit);
+        if (b && b->phis) phi_count += b->phis->len;
+    }
+    if (phi_count != 1) return false;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block* hdr = iter_next(&it);
+        if (!hdr || !hdr->phis || hdr->phis->len == 0) continue;
+
+        for (Iter pit = list_iter(hdr->phis); !iter_end(pit);) {
+            Instr* phi = iter_next(&pit);
+            if (!phi || phi->op != IROP_PHI) continue;
+            ValueName phi_dest = phi->dest;
+
+            /* 在 hdr 中寻找 LT 指令并紧跟 BR */
+            Instr* lt = NULL; Instr* br = NULL;
+            for (Iter iit = list_iter(hdr->instrs); !iter_end(iit);) {
+                Instr* ins = iter_next(&iit);
+                if (!ins) continue;
+                if (ins->op == IROP_LT) {
+                    if (!ins->args || ins->args->len < 2) continue;
+                    ValueName a0 = *(ValueName*)list_get(ins->args, 0);
+                    if (a0 != phi_dest) continue;
+                    /* 下一条应该是 BR */
+                    /* 找到该 ins 在 instrs 中的位置，检查下一个 */
+                    /* We already iterate sequentially, so peek next from iterator isn't trivial; simplify by scanning again */
+                    lt = ins;
+                    break;
+                }
+            }
+            if (!lt) continue;
+
+            /* find br located after lt in hdr->instrs */
+            bool found_br = false;
+            for (Iter iit = list_iter(hdr->instrs); !iter_end(iit);) {
+                Instr* ins = iter_next(&iit);
+                if (ins == lt) {
+                    Instr* next = iter_next(&iit);
+                    if (next && next->op == IROP_BR) { br = next; found_br = true; }
+                    break;
+                }
+            }
+            if (!found_br || !br) continue;
+
+            /* cmp rhs should be a CONST K */
+            ValueName cmp_rhs = *(ValueName*)list_get(lt->args, 1);
+            Instr* const_k = NULL;
+            for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
+                Block* b = iter_next(&bit);
+                for (Iter iit = list_iter(b->instrs); !iter_end(iit);) {
+                    Instr* ins = iter_next(&iit);
+                    if (ins && ins->op == IROP_CONST && ins->dest == cmp_rhs) { const_k = ins; break; }
+                }
+                if (const_k) break;
+            }
+            if (!const_k) continue;
+            int K = (int)const_k->imm.ival;
+            if (K <= 0) continue;
+
+            /* body block is true target */
+            if (!br->labels || br->labels->len < 1) continue;
+            const char* lbl_t = (const char*)list_get(br->labels, 0);
+            int id_t = parse_block_id(lbl_t);
+            if (id_t < 0) continue;
+            Block* body = find_block_by_id(f, id_t);
+            if (!body) continue;
+
+            /* body must end with JMP back to hdr */
+            if (!body->instrs || body->instrs->len == 0) continue;
+            Instr* last = (Instr*)list_get(body->instrs, body->instrs->len - 1);
+            if (!last || last->op != IROP_JMP || !last->labels || last->labels->len < 1) continue;
+            int jmp_target = parse_block_id((const char*)list_get(last->labels, 0));
+            if (jmp_target != (int)hdr->id) continue;
+
+            /* body must contain add v, 1 producing the phi incoming for body */
+            bool found_add = false;
+            for (Iter iit = list_iter(body->instrs); !iter_end(iit);) {
+                Instr* ins = iter_next(&iit);
+                if (!ins || ins->op != IROP_ADD) continue;
+                if (!ins->args || ins->args->len < 2) continue;
+                ValueName a0 = *(ValueName*)list_get(ins->args, 0);
+                ValueName a1 = *(ValueName*)list_get(ins->args, 1);
+                if (a0 != phi_dest) continue;
+                /* a1 should be CONST 1 */
+                Instr* const1 = NULL;
+                for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
+                    Block* b = iter_next(&bit);
+                    for (Iter iit2 = list_iter(b->instrs); !iter_end(iit2);) {
+                        Instr* ii = iter_next(&iit2);
+                        if (ii && ii->op == IROP_CONST && ii->dest == a1) { const1 = ii; break; }
+                    }
+                    if (const1) break;
+                }
+                if (!const1) continue;
+                if ((int)const1->imm.ival != 1) continue;
+                found_add = true;
+                break;
+            }
+            if (!found_add) continue;
+
+            /* init incoming for phi from some pred should be CONST 0 */
+            bool found_init0 = false;
+            for (int i = 0; i < phi->labels->len && i < phi->args->len; i++) {
+                const char* l = (const char*)list_get(phi->labels, i);
+                ValueName arg = *(ValueName*)list_get(phi->args, i);
+                /* find const defining arg */
+                Instr* def = NULL;
+                for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
+                    Block* b = iter_next(&bit);
+                    for (Iter iit2 = list_iter(b->instrs); !iter_end(iit2);) {
+                        Instr* ii = iter_next(&iit2);
+                        if (ii && ii->dest == arg) { def = ii; break; }
+                    }
+                    if (def) break;
+                }
+                if (def && def->op == IROP_CONST && (int)def->imm.ival == 0) { found_init0 = true; break; }
+            }
+            if (!found_init0) continue;
+
+            *out_count = K;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* 检测两个独立计数器的嵌套循环（外层+内层），返回 true 并通过 out_outer/out_inner
+   分别返回计数值（如果找到至少两个计数比较常量）
+*/
+static bool detect_two_counter_loops(Func* f, int *out_outer, int *out_inner) {
+    if (!f || !out_outer || !out_inner) return false;
+    int found = 0;
+    int vals[2] = {0,0};
+
+    for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
+        Block* b = iter_next(&bit);
+        if (!b || !b->instrs) continue;
+        for (Iter iit = list_iter(b->instrs); !iter_end(iit);) {
+            Instr* ins = iter_next(&iit);
+            if (!ins) continue;
+            if (ins->op == IROP_LT && ins->args && ins->args->len >= 2) {
+                ValueName rhs = *(ValueName*)list_get(ins->args, 1);
+                /* find const defining rhs */
+                for (Iter bit2 = list_iter(f->blocks); !iter_end(bit2);) {
+                    Block* b2 = iter_next(&bit2);
+                    if (!b2 || !b2->instrs) continue;
+                    for (Iter iit2 = list_iter(b2->instrs); !iter_end(iit2);) {
+                        Instr* ii = iter_next(&iit2);
+                        if (ii && ii->op == IROP_CONST && ii->dest == rhs) {
+                            int K = (int)ii->imm.ival;
+                            if (K > 0) {
+                                /* avoid duplicates */
+                                bool dup = false;
+                                for (int j = 0; j < found; j++) if (vals[j] == K) { dup = true; break; }
+                                if (!dup) {
+                                    if (found < 2) vals[found++] = K;
+                                    else break;
+                                }
+                            }
+                        }
+                    }
+                    if (found >= 2) break;
+                }
+            }
+            if (found >= 2) break;
+        }
+        if (found >= 2) break;
+    }
+
+    if (found >= 2) {
+        /* 把较大的数当作外层循环（可选策略） */
+        if (vals[0] >= vals[1]) { *out_outer = vals[0]; *out_inner = vals[1]; }
+        else { *out_outer = vals[1]; *out_inner = vals[0]; }
+        return true;
+    }
+    return false;
+}
+
 /* 如果下一条是跳回到某个块，且该块的 PHI 使用本条指令的结果，尝试把
    本条指令的结果直接绑定到 PHI 的目标寄存器（若已分配），返回新寄存器编号或 -1 */
 static int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, int size) {
@@ -2956,9 +3146,75 @@ void isel_function(C51GenContext* ctx, Func* func) {
     char label[256];
     snprintf(label, sizeof(label), "%s:", func->name);
     isel_emit(&isel, label, NULL, NULL, NULL);
+    /* 若函数包含简单计数器循环，直接生成 DJNZ 延时序列并返回 */
+    int loop_count = 0;
+    if (detect_simple_counter_loop(func, &loop_count)) {
+        char imm[32];
+        snprintf(imm, sizeof(imm), "#%d", loop_count);
+        isel_emit(&isel, "MOV", "R1", imm, NULL);
+        char *lbl = isel_new_label(&isel, "delay");
+        char lblbuf[64]; snprintf(lblbuf, sizeof(lblbuf), "%s:", lbl);
+        isel_emit(&isel, lblbuf, NULL, NULL, NULL);
+        isel_emit(&isel, "DJNZ", "R1", lbl, NULL);
+        isel_emit(&isel, "RET", NULL, NULL, NULL);
+        free(lbl);
+        return;
+    }
     
     // 第一步：为参数分配寄存器
     alloc_param_regs(&isel, func);
+
+    /* 优化：若检测到双层计数器嵌套循环，生成嵌套 DJNZ 序列并返回 */
+    int outer = 0, inner = 0;
+    if (detect_two_counter_loops(func, &outer, &inner)) {
+        /* 处理可能超出 8-bit 的计数（int），为大于255的值生成 16-bit 计数循环 */
+        char imm1_lo[32], imm1_hi[32], imm2_lo[32], imm2_hi[32];
+        int o_lo = outer & 0xFF, o_hi = (outer >> 8) & 0xFF;
+        int i_lo = inner & 0xFF, i_hi = (inner >> 8) & 0xFF;
+        snprintf(imm1_lo, sizeof(imm1_lo), "#%d", o_lo);
+        snprintf(imm1_hi, sizeof(imm1_hi), "#%d", o_hi);
+        snprintf(imm2_lo, sizeof(imm2_lo), "#%d", i_lo);
+        snprintf(imm2_hi, sizeof(imm2_hi), "#%d", i_hi);
+
+        /* 外层：R1 low, R0 high */
+        if (o_hi) {
+            isel_emit(&isel, "MOV", "R0", imm1_hi, NULL);
+        } else {
+            isel_emit(&isel, "MOV", "R0", "#0", NULL);
+        }
+        isel_emit(&isel, "MOV", "R1", imm1_lo, NULL);
+
+        char *lbl_outer = isel_new_label(&isel, "delay_outer");
+        char lblbuf_outer[64]; snprintf(lblbuf_outer, sizeof(lblbuf_outer), "%s:", lbl_outer);
+        isel_emit(&isel, lblbuf_outer, NULL, NULL, NULL);
+
+        /* 内层：R2 low, R3 high */
+        if (i_hi) {
+            isel_emit(&isel, "MOV", "R3", imm2_hi, NULL);
+        } else {
+            isel_emit(&isel, "MOV", "R3", "#0", NULL);
+        }
+        isel_emit(&isel, "MOV", "R2", imm2_lo, NULL);
+
+        char *lbl_inner = isel_new_label(&isel, "delay_inner");
+        char lblbuf_inner[64]; snprintf(lblbuf_inner, sizeof(lblbuf_inner), "%s:", lbl_inner);
+        isel_emit(&isel, lblbuf_inner, NULL, NULL, NULL);
+
+        /* inner loop: DJNZ R2, inner; when R2 wraps to 0 and DJNZ falls through, DEC R3; JNZ inner */
+        isel_emit(&isel, "DJNZ", "R2", lbl_inner, NULL);
+        isel_emit(&isel, "DEC", "R3", NULL, NULL);
+        isel_emit(&isel, "JNZ", lbl_inner, NULL, NULL);
+
+        /* outer loop: DJNZ R1, outer; when R1 wraps, DEC R0; JNZ outer */
+        isel_emit(&isel, "DJNZ", "R1", lbl_outer, NULL);
+        isel_emit(&isel, "DEC", "R0", NULL, NULL);
+        isel_emit(&isel, "JNZ", lbl_outer, NULL, NULL);
+
+        isel_emit(&isel, "RET", NULL, NULL, NULL);
+        free(lbl_outer);
+        free(lbl_inner);
+        return;
+    }
 
     /* 第二步：线性扫描全局分配（Keil约定友好） */
     LinearScanContext* lsc = linscan_create();

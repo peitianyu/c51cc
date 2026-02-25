@@ -8,11 +8,11 @@ register char P1 = 0x90;
 
 void delay()
 {
-    // char i, j;
+    int i, j;
 
-    // for (i=0; i<1000; i++)
-    // for (j=0; j<500; j++);
-    for (char i=0; i<100; i++);
+    for (i=0; i<1000; i++)
+    for (j=0; j<500; j++);
+    // for (int i=0; i<100; i++);
 }
 
 char main(void)
