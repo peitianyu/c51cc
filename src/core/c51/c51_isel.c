@@ -76,6 +76,15 @@ static int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
     return -2; /* 使用 A */
 }
 
+/* 判断操作数是否为内存或符号（保守）：非寄存器且非立即即视为内存 */
+static bool is_memory_operand_local(const char* op) {
+    if (!op) return false;
+    if (strcmp(op, "A") == 0) return false;
+    if (op[0] == 'R' && op[1] >= '0' && op[1] <= '7' && op[2] == '\0') return false;
+    if (op[0] == '#') return false;
+    return true;
+}
+
 /* 从 spill 内存重载值到临时寄存器，返回基寄存器（或 -2 表示 A） */
 static int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
     if (!isel || !isel->ctx) return -2;
@@ -413,6 +422,47 @@ void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* 
 /* 发射MOV指令 */
 static void emit_mov(ISelContext* isel, const char* dst, const char* src, Instr* ins) {
     if (!dst || !src || strcmp(dst, src) == 0) return;
+    /* 如果 src 看起来像一个符号名，且在 ObjFile 中注册，按 section 发射合适的加载序列 */
+    if (isel && isel->ctx && isel->ctx->obj) {
+        SectionKind sym_sec = SEC_DATA;
+        bool found = false;
+        for (Iter it = list_iter(isel->ctx->obj->symbols); !iter_end(it);) {
+            Symbol *sym = iter_next(&it);
+            if (sym && sym->name && strcmp(sym->name, src) == 0) {
+                Section *s = obj_get_section(isel->ctx->obj, sym->section);
+                if (s) sym_sec = s->kind;
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            char* ssa = instr_to_ssa_str(ins);
+            if (sym_sec == SEC_XDATA) {
+                char dptr_val[256];
+                snprintf(dptr_val, sizeof(dptr_val), "#%s", src);
+                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+                isel_emit(isel, "MOVX", "A", "@DPTR", NULL);
+                isel_emit(isel, "MOV", dst, "A", ssa);
+            } else if (sym_sec == SEC_IDATA) {
+                isel_emit(isel, "MOV", "R0", src, NULL);
+                isel_emit(isel, "MOV", "A", "@R0", NULL);
+                isel_emit(isel, "MOV", dst, "A", ssa);
+            } else if (sym_sec == SEC_CODE) {
+                char dptr_val[256];
+                snprintf(dptr_val, sizeof(dptr_val), "#%s", src);
+                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+                isel_emit(isel, "CLR", "A", NULL, NULL);
+                isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
+                isel_emit(isel, "MOV", dst, "A", ssa);
+            } else {
+                isel_emit(isel, "MOV", dst, src, ssa);
+            }
+            free(ssa);
+            return;
+        }
+    }
+
+    /* 默认路径：直接发 MOV */
     char* ssa = instr_to_ssa_str(ins);
     isel_emit(isel, "MOV", dst, src, ssa);
     free(ssa);
@@ -1416,14 +1466,35 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                     if (k >= 6) continue;
                     int targ = param_regs_char[k];
                     const char* src_lo = isel_get_lo_reg(isel, v);
-                    /* 如果值被spill，优先重载到临时寄存器，避免直接使用内存符号作为源 */
+                    /* 如果值被spill（通过 value_to_reg 或 value_to_addr 标记），优先重载到临时寄存器 */
                     if (isel_get_value_reg(isel, v) == -3) {
                         int r = isel_reload_spill(isel, v, 1, ins);
                         if (r >= 0) src_lo = isel_reg_name(r);
                         else src_lo = "A";
+                    } else if (isel->ctx && isel->ctx->value_to_addr) {
+                        char* ktmp = int_to_key(v);
+                        const char* sym = (const char*)dict_get(isel->ctx->value_to_addr, ktmp);
+                        free(ktmp);
+                        if (sym) {
+                            int r = isel_reload_spill(isel, v, 1, ins);
+                            if (r >= 0) src_lo = isel_reg_name(r);
+                            else src_lo = "A";
+                        }
                     }
                     const char* dst = isel_reg_name(targ);
                     int src_reg = reg_index_from_name(src_lo);
+                    /* 如果源是内存/符号（非寄存器/立即数），优先通过 reload 重载到寄存器或 A */
+                    if (src_reg < 0 && src_lo && is_memory_operand_local(src_lo)) {
+                        int r = isel_reload_spill(isel, v, 1, ins);
+                        if (r >= 0) {
+                            src_lo = isel_reg_name(r);
+                            src_reg = r;
+                        } else {
+                            src_lo = "A";
+                            src_reg = -2; /* 表示 A */
+                        }
+                    }
+
                     if (src_reg >= 0) {
                         if (move_count < 64) {
                             moves[move_count++] = (RegMove){.dst = targ, .src = src_reg};
@@ -1437,7 +1508,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                     int targ_lo = param_regs_int_l[k];
                     const char* src_hi = isel_get_hi_reg(isel, v);
                     const char* src_lo = isel_get_lo_reg(isel, v);
-                    /* 对被 spill 的双字值，先重载到临时寄存器 */
+                    /* 对被 spill 的双字值，或在 value_to_addr 中有符号的值，先重载到临时寄存器 */
                     if (isel_get_value_reg(isel, v) == -3) {
                         int r = isel_reload_spill(isel, v, 2, ins);
                         if (r >= 0) {
@@ -1446,11 +1517,39 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                         } else {
                             src_hi = "A"; src_lo = "A";
                         }
+                    } else if (isel->ctx && isel->ctx->value_to_addr) {
+                        char* ktmp = int_to_key(v);
+                        const char* sym = (const char*)dict_get(isel->ctx->value_to_addr, ktmp);
+                        free(ktmp);
+                        if (sym) {
+                            int r = isel_reload_spill(isel, v, 2, ins);
+                            if (r >= 0) {
+                                src_hi = isel_reg_name(r);
+                                src_lo = isel_reg_name(r + 1);
+                            } else {
+                                src_hi = "A"; src_lo = "A";
+                            }
+                        }
                     }
                     const char* dst_hi = isel_reg_name(targ_hi);
                     const char* dst_lo = isel_reg_name(targ_lo);
                     int src_hi_reg = reg_index_from_name(src_hi);
                     int src_lo_reg = reg_index_from_name(src_lo);
+
+                    /* 如果任一半字是内存/符号，先重载整个 value 到临时寄存器 */
+                    if ((src_hi_reg < 0 && src_hi && is_memory_operand_local(src_hi)) ||
+                        (src_lo_reg < 0 && src_lo && is_memory_operand_local(src_lo))) {
+                        int r = isel_reload_spill(isel, v, 2, ins);
+                        if (r >= 0) {
+                            src_hi = isel_reg_name(r);
+                            src_lo = isel_reg_name(r + 1);
+                            src_hi_reg = r;
+                            src_lo_reg = r + 1;
+                        } else {
+                            src_hi = "A"; src_lo = "A";
+                            src_hi_reg = -2; src_lo_reg = -2;
+                        }
+                    }
 
                     if (src_hi_reg >= 0) {
                         if (move_count < 64) {

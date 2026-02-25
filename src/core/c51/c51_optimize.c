@@ -20,6 +20,11 @@ static bool is_mov(AsmInstr* ins) {
     return ins && ins->op && strcmp(ins->op, "MOV") == 0;
 }
 
+/* 前向声明：操作数类型检查 */
+static bool is_register_operand(const char* op);
+static bool is_immediate_operand(const char* op);
+static bool is_memory_operand(const char* op);
+
 /* 检查寄存器是否在指令中被使用 */
 static bool reg_used_in_instr(AsmInstr* ins, const char* reg) {
     if (!ins || !reg) return false;
@@ -111,11 +116,15 @@ static int peephole_redundant_load(List* instrs, int start) {
     const char* dst2 = get_operand(ins2, 0);
     const char* src2 = get_operand(ins2, 1);
     
-    // MOV x, A; MOV A, x -> MOV x, A (删除第二条)
-    if (operands_equal(src1, "A") && operands_equal(dst2, "A") && 
-        operands_equal(dst1, src2)) {
-        remove_instr(instrs, start + 1);
-        return 1;
+    // 仅对寄存器间的 redundant load 进行删除，避免误删 SFR/内存访问
+    if (is_register_operand(dst1) && is_register_operand(src1) &&
+        is_register_operand(dst2) && is_register_operand(src2)) {
+        // MOV x, A; MOV A, x -> MOV x, A (删除第二条)
+        if (operands_equal(src1, "A") && operands_equal(dst2, "A") && 
+            operands_equal(dst1, src2)) {
+            remove_instr(instrs, start + 1);
+            return 1;
+        }
     }
     
     return 0;
@@ -181,6 +190,9 @@ static int peephole_eliminate_temp_reg(List* instrs, int start) {
     if (!dst1 || dst1[0] != 'R' || operands_equal(src1, "A")) {
         return 0;
     }
+
+    // 仅在 src1 不是内存/外设（即为寄存器或立即数）时安全应用
+    if (is_memory_operand(src1)) return 0;
     
     // 查找下一条 MOV A, Rx 指令（可能跨越 CLR C 等非破坏性指令）
     int offset = 1;
@@ -366,12 +378,13 @@ static void optimize_section(Section* sec) {
             if (removed) { changed = 1; continue; }
             
             // FIXME: 此优化会错误地删除需要的MOV A, Rx指令
-            // removed = peephole_redundant_load(sec->asminstrs, i);
-            // if (removed) { changed = 1; continue; }
-            
-            // FIXME: 此优化会错误地删除SFR load后的寄存器保存指令
-            // removed = peephole_eliminate_temp_reg(sec->asminstrs, i);
-            // if (removed) { changed = 1; continue; }
+            // 启用更安全的 redundant_load（仅寄存器场景）
+            removed = peephole_redundant_load(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            // 启用在 src 非内存时的 temp reg 消除优化
+            removed = peephole_eliminate_temp_reg(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
             
             removed = peephole_mem_to_reg(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
@@ -383,8 +396,9 @@ static void optimize_section(Section* sec) {
             if (removed) { changed = 1; continue; }
             
             // FIXME: 该规则在当前寄存器分配/调用约定下仍可能误删关键MOV
-            // removed = peephole_dead_code(sec->asminstrs, i);
-            // if (removed) { changed = 1; continue; }
+            // 启用死代码删除（仅寄存器目标，且未被后续读取）
+            removed = peephole_dead_code(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
         }
     }
 }
@@ -400,4 +414,24 @@ void c51_optimize(C51GenContext* ctx, ObjFile* obj)
             optimize_section(sec);
         }
     }
+}
+
+/* 判断操作数是否是寄存器（R0-R7 或 A） */
+static bool is_register_operand(const char* op) {
+    if (!op) return false;
+    if (strcmp(op, "A") == 0) return true;
+    if (op[0] == 'R' && op[1] >= '0' && op[1] <= '7' && op[2] == '\0') return true;
+    return false;
+}
+
+/* 判断操作数是否是立即数（以 '#' 开头） */
+static bool is_immediate_operand(const char* op) {
+    if (!op) return false;
+    return op[0] == '#';
+}
+
+/* 判断是否可能是内存或 SFR 操作数（保守判断：非寄存器且非立即即视为内存） */
+static bool is_memory_operand(const char* op) {
+    if (!op) return false;
+    return !is_register_operand(op) && !is_immediate_operand(op);
 }
