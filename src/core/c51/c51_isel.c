@@ -3478,25 +3478,6 @@ void isel_function(C51GenContext* ctx, Func* func) {
         isel.reg_val[i] = -1;
     }
     
-    // 输出函数标签
-    char label[256];
-    snprintf(label, sizeof(label), "%s:", func->name);
-    isel_emit(&isel, label, NULL, NULL, NULL);
-    /* 若函数包含简单计数器循环，直接生成 DJNZ 延时序列并返回 */
-    int loop_count = 0;
-    if (detect_simple_counter_loop(func, &loop_count)) {
-        char imm[32];
-        snprintf(imm, sizeof(imm), "#%d", loop_count);
-        isel_emit(&isel, "MOV", "R1", imm, NULL);
-        char *lbl = isel_new_label(&isel, "delay");
-        char lblbuf[64]; snprintf(lblbuf, sizeof(lblbuf), "%s:", lbl);
-        isel_emit(&isel, lblbuf, NULL, NULL, NULL);
-        isel_emit(&isel, "DJNZ", "R1", lbl, NULL);
-        isel_emit(&isel, "RET", NULL, NULL, NULL);
-        free(lbl);
-        return;
-    }
-    
     // 第一步：为参数分配寄存器
     alloc_param_regs(&isel, func);
 
