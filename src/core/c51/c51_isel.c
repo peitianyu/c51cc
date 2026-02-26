@@ -3478,6 +3478,11 @@ void isel_function(C51GenContext* ctx, Func* func) {
         isel.reg_val[i] = -1;
     }
     
+    // 输出函数标签
+    char label[256];
+    snprintf(label, sizeof(label), "%s:", func->name);
+    isel_emit(&isel, label, NULL, NULL, NULL);
+
     // 第一步：为参数分配寄存器
     alloc_param_regs(&isel, func);
 

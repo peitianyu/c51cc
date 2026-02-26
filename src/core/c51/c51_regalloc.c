@@ -464,49 +464,128 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
     }
 }
 
-/* 为函数参数分配寄存器（扫描 entry 中的 PARAM 指令） */
+// 参数寄存器映射表（按参数位置索引 0,1,2）
+static const int regs_size1[] = {7, 5, 3};           // 1字节：R7, R5, R3
+static const int regs_size2_high[] = {6, 4, 2};      // 2字节高字节：R6, R4, R2
+static const int regs_size2_low[]  = {7, 5, 3};      // 2字节低字节：R7, R5, R3
+static const int regs_size3[] = {1, 2, 3};           // 3字节指针：R1,R2,R3（仅第1个参数可用）
+static const int regs_size4[] = {4, 5, 6, 7};        // 4字节long/float：R4-R7（仅第1个参数可用）
+
+/**
+ * 获取指定位置和大小参数的期望寄存器组
+ * @param idx       参数位置（0表示第一个）
+ * @param size      参数大小（字节）
+ * @param regs_out  输出寄存器数组（需至少能存4个int）
+ * @param count_out 输出寄存器个数
+ * @return          是否有期望的寄存器组（若位置超出或类型不支持返回false）
+ */
+static bool get_param_register_set(int idx, int size, int* regs_out, int* count_out) {
+    if (size == 1) {                     // char / 1字节指针
+        if (idx < 3) {
+            regs_out[0] = regs_size1[idx];
+            *count_out = 1;
+            return true;
+        }
+    } else if (size == 2) {              // int / 2字节指针
+        if (idx < 3) {
+            regs_out[0] = regs_size2_high[idx];
+            regs_out[1] = regs_size2_low[idx];
+            *count_out = 2;
+            return true;
+        }
+    } else if (size == 3) {              // 通用指针
+        if (idx == 0) {                  // 仅第一个参数可用寄存器
+            memcpy(regs_out, regs_size3, sizeof(regs_size3));
+            *count_out = 3;
+            return true;
+        }
+    } else if (size == 4) {              // long / float
+        if (idx == 0) {                  // 仅第一个参数可用寄存器
+            memcpy(regs_out, regs_size4, sizeof(regs_size4));
+            *count_out = 4;
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * 为函数参数分配寄存器（遵循Keil C51约定）
+ */
 void alloc_param_regs(ISelContext* isel, Func* f) {
     if (!f->params || !f->param_types) return;
 
-    int param_idx = 0;
+    int n = list_len(f->params);
+    if (n == 0) return;
+
+    bool used_regs[8] = {false};          // 跟踪已分配的寄存器
+    int param_idx = 0;                     // 参数索引
     Iter pit = list_iter(f->params);
     Iter tit = list_iter(f->param_types);
 
+    // 遍历所有参数
     while (!iter_end(pit) && !iter_end(tit)) {
         char* param_name = iter_next(&pit);
         Ctype* param_type = iter_next(&tit);
+        if (!param_name || !param_type) continue;
 
+        int size = param_type->size;        // 字节数（1/2/3/4）
+        int expected_regs[4];
+        int reg_count;
+
+        // 获取期望的寄存器组
+        bool has_regs = get_param_register_set(param_idx, size, expected_regs, &reg_count);
+        if (!has_regs) {
+            // 该参数位置没有可用的寄存器组（例如第4个参数），停止后续分配
+            break;
+        }
+
+        // 检查期望寄存器组是否全部空闲
+        bool all_free = true;
+        for (int j = 0; j < reg_count; j++) {
+            if (used_regs[expected_regs[j]]) {
+                all_free = false;
+                break;
+            }
+        }
+
+        if (!all_free) {
+            // 寄存器冲突，该参数及后续参数均不使用寄存器
+            break;
+        }
+
+        // 找到对应的PARAM指令（按参数名匹配）
+        Instr* param_ins = NULL;
         if (f->entry && f->entry->instrs) {
             for (Iter it = list_iter(f->entry->instrs); !iter_end(it);) {
                 Instr* ins = iter_next(&it);
                 if (ins && ins->op == IROP_PARAM && ins->labels && ins->labels->len > 0) {
                     const char* name = list_get(ins->labels, 0);
-                    if (name && param_name && strcmp(name, param_name) == 0) {
-                        int size = param_type ? param_type->size : 1;
-                        int reg = -1;
-
-                        if (size == 1) {
-                            if (param_idx < 6) reg = param_regs_char[param_idx];
-                        } else {
-                            if (param_idx < 3) reg = param_regs_int_h[param_idx];
-                        }
-
-                        if (reg >= 0) {
-                            int* reg_num = malloc(sizeof(int));
-                            *reg_num = reg;
-                            dict_put(isel->ctx->value_to_reg, int_to_key(ins->dest), reg_num);
-
-                            for (int j = 0; j < size && (reg + j) < 8; j++) {
-                                isel->reg_busy[reg + j] = true;
-                                isel->reg_val[reg + j] = ins->dest;
-                            }
-                        }
+                    if (name && strcmp(name, param_name) == 0) {
+                        param_ins = ins;
                         break;
                     }
                 }
             }
         }
+
+        if (param_ins) {
+            // 分配寄存器：将期望组全部标记为占用
+            for (int j = 0; j < reg_count; j++) {
+                int r = expected_regs[j];
+                used_regs[r] = true;
+                // 在isel中标记寄存器忙碌，并记录对应的值
+                isel->reg_busy[r] = true;
+                isel->reg_val[r] = param_ins->dest;
+            }
+
+            // 将分配结果存入 value_to_reg（对于多字节，只存第一个寄存器，线性扫描会处理连续）
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = expected_regs[0];
+            char* key = int_to_key(param_ins->dest);
+            dict_put(isel->ctx->value_to_reg, key, reg_num);
+        }
+
         param_idx++;
     }
 }
-
