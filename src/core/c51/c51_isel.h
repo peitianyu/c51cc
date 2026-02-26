@@ -34,6 +34,12 @@ typedef struct ISelContext {
     
     /* 标签计数器 */
     int label_counter;
+
+    /* 记录可用的 sbit 分支信息（用于优化 JB/JNB） */
+    Dict* br_bitinfo; /* key: Instr* ptr string, value: BrBitInfo* */
+
+    /* 记录可用的条件取反信息（用于优化 JZ/JNZ） */
+    Dict* br_invert; /* key: Instr* ptr string, value: bool* */
 } ISelContext;
 
 /* 指令选择主入口 */

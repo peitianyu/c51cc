@@ -361,6 +361,35 @@ static int peephole_dead_code(List* instrs, int start) {
     return 0;
 }
 
+/* 窥孔优化：SJMP L; L: -> 删除无效跳转 */
+static int peephole_sjmp_to_next_label(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* next = (AsmInstr*)list_get(instrs, start + 1);
+    if (!ins || !next || !ins->op || !next->op) return 0;
+
+    if (strcmp(ins->op, "SJMP") != 0) return 0;
+    if (!ins->args || ins->args->len < 1) return 0;
+    const char* target = (const char*)list_get(ins->args, 0);
+    if (!target) return 0;
+
+    size_t len = strlen(next->op);
+    if (len == 0 || next->op[len - 1] != ':') return 0;
+
+    char label[64];
+    if (len >= sizeof(label)) return 0;
+    strncpy(label, next->op, len - 1);
+    label[len - 1] = '\0';
+
+    if (strcmp(target, label) == 0) {
+        remove_instr(instrs, start);
+        return 1;
+    }
+
+    return 0;
+}
+
 /* 对单个section执行窥孔优化 */
 static void optimize_section(Section* sec) {
     if (!sec || !sec->asminstrs) return;
@@ -400,6 +429,9 @@ static void optimize_section(Section* sec) {
             // FIXME: 该规则在当前寄存器分配/调用约定下仍可能误删关键MOV
             // 启用死代码删除（仅寄存器目标，且未被后续读取）
             removed = peephole_dead_code(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_sjmp_to_next_label(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
         }
     }

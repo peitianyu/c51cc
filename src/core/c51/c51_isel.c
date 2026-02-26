@@ -47,6 +47,63 @@ static void emit_mov(ISelContext* isel, const char* dst, const char* src, Instr*
 static void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr* ins);
 static Block* find_block_by_id(Func* f, int id);
 static int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, int size);
+static ValueName get_src1_value(Instr* ins);
+static ValueName get_src2_value(Instr* ins);
+static bool is_imm_operand(Instr* ins, int64_t* out_val);
+
+typedef struct BrBitInfo {
+    char *bit;
+    bool invert;
+} BrBitInfo;
+
+static char* instr_ptr_key(const Instr* ins) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%p", (const void*)ins);
+    return strdup(buf);
+}
+
+static void free_br_bitinfo(void* p) {
+    BrBitInfo* info = (BrBitInfo*)p;
+    if (!info) return;
+    free(info->bit);
+    free(info);
+}
+
+static void br_invert_put(ISelContext* isel, Instr* br, bool invert) {
+    if (!isel || !isel->br_invert || !br) return;
+    bool* v = malloc(sizeof(bool));
+    if (!v) return;
+    *v = invert;
+    char* key = instr_ptr_key(br);
+    dict_put(isel->br_invert, key, v);
+}
+
+static bool br_invert_get(ISelContext* isel, Instr* br, bool* out_invert) {
+    if (!isel || !isel->br_invert || !br) return false;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%p", (const void*)br);
+    bool* v = (bool*)dict_get(isel->br_invert, buf);
+    if (!v) return false;
+    if (out_invert) *out_invert = *v;
+    return true;
+}
+
+static void br_bitinfo_put(ISelContext* isel, Instr* br, const char* bit, bool invert) {
+    if (!isel || !isel->br_bitinfo || !br || !bit) return;
+    BrBitInfo* info = malloc(sizeof(BrBitInfo));
+    if (!info) return;
+    info->bit = strdup(bit);
+    info->invert = invert;
+    char* key = instr_ptr_key(br);
+    dict_put(isel->br_bitinfo, key, info);
+}
+
+static BrBitInfo* br_bitinfo_get(ISelContext* isel, Instr* br) {
+    if (!isel || !isel->br_bitinfo || !br) return NULL;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%p", (const void*)br);
+    return (BrBitInfo*)dict_get(isel->br_bitinfo, buf);
+}
 
 typedef struct {
     int dst;
@@ -382,6 +439,148 @@ static bool is_sbit_type(Ctype* mem_type) {
     if (!mem_type) return false;
     CtypeAttr a = get_attr(mem_type->attr);
     return a.ctype_register && mem_type->type == CTYPE_BOOL;
+}
+
+static const char* get_sbit_var_name(ISelContext* isel, Instr* ins) {
+    if (!isel || !ins) return NULL;
+    ValueName ptr = -1;
+    if (ins->args && ins->args->len > 0) {
+        ptr = *(ValueName*)list_get(ins->args, 0);
+    }
+
+    const char* var_name = NULL;
+    if (isel->ctx && isel->ctx->value_to_addr && ptr > 0) {
+        char* key = int_to_key(ptr);
+        var_name = (const char*)dict_get(isel->ctx->value_to_addr, key);
+        free(key);
+    }
+
+    if (!var_name && ins->labels && ins->labels->len > 0) {
+        const char* label = list_get(ins->labels, 0);
+        if (label && label[0] == '@') var_name = label + 1;
+        else var_name = label;
+    }
+
+    return var_name;
+}
+
+static const char* resolve_addr_symbol_in_block(Instr** instrs, int n, ValueName ptr) {
+    if (!instrs || n <= 0 || ptr <= 0) return NULL;
+    for (int i = 0; i < n; i++) {
+        Instr* ins = instrs[i];
+        if (!ins || ins->op != IROP_ADDR || ins->dest != ptr) continue;
+        if (ins->labels && ins->labels->len > 0) {
+            const char* label = list_get(ins->labels, 0);
+            if (label && label[0] == '@') return label + 1;
+            return label;
+        }
+    }
+    return NULL;
+}
+
+static bool instr_uses_value(Instr* ins, ValueName v) {
+    if (!ins || !ins->args) return false;
+    for (int i = 0; i < ins->args->len; i++) {
+        ValueName* p = list_get(ins->args, i);
+        if (p && *p == v) return true;
+    }
+    return false;
+}
+
+static int count_value_uses(Instr** instrs, int n, ValueName v) {
+    int count = 0;
+    for (int i = 0; i < n; i++) {
+        if (!instrs[i]) continue;
+        if (instr_uses_value(instrs[i], v)) count++;
+    }
+    return count;
+}
+
+static bool find_const_in_block(Instr** instrs, int n, ValueName v, int64_t* out_val) {
+    bool found = false;
+    int64_t val = 0;
+    for (int i = 0; i < n; i++) {
+        Instr* ins = instrs[i];
+        if (!ins || ins->op != IROP_CONST) continue;
+        if (ins->dest == v) {
+            if (found) return false;
+            found = true;
+            val = ins->imm.ival;
+        }
+    }
+    if (found && out_val) *out_val = val;
+    return found;
+}
+
+static bool ne_is_compare_zero(Instr** instrs, int n, Instr* ne, ValueName* out_other) {
+    if (!ne) return false;
+    int64_t imm = 0;
+    if (is_imm_operand(ne, &imm)) {
+        if (imm == 0) {
+            if (out_other) *out_other = get_src1_value(ne);
+            return true;
+        }
+        return false;
+    }
+
+    ValueName a = get_src1_value(ne);
+    ValueName b = get_src2_value(ne);
+    int64_t v = 0;
+    if (find_const_in_block(instrs, n, b, &v) && v == 0) {
+        if (out_other) *out_other = a;
+        return true;
+    }
+    if (find_const_in_block(instrs, n, a, &v) && v == 0) {
+        if (out_other) *out_other = b;
+        return true;
+    }
+    return false;
+}
+
+static Instr* find_def_instr_in_func(Func* f, ValueName v) {
+    if (!f || v <= 0) return NULL;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block* b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr* ins = iter_next(&jt);
+            if (ins && ins->dest == v) return ins;
+        }
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr* ins = iter_next(&jt);
+            if (ins && ins->dest == v) return ins;
+        }
+    }
+    return NULL;
+}
+
+static bool is_const_zero_def(Func* f, ValueName v) {
+    Instr* def = find_def_instr_in_func(f, v);
+    return def && def->op == IROP_CONST && def->imm.ival == 0;
+}
+
+static bool ne_is_compare_zero_def(Func* f, Instr* ne, ValueName* out_other) {
+    if (!ne) return false;
+    int64_t imm = 0;
+    if (is_imm_operand(ne, &imm)) {
+        if (imm == 0) {
+            if (out_other) *out_other = get_src1_value(ne);
+            return true;
+        }
+        return false;
+    }
+
+    ValueName a = get_src1_value(ne);
+    ValueName b = get_src2_value(ne);
+    if (is_const_zero_def(f, b)) {
+        if (out_other) *out_other = a;
+        return true;
+    }
+    if (is_const_zero_def(f, a)) {
+        if (out_other) *out_other = b;
+        return true;
+    }
+    return false;
 }
 
 static int parse_block_id(const char* label) {
@@ -2688,6 +2887,85 @@ static void emit_br(ISelContext* isel, Instr* ins) {
     if (!ins->args || ins->args->len < 1) return;
     if (!ins->labels || ins->labels->len < 2) return;
 
+    /* 直接解析 sbit 条件链：load/lnot/ne 0 -> br */
+    if (isel && isel->ctx && isel->ctx->current_func) {
+        ValueName cond0 = *(ValueName*)list_get(ins->args, 0);
+        ValueName base = cond0;
+        bool invert = false;
+
+        Instr* def = find_def_instr_in_func(isel->ctx->current_func, base);
+        if (def && def->op == IROP_NE) {
+            ValueName other = -1;
+            if (ne_is_compare_zero_def(isel->ctx->current_func, def, &other)) {
+                base = other;
+                def = find_def_instr_in_func(isel->ctx->current_func, base);
+            }
+        }
+
+        if (def && def->op == IROP_LNOT) {
+            base = get_src1_value(def);
+            invert = !invert;
+            def = find_def_instr_in_func(isel->ctx->current_func, base);
+        }
+
+        if (def && def->op == IROP_LOAD && is_sbit_type(def->mem_type)) {
+            const char* bit = get_sbit_var_name(isel, def);
+            if (!bit && def->args && def->args->len > 0) {
+                ValueName ptr = *(ValueName*)list_get(def->args, 0);
+                Instr* addr = find_def_instr_in_func(isel->ctx->current_func, ptr);
+                if (addr && addr->op == IROP_ADDR && addr->labels && addr->labels->len > 0) {
+                    const char* label = list_get(addr->labels, 0);
+                    if (label && label[0] == '@') bit = label + 1;
+                    else bit = label;
+                }
+            }
+
+            if (bit) {
+                const char* lbl_t = (const char*)list_get(ins->labels, 0);
+                const char* lbl_f = (const char*)list_get(ins->labels, 1);
+                int id_t = parse_block_id(lbl_t);
+                int id_f = parse_block_id(lbl_f);
+                if (id_t >= 0 && id_f >= 0) {
+                    char target_t[32];
+                    char target_f[32];
+                    block_label_name(target_t, sizeof(target_t), id_t);
+                    block_label_name(target_f, sizeof(target_f), id_f);
+
+                    if (invert) {
+                        isel_emit(isel, "JNB", bit, target_t, instr_to_ssa_str(ins));
+                    } else {
+                        isel_emit(isel, "JB", bit, target_t, instr_to_ssa_str(ins));
+                    }
+                    isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                    return;
+                }
+            }
+        }
+    }
+
+    BrBitInfo* bitinfo = br_bitinfo_get(isel, ins);
+    if (bitinfo && bitinfo->bit) {
+        const char* lbl_t = (const char*)list_get(ins->labels, 0);
+        const char* lbl_f = (const char*)list_get(ins->labels, 1);
+        int id_t = parse_block_id(lbl_t);
+        int id_f = parse_block_id(lbl_f);
+        if (id_t < 0 || id_f < 0) return;
+
+        char target_t[32];
+        char target_f[32];
+        block_label_name(target_t, sizeof(target_t), id_t);
+        block_label_name(target_f, sizeof(target_f), id_f);
+
+        /* 使用 JB/JNB 直接基于 sbit 分支 */
+        if (bitinfo->invert) {
+            isel_emit(isel, "JNB", bitinfo->bit, target_t, instr_to_ssa_str(ins));
+        } else {
+            isel_emit(isel, "JB", bitinfo->bit, target_t, instr_to_ssa_str(ins));
+        }
+        isel_emit(isel, "SJMP", target_f, NULL, NULL);
+        return;
+    }
+
     ValueName cond = *(ValueName*)list_get(ins->args, 0);
     const char* lbl_t = (const char*)list_get(ins->labels, 0);
     const char* lbl_f = (const char*)list_get(ins->labels, 1);
@@ -2711,8 +2989,225 @@ static void emit_br(ISelContext* isel, Instr* ins) {
     }
 
     // A != 0 -> true
-    isel_emit(isel, "JNZ", target_t, NULL, instr_to_ssa_str(ins));
+    bool invert = false;
+    bool has_invert = br_invert_get(isel, ins, &invert);
+    if (has_invert && invert) {
+        isel_emit(isel, "JZ", target_t, NULL, instr_to_ssa_str(ins));
+    } else {
+        isel_emit(isel, "JNZ", target_t, NULL, instr_to_ssa_str(ins));
+    }
     isel_emit(isel, "SJMP", target_f, NULL, NULL);
+}
+
+static void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
+    if (!isel || !instrs || n <= 0) return;
+    for (int i = 0; i < n; i++) {
+        Instr* ld = instrs[i];
+        if (!ld || ld->op != IROP_LOAD || !is_sbit_type(ld->mem_type)) continue;
+
+        ValueName v0 = ld->dest;
+        if (v0 <= 0) continue;
+
+        const char* bit = get_sbit_var_name(isel, ld);
+        if (!bit) {
+            ValueName ptr = -1;
+            if (ld->args && ld->args->len > 0) ptr = *(ValueName*)list_get(ld->args, 0);
+            bit = resolve_addr_symbol_in_block(instrs, n, ptr);
+        }
+        if (!bit) continue;
+
+        /* load -> br */
+        if (i + 1 < n) {
+            Instr* br = instrs[i + 1];
+            if (br && br->op == IROP_BR && instr_uses_value(br, v0)) {
+                if (count_value_uses(instrs, n, v0) == 1) {
+                    br_bitinfo_put(isel, br, bit, false);
+                    ld->op = IROP_NOP;
+                    continue;
+                }
+            }
+        }
+
+        /* load -> lnot -> br */
+        if (i + 2 < n) {
+            Instr* lnot = instrs[i + 1];
+            Instr* br = instrs[i + 2];
+            if (lnot && br && lnot->op == IROP_LNOT && br->op == IROP_BR) {
+                ValueName v1 = lnot->dest;
+                if (get_src1_value(lnot) == v0 && instr_uses_value(br, v1)) {
+                    if (count_value_uses(instrs, n, v0) == 1 && count_value_uses(instrs, n, v1) == 1) {
+                        br_bitinfo_put(isel, br, bit, true);
+                        ld->op = IROP_NOP;
+                        lnot->op = IROP_NOP;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        /* load -> ne (imm 0) -> br */
+        if (i + 2 < n) {
+            Instr* ne = instrs[i + 1];
+            Instr* br = instrs[i + 2];
+            if (ne && br && ne->op == IROP_NE && br->op == IROP_BR) {
+                ValueName other = -1;
+                if (ne_is_compare_zero(instrs, n, ne, &other) && other == v0) {
+                    ValueName v1 = ne->dest;
+                    if (instr_uses_value(br, v1)) {
+                        if (count_value_uses(instrs, n, v0) == 1 && count_value_uses(instrs, n, v1) == 1) {
+                            br_bitinfo_put(isel, br, bit, false);
+                            ld->op = IROP_NOP;
+                            ne->op = IROP_NOP;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* load -> lnot -> ne (imm 0) -> br */
+        if (i + 3 < n) {
+            Instr* lnot = instrs[i + 1];
+            Instr* ne = instrs[i + 2];
+            Instr* br = instrs[i + 3];
+            if (lnot && ne && br && lnot->op == IROP_LNOT && ne->op == IROP_NE && br->op == IROP_BR) {
+                ValueName v1 = lnot->dest;
+                ValueName other = -1;
+                if (get_src1_value(lnot) == v0 && ne_is_compare_zero(instrs, n, ne, &other) && other == v1) {
+                    ValueName v2 = ne->dest;
+                    if (instr_uses_value(br, v2)) {
+                        if (count_value_uses(instrs, n, v0) == 1 &&
+                            count_value_uses(instrs, n, v1) == 1 &&
+                            count_value_uses(instrs, n, v2) == 1) {
+                            br_bitinfo_put(isel, br, bit, true);
+                            ld->op = IROP_NOP;
+                            lnot->op = IROP_NOP;
+                            ne->op = IROP_NOP;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* 二次扫描：从 BR 逆向识别链路，标记相关指令为 NOP */
+    for (int i = 0; i < n; i++) {
+        Instr* br = instrs[i];
+        if (!br || br->op != IROP_BR || !br->args || br->args->len < 1) continue;
+
+        ValueName cond = *(ValueName*)list_get(br->args, 0);
+        Instr* def_ne = NULL;
+        Instr* def_lnot = NULL;
+        Instr* def_load = NULL;
+        bool invert = false;
+
+        Instr* def = NULL;
+        for (int k = 0; k < n; k++) {
+            if (instrs[k] && instrs[k]->dest == cond) { def = instrs[k]; break; }
+        }
+
+        if (def && def->op == IROP_NE) {
+            ValueName other = -1;
+            if (ne_is_compare_zero(instrs, n, def, &other)) {
+                def_ne = def;
+                cond = other;
+                def = NULL;
+                for (int k = 0; k < n; k++) {
+                    if (instrs[k] && instrs[k]->dest == cond) { def = instrs[k]; break; }
+                }
+            }
+        }
+
+        if (def && def->op == IROP_LNOT) {
+            def_lnot = def;
+            cond = get_src1_value(def);
+            invert = !invert;
+            def = NULL;
+            for (int k = 0; k < n; k++) {
+                if (instrs[k] && instrs[k]->dest == cond) { def = instrs[k]; break; }
+            }
+        }
+
+        if (def && def->op == IROP_LOAD && is_sbit_type(def->mem_type)) {
+            def_load = def;
+            const char* bit = get_sbit_var_name(isel, def_load);
+            if (!bit && def_load->args && def_load->args->len > 0) {
+                ValueName ptr = *(ValueName*)list_get(def_load->args, 0);
+                bit = resolve_addr_symbol_in_block(instrs, n, ptr);
+            }
+            if (!bit) continue;
+
+            bool ok = true;
+            if (def_ne && count_value_uses(instrs, n, def_ne->dest) != 1) ok = false;
+            if (def_lnot && count_value_uses(instrs, n, def_lnot->dest) != 1) ok = false;
+            if (def_load && count_value_uses(instrs, n, def_load->dest) != 1) ok = false;
+            if (!ok) continue;
+
+            br_bitinfo_put(isel, br, bit, invert);
+            if (def_ne) def_ne->op = IROP_NOP;
+            if (def_lnot) def_lnot->op = IROP_NOP;
+            if (def_load) def_load->op = IROP_NOP;
+        }
+    }
+}
+
+static void precompute_br_simplify(ISelContext* isel, Instr** instrs, int n) {
+    if (!isel || !instrs || n <= 0) return;
+    for (int i = 0; i < n; i++) {
+        Instr* ins = instrs[i];
+        if (!ins) continue;
+
+        /* lnot -> br (非 sbit) */
+        if (ins->op == IROP_LNOT && i + 1 < n) {
+            Instr* br = instrs[i + 1];
+            if (br && br->op == IROP_BR && instr_uses_value(br, ins->dest)) {
+                ValueName v0 = get_src1_value(ins);
+                if (count_value_uses(instrs, n, ins->dest) == 1) {
+                    ValueName* p = list_get(br->args, 0);
+                    if (p) *p = v0;
+                    br_invert_put(isel, br, true);
+                    ins->op = IROP_NOP;
+                    continue;
+                }
+            }
+        }
+
+        /* ne (imm 0) -> br (非 sbit) */
+        if (ins->op == IROP_NE && i + 1 < n) {
+            Instr* br = instrs[i + 1];
+            ValueName other = -1;
+            if (br && br->op == IROP_BR && ne_is_compare_zero(instrs, n, ins, &other)) {
+                if (instr_uses_value(br, ins->dest) && count_value_uses(instrs, n, ins->dest) == 1) {
+                    ValueName* p = list_get(br->args, 0);
+                    if (p) *p = other;
+                    ins->op = IROP_NOP;
+                    continue;
+                }
+            }
+        }
+
+        /* lnot -> ne (imm 0) -> br (非 sbit) */
+        if (ins->op == IROP_LNOT && i + 2 < n) {
+            Instr* ne = instrs[i + 1];
+            Instr* br = instrs[i + 2];
+            ValueName other = -1;
+            if (ne && br && ne->op == IROP_NE && br->op == IROP_BR && ne_is_compare_zero(instrs, n, ne, &other)) {
+                ValueName v1 = ne->dest;
+                if (other == ins->dest && instr_uses_value(br, v1)) {
+                    if (count_value_uses(instrs, n, ins->dest) == 1 && count_value_uses(instrs, n, v1) == 1) {
+                        ValueName v0 = get_src1_value(ins);
+                        ValueName* p = list_get(br->args, 0);
+                        if (p) *p = v0;
+                        br_invert_put(isel, br, true);
+                        ins->op = IROP_NOP;
+                        ne->op = IROP_NOP;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /* 单条指令选择 */
@@ -3094,6 +3589,11 @@ void isel_block(ISelContext* isel, Block* block) {
     for (Iter it = list_iter(block->instrs); !iter_end(it);) {
         instrs[idx++] = iter_next(&it);
     }
+
+    /* 预处理：识别 sbit 条件分支模式，提前标记可省略指令 */
+    precompute_sbit_br(isel, instrs, num_instrs);
+    /* 预处理：简化 lnot/ne 与分支组合，生成 JZ/JNZ */
+    precompute_br_simplify(isel, instrs, num_instrs);
     
     // 逐条处理指令
     for (int i = 0; i < num_instrs; i++) {
@@ -3132,6 +3632,8 @@ void isel_function(C51GenContext* ctx, Func* func) {
     isel.ctx = ctx;
     isel.sec = sec;
     isel.label_counter = 0;
+    isel.br_bitinfo = make_dict(NULL);
+    isel.br_invert = make_dict(NULL);
     /* 初始化最近常量缓存为无效 */
     isel.last_const_reg = -100;
     isel.last_const_val = 0;
@@ -3225,6 +3727,15 @@ void isel_function(C51GenContext* ctx, Func* func) {
     for (Iter it = list_iter(func->blocks); !iter_end(it);) {
         Block* block = iter_next(&it);
         isel_block(&isel, block);
+    }
+
+    if (isel.br_bitinfo) {
+        dict_free(isel.br_bitinfo, free_br_bitinfo);
+        isel.br_bitinfo = NULL;
+    }
+    if (isel.br_invert) {
+        dict_free(isel.br_invert, free);
+        isel.br_invert = NULL;
     }
     
     /* 清理线性扫描分配器 */
