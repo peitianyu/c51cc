@@ -355,6 +355,8 @@ static Instr *find_def_instr(Func *f, ValueName v) {
     return NULL;
 }
 
+/* debug validators removed for clean build - leave helpers minimal */
+
 static Block *find_block_by_id(Func *f, int id) {
     if (!f || !f->blocks) return NULL;
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
@@ -803,7 +805,7 @@ static bool pass_remove_unused_consts(Func *f, Stats *s) {
         for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
             Instr *i = iter_next(&jt);
             if (!i) continue;
-            if (i->op == IROP_CONST && i->dest && !value_used(f, i->dest)) {
+            if (i->op == IROP_CONST && i->dest && count_uses(f, i->dest) == 0) {
                 ++s->rm; changed = true; continue; /* drop */
             }
             list_push(keep, i);
@@ -844,6 +846,25 @@ static bool pass_const_fold(Func *f, Stats *s) {
             bool hb = get_const_value(f, get_arg(i, 1), &b_val);
             bool u = is_unsigned_type(i->type);
             bool ok = false;
+
+            /* 如果第二个操作数是通过标签内联的立即数（例如 pass_binop_const_inline 使用的 "imm"
+             * 或者其他 pass 使用的 "imm1=<val>"），这里也把它视为常量，以便后续折叠。
+             */
+            if (!hb && i->labels && i->labels->len > 0) {
+                for (Iter lt = list_iter(i->labels); !iter_end(lt);) {
+                    char *lbl = iter_next(&lt);
+                    if (!lbl) continue;
+                    const char *key1 = "imm1=";
+                    if (strncmp(lbl, key1, strlen(key1)) == 0) {
+                        b_val = strtoll(lbl + strlen(key1), NULL, 10);
+                        hb = true; break;
+                    }
+                }
+                if (!hb) {
+                    char *tag = (char *)list_get(i->labels, 0);
+                    if (tag && strcmp(tag, "imm") == 0) { hb = true; b_val = i->imm.ival; }
+                }
+            }
 
             switch (i->op) {
             case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
@@ -2669,7 +2690,7 @@ void ssa_optimize_func(Func *f, int level) {
     bool changed;
     int it = 0;
     do {
-#define RUN_PASS(_p) do {  if (_p(f, &st)) { changed = true; rebuild_preds(f); } } while (0)
+#define RUN_PASS(_p) do { if (_p(f, &st)) { changed = true; rebuild_preds(f); } } while (0)
         changed = false;
         RUN_PASS(pass_const_fold);
         RUN_PASS(pass_store_load_forwarding);
@@ -2710,6 +2731,7 @@ void ssa_optimize_func(Func *f, int level) {
     ensure_block_targets_exist(f);
     rebuild_preds(f);
     pass_single_block_normalize(f);
+    /* final state: no debug dump */
 }
 
 void ssa_optimize(SSAUnit *u, int level) {
@@ -2740,8 +2762,8 @@ TEST(test, ssa_opt) {
         printf("ast: %s\n", ast_to_string(v));
         ast_to_ssa(b, v);
     }
-    // printf("\n=== SSA Before Optimization ===\n");
-    // ssa_print(stdout, b->unit);
+    printf("\n=== SSA Before Optimization ===\n");
+    ssa_print(stdout, b->unit);
     ssa_optimize(b->unit, OPT_O1);
     printf("\n=== Optimized SSA Output ===\n");
     ssa_print(stdout, b->unit);

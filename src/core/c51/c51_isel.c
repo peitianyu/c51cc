@@ -841,6 +841,61 @@ static void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     bool keep_in_acc = isel_can_keep_in_acc(isel, ins, next);
     
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+
+    /* 如果 src1 是一个地址（value_to_addr 中存在），则将加法视为地址偏移操作
+       优先处理 src2 为立即数的情况：复制基址到目标寄存器对并加上立即偏移 */
+    if (isel && isel->ctx && isel->ctx->value_to_addr) {
+        char* k = int_to_key(src1);
+        const char* addrname = (const char*)dict_get(isel->ctx->value_to_addr, k);
+        free(k);
+        if (addrname) {
+            if (src2_is_imm) {
+                /* 把基址复制到目标寄存器对（使用 2 字节地址） */
+                int addr_dst = alloc_reg_for_value(isel, ins->dest, 2);
+                if (addr_dst < 0) addr_dst = 0;
+                const char* dst_hi = isel_reg_name(addr_dst);
+                const char* dst_lo = isel_reg_name(addr_dst + 1);
+                emit_mov(isel, (char*)dst_hi, (char*)isel_get_hi_reg(isel, src1), ins);
+                emit_mov(isel, (char*)dst_lo, (char*)isel_get_lo_reg(isel, src1), NULL);
+
+                /* 低字节加立即，使用 INC/ADD 优化 */
+                char* ssa = instr_to_ssa_str(ins);
+                emit_mov(isel, "A", (char*)dst_lo, NULL);
+                int imm_low = (int)(imm_val & 0xFF);
+                if (imm_low == 1) {
+                    isel_emit(isel, "INC", "A", NULL, ssa);
+                } else if (imm_low == 2) {
+                    isel_emit(isel, "INC", "A", NULL, ssa);
+                    isel_emit(isel, "INC", "A", NULL, NULL);
+                } else {
+                    char imm_str[16]; snprintf(imm_str, sizeof(imm_str), "#%d", imm_low);
+                    isel_emit(isel, "ADD", "A", imm_str, ssa);
+                }
+                if (ssa) free(ssa);
+                emit_mov(isel, (char*)dst_lo, "A", NULL);
+
+                /* 高字节加进位 */
+                emit_mov(isel, "A", (char*)dst_hi, NULL);
+                int imm_high = (int)((imm_val >> 8) & 0xFF);
+                if (imm_high == 0) {
+                    isel_emit(isel, "ADDC", "A", "#0", NULL);
+                } else {
+                    char imm_hs[16]; snprintf(imm_hs, sizeof(imm_hs), "#%d", imm_high);
+                    isel_emit(isel, "ADDC", "A", imm_hs, NULL);
+                }
+                emit_mov(isel, (char*)dst_hi, "A", NULL);
+
+                /* 将地址结果记录到全局映射，避免后续重复分配 */
+                if (isel->ctx && isel->ctx->value_to_reg) {
+                    int* regp = malloc(sizeof(int)); *regp = addr_dst;
+                    char* key = int_to_key(ins->dest);
+                    dict_put(isel->ctx->value_to_reg, key, regp);
+                }
+                return;
+            }
+            /* 若 idx 不是立即数，继续走普通加法路径（后续可加入对寄存器索引的处理） */
+        }
+    }
     if (dst_reg < 0) dst_reg = 0;  /* 分配失败，使用R0 */
     /* 优化：如果下一条是跳回到某个块（通常是 loop backedge），并且该目标块的 PHI
        使用本条指令的结果作为输入且 PHI 的目标已有固定寄存器，直接把结果写入

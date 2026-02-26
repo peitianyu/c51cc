@@ -131,7 +131,12 @@ static ObjFile *compile_one(const char *path) {
         ast_to_ssa(b, t);
     }
         
+    // /* print SSA before optimization for debugging array handling */
+    // fprintf(stdout, "=== SSA BEFORE OPT ===\n");
+    // ssa_print(stdout, b->unit);
+
     ssa_optimize(b->unit, OPT_O1);
+    fprintf(stdout, "=== SSA AFTER OPT ===\n");
     ssa_print(stdout, b->unit);
     ObjFile *o = c51_gen(b->unit);
     ssa_build_destroy(b);

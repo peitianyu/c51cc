@@ -27,26 +27,30 @@ void start_up()
 //     return 0;
 // }
 
-register char  SCON  = 0x98;
-register bool  TI    = SCON^1; 
-register char  SBUF  = 0x99;
-// register char  TMOD  = 0x89;
-// register char  TH1   = 0x8D;
-// register char  TL1   = 0x8B;
-// register char  TR1   = 0x8E;
+// register char  SCON  = 0x98;
+// register bool  TI    = SCON^1; 
+// register char  SBUF  = 0x99;
+// // register char  TMOD  = 0x89;
+// // register char  TH1   = 0x8D;
+// // register char  TL1   = 0x8B;
+// // register char  TR1   = 0x8E;
 
 
-void putc(char c)
-{
-    SBUF = c;
-    while (!TI);     
-    TI = 0;
-}
-
-// void puts(char *s)
+// void putc(char c)
 // {
-//     while (*s) putc(*s++);
+//     SBUF = c;
+//     while (!TI);     
+//     TI = 0;
 // }
+
+void puts(char *s)
+{
+    char c;
+    while ((c = *s) != 0) {
+        // putc(c);
+        s++;
+    }
+}
 
 // void uart_init(void)
 // {

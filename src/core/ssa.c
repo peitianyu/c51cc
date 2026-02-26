@@ -2016,7 +2016,13 @@ static bool suppress_const_print(Func *f, ValueName v) {
                 if (i->op == IROP_RET) continue;
                 if (i->labels && i->labels->len > 0) {
                     char *tag = (char *)list_get(i->labels, 0);
-                    if (tag && strcmp(tag, "imm") == 0) continue;
+                    /* if this instruction encodes an immediate operand (tag "imm"),
+                       that immediate corresponds to the second operand for binops.
+                       Only skip counting the use when we're inspecting that operand (k==1).
+                    */
+                    if (tag && strcmp(tag, "imm") == 0) {
+                        if (k == 1) continue;
+                    }
                 }
                 return false; /* 还有其他用途，不能隐藏 */
             }
@@ -2029,7 +2035,7 @@ static bool suppress_const_print(Func *f, ValueName v) {
             }
         }
     }
-    return used || true;
+    return true;
 }
 
 typedef struct {
