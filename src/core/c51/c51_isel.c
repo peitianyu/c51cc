@@ -2367,7 +2367,7 @@ static void emit_load(ISelContext* isel, Instr* ins) {
             isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
         } else {
             char source_hi[256];
-            snprintf(source_hi, sizeof(source_hi), "(_%s + 1)", var_name);
+            snprintf(source_hi, sizeof(source_hi), "(%s + 1)", var_name);
             isel_emit(isel, "MOV", "A", source_hi, NULL);
         }
         const char* dst_reg_hi = isel_reg_name(reg);

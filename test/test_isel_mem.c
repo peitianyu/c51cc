@@ -18,10 +18,10 @@ register bool  P1_7    = 0x97;  // P1.7
 // register bool  TI      = 0x99;  // SCON.1
 
 // // // ----- 3. 各存储区变量 -----
-// unsigned char data   g_data   = 0x01;
-// unsigned char idata  g_idata  = 0x02;
-// unsigned char xdata  g_xdata  = 0x03;
-// unsigned char code   g_code   = 0x04;
+unsigned char data   g_data   = 0x01;
+unsigned char idata  g_idata  = 0x02;
+unsigned char xdata  g_xdata  = 0x03;
+unsigned char code   g_code   = 0x04;
 
 // ----- 4. 位寻址区变量 -----
 unsigned char  g_bdata  = 0x00;
@@ -29,10 +29,10 @@ register bool  g_bit0 = 0x00;
 register bool  g_bit7 = 0x07;
 
 // // ----- 5. 指针测试 -----
-// unsigned data  char * ptr_data;
-// unsigned idata char * ptr_idata;
-// unsigned xdata char * ptr_xdata;
-// unsigned code  char * ptr_code;
+unsigned data  char * ptr_data;
+unsigned idata char * ptr_idata;
+unsigned xdata char * ptr_xdata;
+unsigned code  char * ptr_code;
 // unsigned char *cod = "Hello, Code Space!";
 
 // // ----- 6. 基础存储区访问测试 -----
@@ -90,19 +90,19 @@ register bool  g_bit7 = 0x07;
 //     return result;
 // }
 
-// ----- 8. SFR 复杂操作测试 -----
-int test_sfr_complex(int v) {
-    int result = 0;
+// // ----- 8. SFR 复杂操作测试 -----
+// int test_sfr_complex(int v) {
+//     int result = 0;
     
-    P1 = (char)v;
-    P1 = P1 & 0x0F;
-    P1 = P1 | 0x30;
-    P1 = P1 ^ 0x01;
-    P1 = ~P1;
-    result = P1;
+//     P1 = (char)v;
+//     P1 = P1 & 0x0F;
+//     P1 = P1 | 0x30;
+//     P1 = P1 ^ 0x01;
+//     P1 = ~P1;
+//     result = P1;
     
-    return result;
-}
+//     return result;
+// }
 
 // // ----- 9. 中断控制测试 -----
 // int test_interrupt_control(int enable) {
@@ -120,27 +120,27 @@ int test_sfr_complex(int v) {
 //     return old_state;
 // }
 
-// // ----- 10. 指针操作测试 -----
-// int test_pointers(void) {
-//     int result = 0;
+// ----- 10. 指针操作测试 -----
+int test_pointers(void) {
+    int result = 0;
     
-//     ptr_data = &g_data;
-//     *ptr_data = 0x55;
-//     result += *ptr_data;
+    ptr_data = &g_data;
+    *ptr_data = 0x55;
+    result += *ptr_data;
     
-//     ptr_idata = &g_idata;
-//     *ptr_idata = 0xAA;
-//     result += *ptr_idata;
+    ptr_idata = &g_idata;
+    *ptr_idata = 0xAA;
+    result += *ptr_idata;
     
-//     ptr_xdata = &g_xdata;
-//     *ptr_xdata = 0x12;
-//     result += *ptr_xdata;
+    ptr_xdata = &g_xdata;
+    *ptr_xdata = 0x12;
+    result += *ptr_xdata;
     
-//     ptr_code = &g_code;
-//     result += *ptr_code;
+    ptr_code = &g_code;
+    result += *ptr_code;
     
-//     return result;
-// }
+    return result;
+}
 
 // // ----- 11. 条件表达式与存储区 -----
 // int test_conditional_ops(int flag) {
