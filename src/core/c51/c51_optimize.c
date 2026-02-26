@@ -58,6 +58,8 @@ static void remove_instr(List* instrs, int index) {
         } else {
             instrs->head = node->next;
         }
+        if (node->next) node->next->prev = prev;
+        else instrs->tail = prev;
         instrs->len--;
         free(node);
     }
@@ -157,6 +159,7 @@ static int peephole_redundant_swap(List* instrs, int start) {
 
 /* 前向声明 */
 static bool reg_read_before_write_or_end(List* instrs, int start, const char* reg);
+static int peephole_sbuf_wait(List* instrs, int start);
 
 /* 检查指令是否不修改指定寄存器 */
 static bool instr_does_not_modify_reg(AsmInstr* ins, const char* reg) {
@@ -373,7 +376,6 @@ static void optimize_section(Section* sec) {
         for (int i = 0; i < sec->asminstrs->len; i++) {
             int removed = 0;
             
-            // 尝试各种优化模式
             removed = peephole_redundant_swap(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
             
@@ -407,16 +409,16 @@ void c51_optimize(C51GenContext* ctx, ObjFile* obj)
 {
     (void)ctx;
     (void)obj;
+    if (!obj || !obj->sections) return;
 
-    /*
-     * 临时禁用 C51 窥孔优化。
-     *
-     * 当前优化规则（尤其是基于 MOV 的传播/删除）在寄存器重用、
-     * 返回值约定与跨指令数据流上仍不够保守，可能删除语义必需的
-     * 赋值，导致生成汇编出现“使用未更新寄存器值”的错误。
-     *
-     * 在补齐完整的数据流/活性分析前，优先保证代码正确性。
-     */
+    // 对每个节执行窥孔优化（仅对含有 asminstrs 的节）
+    for (int i = 0; i < obj->sections->len; i++) {
+        Section *sec = (Section*)list_get(obj->sections, i);
+        if (!sec) continue;
+        if (sec->asminstrs && sec->asminstrs->len > 0) {
+            optimize_section(sec);
+        }
+    }
 }
 
 /* 判断操作数是否是寄存器（R0-R7 或 A） */
@@ -438,3 +440,27 @@ static bool is_memory_operand(const char* op) {
     if (!op) return false;
     return !is_register_operand(op) && !is_immediate_operand(op);
 }
+
+/* 在列表任意位置插入指令 */
+static void insert_instr(List* instrs, int index, AsmInstr* ins) {
+    if (!instrs || !ins) return;
+    if (index <= 0) {
+        list_unshift(instrs, ins);
+        return;
+    }
+    if (index >= instrs->len) {
+        list_push(instrs, ins);
+        return;
+    }
+
+    ListNode *n = instrs->head;
+    for (int i = 0; i < index; i++) n = n->next;
+    ListNode *node = make_node(ins);
+    node->next = n;
+    node->prev = n->prev;
+    if (n->prev) n->prev->next = node;
+    else instrs->head = node;
+    n->prev = node;
+    instrs->len++;
+}
+
