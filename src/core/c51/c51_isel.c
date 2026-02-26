@@ -3,11 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-
-/* 寄存器分配相关接口在 c51_regalloc.c 中实现 */
 #include "c51_regalloc.h"
 
-/* 辅助函数：将整数键转换为字符串 */
 char* int_to_key(int n) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%02XH", n);
@@ -3502,58 +3499,6 @@ void isel_function(C51GenContext* ctx, Func* func) {
     
     // 第一步：为参数分配寄存器
     alloc_param_regs(&isel, func);
-
-    /* 优化：若检测到双层计数器嵌套循环，生成嵌套 DJNZ 序列并返回 */
-    int outer = 0, inner = 0;
-    if (detect_two_counter_loops(func, &outer, &inner)) {
-        /* 处理可能超出 8-bit 的计数（int），为大于255的值生成 16-bit 计数循环 */
-        char imm1_lo[32], imm1_hi[32], imm2_lo[32], imm2_hi[32];
-        int o_lo = outer & 0xFF, o_hi = (outer >> 8) & 0xFF;
-        int i_lo = inner & 0xFF, i_hi = (inner >> 8) & 0xFF;
-        snprintf(imm1_lo, sizeof(imm1_lo), "#%d", o_lo);
-        snprintf(imm1_hi, sizeof(imm1_hi), "#%d", o_hi);
-        snprintf(imm2_lo, sizeof(imm2_lo), "#%d", i_lo);
-        snprintf(imm2_hi, sizeof(imm2_hi), "#%d", i_hi);
-
-        /* 外层：R1 low, R0 high */
-        if (o_hi) {
-            isel_emit(&isel, "MOV", "R0", imm1_hi, NULL);
-        } else {
-            isel_emit(&isel, "MOV", "R0", "#0", NULL);
-        }
-        isel_emit(&isel, "MOV", "R1", imm1_lo, NULL);
-
-        char *lbl_outer = isel_new_label(&isel, "delay_outer");
-        char lblbuf_outer[64]; snprintf(lblbuf_outer, sizeof(lblbuf_outer), "%s:", lbl_outer);
-        isel_emit(&isel, lblbuf_outer, NULL, NULL, NULL);
-
-        /* 内层：R2 low, R3 high */
-        if (i_hi) {
-            isel_emit(&isel, "MOV", "R3", imm2_hi, NULL);
-        } else {
-            isel_emit(&isel, "MOV", "R3", "#0", NULL);
-        }
-        isel_emit(&isel, "MOV", "R2", imm2_lo, NULL);
-
-        char *lbl_inner = isel_new_label(&isel, "delay_inner");
-        char lblbuf_inner[64]; snprintf(lblbuf_inner, sizeof(lblbuf_inner), "%s:", lbl_inner);
-        isel_emit(&isel, lblbuf_inner, NULL, NULL, NULL);
-
-        /* inner loop: DJNZ R2, inner; when R2 wraps to 0 and DJNZ falls through, DEC R3; JNZ inner */
-        isel_emit(&isel, "DJNZ", "R2", lbl_inner, NULL);
-        isel_emit(&isel, "DEC", "R3", NULL, NULL);
-        isel_emit(&isel, "JNZ", lbl_inner, NULL, NULL);
-
-        /* outer loop: DJNZ R1, outer; when R1 wraps, DEC R0; JNZ outer */
-        isel_emit(&isel, "DJNZ", "R1", lbl_outer, NULL);
-        isel_emit(&isel, "DEC", "R0", NULL, NULL);
-        isel_emit(&isel, "JNZ", lbl_outer, NULL, NULL);
-
-        isel_emit(&isel, "RET", NULL, NULL, NULL);
-        free(lbl_outer);
-        free(lbl_inner);
-        return;
-    }
 
     /* 第二步：线性扫描全局分配（Keil约定友好） */
     LinearScanContext* lsc = linscan_create();

@@ -411,11 +411,6 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
     }
 }
 
-/* ============================================================
- * 传统（非线性扫描）寄存器分配函数（用于回退）
- * ============================================================ */
-
-/* 为值分配寄存器（返回分配的基寄存器号） */
 /* 注意：这个函数现在只查询线性扫描已经分配的结果，不再做动态分配 */
 int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
     if (!isel || !isel->ctx) return -1;
