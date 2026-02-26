@@ -269,6 +269,10 @@ static void ast_to_string_int(String *buf, Ast *ast)
         string_appendf(buf, ".");
         string_appendf(buf, ast->field);
         break;
+    case AST_BIT_REF:
+        ast_to_string_int(buf, ast->struc);
+        string_appendf(buf, ".%d", ast->bit_index);
+        break;
     case AST_STRUCT_DEF:
         string_appendf(buf, "(def %s)", ctype_to_string(ast->ctype));
         break;

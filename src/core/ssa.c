@@ -731,6 +731,7 @@ static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
 static Ctype *ctype_ptr = &(Ctype){0, CTYPE_PTR, 2, NULL};
 static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
 static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
+static Ctype *ctype_bool = &(Ctype){0, CTYPE_BOOL, 1, NULL};
 static ValueName ssa_build_addr(SSABuild *b, const char *var, Ctype *mem_type) {
     Instr *i = ssa_make_instr(b, IROP_ADDR);
     i->dest = ssa_new_value(b);
@@ -1324,6 +1325,19 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             ssa_build_const(b, field->offset), 1);
         return ssa_build_load(b, field_addr, field, field);
     }
+    case AST_BIT_REF: {
+        ValueName base;
+        if (ast->struc->type == AST_LVAR) {
+            base = ssa_build_addr(b, ast->struc->varname, ast->struc->ctype);
+        } else if (ast->struc->type == AST_DEREF) {
+            base = gen_expr(b, ast->struc->operand);
+        } else if (ast->struc->type == AST_GVAR) {
+            base = ssa_build_addr(b, ast->struc->varname, ast->struc->ctype);
+        } else {
+            base = gen_expr(b, ast->struc);
+        }
+        return gen_bitfield_read(b, base, 0, ast->bit_index, 1, true, ctype_bool);
+    }
     
     default:
         return 0;
@@ -1855,7 +1869,38 @@ void ast_to_ssa(SSABuild *b, Ast *ast) {
                         ssa_add_global(b, ast->declinit->slabel, sctype, 0, s_has_init, sinit, true, false);
                     }
                 }
-                if (ast->declinit->type == AST_LITERAL &&
+                if (ast->declinit->type == AST_BIT_REF) {
+                    Ast *bit = ast->declinit;
+                    Ast *base = bit->struc;
+                    if (base && base->type == AST_GVAR) {
+                        GlobalVar *gbase = ssa_find_global(b->unit, base->varname);
+                        if (gbase && gbase->has_init) {
+                            int base_addr = (int)gbase->init_value;
+                            int bit_idx = bit->bit_index & 0x7;
+                            init_val = (base_addr & ~0x7) | bit_idx;
+                            has_init = true;
+                        }
+                    }
+                } else if (ast->declinit->type == '^') {
+                    /* accept alternative representation: ( ^ base 1 ) */
+                    Ast *left = ast->declinit->left;
+                    Ast *right = ast->declinit->right;
+                    Ast *base = NULL;
+                    int bit_idx = -1;
+                    if (left && left->type == AST_GVAR && right && right->type == AST_LITERAL) {
+                        base = left; bit_idx = (int)right->ival;
+                    } else if (right && right->type == AST_GVAR && left && left->type == AST_LITERAL) {
+                        base = right; bit_idx = (int)left->ival;
+                    }
+                    if (base && bit_idx >= 0) {
+                        GlobalVar *gbase = ssa_find_global(b->unit, base->varname);
+                        if (gbase && gbase->has_init) {
+                            int base_addr = (int)gbase->init_value;
+                            init_val = (base_addr & ~0x7) | (bit_idx & 0x7);
+                            has_init = true;
+                        }
+                    }
+                } else if (ast->declinit->type == AST_LITERAL &&
                     is_inttype(ast->declinit->ctype)) {
                     init_val = ast->declinit->ival;
                     has_init = true;
@@ -2381,8 +2426,11 @@ void ssa_print(FILE *fp, SSAUnit *unit) {
             if (!g) continue;
             if (g->type && get_attr(g->type->attr).ctype_register  && g->has_init) {
                 int addr = (int)g->init_value;
-                if(g->type->type == CTYPE_BOOL) {
-                    fprintf(fp, "  @%s sbit = {0x%X}\n", g->name, addr); continue;
+                if (g->type->type == CTYPE_BOOL) {
+                    int base = addr & ~0x7;
+                    int bit = addr & 0x7;
+                    fprintf(fp, "  @%s sbit = {0x%X.%d}\n", g->name, base, bit);
+                    continue;
                 } else if (g->type->type == CTYPE_CHAR) {
                     fprintf(fp, "  @%s sfr = {0x%X} ; char\n", g->name, addr); continue;
                 } else if (g->type->type == CTYPE_INT) {

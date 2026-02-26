@@ -611,6 +611,35 @@ static int eval_intexpr(Ast *ast)
     case AST_LITERAL:
         if (is_inttype(ast->ctype)) return ast->ival;
         error("Integer expression expected, but got %s", ast_to_string(ast));
+    case AST_GVAR:
+        if (ast->ginit) return eval_intexpr(ast->ginit);
+        {
+            Ast *g = dict_get(globalenv, ast->varname);
+            if (g && g->ginit) return eval_intexpr(g->ginit);
+        }
+        error("Integer expression expected, but got %s", ast_to_string(ast));
+    case AST_BIT_REF:
+        {
+            int idx = ast->bit_index;
+            Ast *base = ast->struc;
+            if (base->type == AST_LITERAL) {
+                return (base->ival >> idx) & 1;
+            }
+            if (base->type == AST_GVAR) {
+                Ast *g = base->ginit;
+                if (!g) {
+                    g = dict_get(globalenv, base->varname);
+                    if (g) g = g->ginit;
+                }
+                if (g) {
+                    if (g->type == AST_LITERAL) return (g->ival >> idx) & 1;
+                    return (eval_intexpr(g) >> idx) & 1;
+                }
+                error("Integer expression expected, but got %s", ast_to_string(base));
+            }
+            int b = eval_intexpr(base);
+            return (b >> idx) & 1;
+        }
     case '+': return eval_intexpr(ast->left) + eval_intexpr(ast->right);
     case '-': return eval_intexpr(ast->left) - eval_intexpr(ast->right);
     case '*': return eval_intexpr(ast->left) * eval_intexpr(ast->right);
@@ -1114,8 +1143,23 @@ static Ast *read_expr_int(int prec)
             continue;
         }
         if (is_punct(tok, '.')) {
-            ast = read_struct_field(ast);
-            continue;
+            Token next = peek_token();
+            if (get_ttype(next) == TTYPE_NUMBER) {
+                Token numtok = read_token();
+                char *num = get_number(numtok);
+                if (!is_int_token(num)) error("Invalid bit index: %s", token_to_string(numtok));
+                int idx = atoi(num);
+                Ast *r = malloc(sizeof(Ast));
+                r->type = AST_BIT_REF;
+                r->ctype = ctype_bool;
+                r->struc = ast;
+                r->bit_index = idx;
+                ast = r;
+                continue;
+            } else {
+                ast = read_struct_field(ast);
+                continue;
+            }
         }
         if (is_punct(tok, PUNCT_ARROW)) {
             if (ast->ctype->type != CTYPE_PTR)
@@ -1627,10 +1671,12 @@ static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
                   var->ctype->len, len);
         }
         if (consume_semicolon) expect(';');
+        if (var->type == AST_GVAR) var->ginit = init;
         return ast_decl(var, init);
     } else if(var->ctype->type == CTYPE_STRUCT) {
         Ast *init = read_decl_struct_init(var->ctype);
         if (consume_semicolon) expect(';');
+        if (var->type == AST_GVAR) var->ginit = init;
         return ast_decl(var, init);
     } else if(var->ctype->type == CTYPE_PTR) {
         Ast *init = read_expr();
@@ -1652,6 +1698,7 @@ static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
 
         // FIXME: 注意这里直接填地址有危险, 不建议这么做, 程序可能会飞, 后期将这部分限制住????
         ast_inttype(ctype_int, eval_intexpr(init));
+        if (var->type == AST_GVAR) var->ginit = init;
         return ast_decl(var, init);
     }
 
@@ -1659,8 +1706,15 @@ static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
     if (consume_semicolon) expect(';');
 
     if (var->type == AST_GVAR) {
-        init = (is_inttype(var->ctype)) ? ast_inttype(ctype_int, eval_intexpr(init))
-                                        : ast_double(eval_floatexpr(init));
+        if (is_inttype(var->ctype)) {
+            CtypeAttr a = get_attr(var->ctype->attr);
+            if (!(var->ctype->type == CTYPE_BOOL && a.ctype_register)) {
+                init = ast_inttype(ctype_int, eval_intexpr(init));
+            }
+        } else {
+            init = ast_double(eval_floatexpr(init));
+        }
+        var->ginit = init;
     }
 
     if (init->type == AST_LITERAL && is_inttype(init->ctype) && is_inttype(var->ctype))

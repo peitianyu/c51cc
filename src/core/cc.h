@@ -52,6 +52,7 @@ enum {
     AST_SWITCH,
     AST_COMPOUND_STMT,
     AST_STRUCT_REF,
+    AST_BIT_REF,
     AST_STRUCT_DEF,
     AST_STRUCT_INIT,
     AST_ENUM_DEF,
@@ -160,6 +161,7 @@ typedef struct __Ast {
             struct {
                 int loff;
                 char *glabel;
+                struct __Ast *ginit; /* store global initializer AST if available */
             };
         };
 
@@ -243,10 +245,11 @@ typedef struct __Ast {
         /* Compound statement */
         List *stmts;
 
-        /* Struct reference */
+        /* Struct reference / Bit reference */
         struct {
             struct __Ast *struc;
             char *field; /* specific to ast_to_string only */
+            int bit_index; /* for AST_BIT_REF */
         };
 
         /* cast */
