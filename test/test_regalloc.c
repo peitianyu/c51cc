@@ -93,13 +93,21 @@
 // }
 
 // ----- 测试8：数组访问 -----
-char test_array_access(void) {
-    char arr[5] = {0x05, 0x04, 0x03, 0x02, 0x01};
-    char x = arr[0];
-    char y = arr[1];
-    char z = arr[2];
-    char w = arr[3];
-    return x + y + z + w;
+// char test_array_access(void) {
+//     char arr[5] = {0x05, 0x04, 0x03, 0x02, 0x01};
+//     char x = arr[0];
+//     char y = arr[1];
+//     char z = arr[2];
+//     char w = arr[3];
+//     return x + y + z + w;
+// }
+
+char* test_array_access(char *arr) {
+    // char x = arr[0];
+    // char y = arr[1];
+    // arr[2] = x + y;
+    arr[0] = 1;
+    return arr;
 }
 
 // // ----- 测试9：条件表达式 -----
