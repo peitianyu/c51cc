@@ -5,9 +5,7 @@
 // }
 
 // char add_sub(char a, char b) {
-//     char c = a + b;
-//     char d = a - b;
-//     return c ^ d;
+//     return (a + b) ^ (a - b);
 // }
 
 // char add_ptr(char *p, char x) {
@@ -15,32 +13,24 @@
 // }
 
 char mul_div_mod(char a, char b) {
-    char m = a * b;
-    char d = a / b;
-    char r = a % b;
-    return m + d + r;
+    return a * b + a / b + a % b;
 }
 
 // unsigned int shl_shr(unsigned int v, int s) {
-//     unsigned int a = v << s;
-//     unsigned int b = v >> s;
-//     return a | b;
+//     return (v << s) | (v >> s);
 // }
 
 // int logic_ops(int a, int b) {
-//     int x = (a & b) | (a ^ b);
-//     return ~x;
+//     return ~((a & b) | (a ^ b));
 // }
 
 // int cmp_ops(int a, int b) {
-//     int r = 0;
-//     if (a == b) r += 1;
-//     if (a != b) r += 2;
-//     if (a < b)  r += 4;
-//     if (a <= b) r += 8;
-//     if (a > b)  r += 16;
-//     if (a >= b) r += 32;
-//     return r;
+//     return (a == b) * 1
+//          + (a != b) * 2
+//          + (a <  b) * 4
+//          + (a <= b) * 8
+//          + (a >  b) * 16
+//          + (a >= b) * 32;
 // }
 
 // int main(void) {

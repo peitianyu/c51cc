@@ -3,6 +3,8 @@
 #include <string.h>
 #include <stdio.h>
 
+/* register allocation (no debug) */
+
 /* C51参数寄存器约定（定义在此处） */
 const int param_regs_char[] = {7, 5, 3, 2, 4, 6};
 const int param_regs_int_h[] = {6, 4, 2};
@@ -444,6 +446,19 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
     /* 首先检查是否已经被线性扫描分配过 */
     int existing = isel_get_value_reg(isel, val);
     if (existing >= 0 || existing == -2 || existing == -3) {
+        /* If linear scan already assigned a register, ensure the
+         * isel context marks those physical registers as busy so
+         * temporaries won't clobber them. This prevents reusing a
+         * dest register for a temporary immediately after it's used.
+         */
+        if (existing >= 0 && isel) {
+            for (int j = 0; j < size; j++) {
+                if (existing + j >= 0 && existing + j < 8) {
+                    isel->reg_busy[existing + j] = true;
+                    isel->reg_val[existing + j] = val;
+                }
+            }
+        }
         /* 已经在线性扫描中分配了，直接返回 */
         return existing;
     }
@@ -471,6 +486,8 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
             char* key = int_to_key(val);
             dict_put(isel->ctx->value_to_reg, key, reg_num);
 
+            /* allocation recorded */
+
             return reg;
         }
     }
@@ -486,6 +503,7 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
         *reg_num = fallback;
         char* key = int_to_key(val);
         dict_put(isel->ctx->value_to_reg, key, reg_num);
+        /* fallback allocation recorded */
         return fallback;
     }
 }

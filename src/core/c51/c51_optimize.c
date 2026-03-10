@@ -182,8 +182,8 @@ static bool instr_does_not_modify_reg(AsmInstr* ins, const char* reg) {
         const char* dst = get_operand(ins, 0);
         return !operands_equal(dst, reg);
     }
-    
-    return false;
+
+    return true;
 }
 
 /* 窥孔优化：MOV Rx, src; [CLR C]; MOV A, Rx -> [CLR C]; MOV A, src (如果 Rx 之后不再使用) */
@@ -400,21 +400,21 @@ static int peephole_sjmp_to_next_label(List* instrs, int start) {
 /* 对单个section执行窥孔优化 */
 static void optimize_section(Section* sec) {
     if (!sec || !sec->asminstrs) return;
-    
+
     int changed = 1;
     int iterations = 0;
     const int max_iterations = 10;
-    
+
     while (changed && iterations < max_iterations) {
         changed = 0;
         iterations++;
-        
+
         for (int i = 0; i < sec->asminstrs->len; i++) {
             int removed = 0;
-            
+
             removed = peephole_redundant_swap(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
-            
+
             // FIXME: 此优化会错误地删除需要的MOV A, Rx指令
             // 启用更安全的 redundant_load（仅寄存器场景）
             removed = peephole_redundant_load(sec->asminstrs, i);
@@ -423,16 +423,16 @@ static void optimize_section(Section* sec) {
             // 启用在 src 非内存时的 temp reg 消除优化
             removed = peephole_eliminate_temp_reg(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
-            
+
             removed = peephole_mem_to_reg(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
-            
+
             removed = peephole_mov_propagate(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
-            
+
             removed = peephole_mov_chain(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
-            
+
             // FIXME: 该规则在当前寄存器分配/调用约定下仍可能误删关键MOV
             // 启用死代码删除（仅寄存器目标，且未被后续读取）
             removed = peephole_dead_code(sec->asminstrs, i);

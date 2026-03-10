@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* no debug */
+
 #include "c51_isel_regalloc.h"
 
 static char* instr_ptr_key(const Instr* ins) {
@@ -76,6 +78,7 @@ int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
             isel->reg_busy[r + j] = true;
             isel->reg_val[r + j] = val;
         }
+        /* temp allocation recorded */
         return r;
     }
     return -2;
@@ -89,6 +92,7 @@ void free_temp_reg(ISelContext* isel, int reg, int size) {
             isel->reg_val[reg + j] = -1;
         }
     }
+    /* free recorded */
 }
 
 void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, bool one) {
