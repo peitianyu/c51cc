@@ -1140,22 +1140,26 @@ found_phi_target_for_add:;
     if (next && next->op == IROP_RET) {
         const char* ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
         const char* ret_hi = isel_reg_name(dst_reg);
-        
+        int ret_size = next->type ? next->type->size : 1; /* 函数声明的返回类型大小 */
+
         if (strcmp(ret_lo, "R7") != 0) {
             emit_mov(isel, "R7", (char*)ret_lo, NULL);
         }
-        if (size == 2) {
-            if (strcmp(ret_hi, "R6") != 0) {
-                emit_mov(isel, "R6", (char*)ret_hi, NULL);
+        if (ret_size == 2) {
+            if (size == 2) {
+                if (strcmp(ret_hi, "R6") != 0) {
+                    emit_mov(isel, "R6", (char*)ret_hi, NULL);
+                }
+            } else {
+                /* 值为1字节，函数返回为2字节时需零扩展高字节 */
+                emit_mov(isel, "R6", "#0", NULL);
             }
-        } else {
-            emit_mov(isel, "R6", "#0", NULL);
         }
 
         /* 同步映射，避免 emit_ret 再次重复搬运 */
         if (isel->ctx && isel->ctx->value_to_reg) {
             int* reg_num = malloc(sizeof(int));
-            *reg_num = (size == 2) ? 6 : 7; /* int高字节在R6，char在R7 */
+            *reg_num = (ret_size == 2) ? 6 : 7; /* 根据函数返回类型决定返回寄存器 */
             char* key = int_to_key(ins->dest);
             dict_put(isel->ctx->value_to_reg, key, reg_num);
         }
@@ -2232,21 +2236,24 @@ static void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             ret_lo = isel_get_lo_reg(isel, ins->dest);
             ret_hi = isel_get_hi_reg(isel, ins->dest);
         }
+        int ret_size = next->type ? next->type->size : 1;
         if (ret_lo && strcmp(ret_lo, "R7") != 0) {
             emit_mov(isel, "R7", (char*)ret_lo, ins);
         }
-        if (size == 2) {
-            if (ret_hi && strcmp(ret_hi, "R6") != 0) {
-                emit_mov(isel, "R6", (char*)ret_hi, ins);
+        if (ret_size == 2) {
+            if (size == 2) {
+                if (ret_hi && strcmp(ret_hi, "R6") != 0) {
+                    emit_mov(isel, "R6", (char*)ret_hi, ins);
+                }
+            } else {
+                emit_mov(isel, "R6", "#00H", ins);
             }
-        } else {
-            emit_mov(isel, "R6", "#00H", ins);
         }
 
         /* 同步映射，避免 emit_ret 再次重复搬运 */
         if (isel->ctx && isel->ctx->value_to_reg) {
             int* reg_num = malloc(sizeof(int));
-            *reg_num = (size == 2) ? 6 : 7;
+            *reg_num = (ret_size == 2) ? 6 : 7;
             char* key = int_to_key(ins->dest);
             dict_put(isel->ctx->value_to_reg, key, reg_num);
         }

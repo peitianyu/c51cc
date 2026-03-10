@@ -4,15 +4,15 @@
 //     return x;
 // }
 
-// char add_sub(char a, char b) {
-//     char c = a + b;
-//     char d = a - b;
-//     return c ^ d;
-// }
-
-int add_ptr(int *p, int x) {
-    return *p + x;
+char add_sub(char a, char b) {
+    char c = a + b;
+    char d = a - b;
+    return c ^ d;
 }
+
+// char add_ptr(char *p, char x) {
+//     return *p + x;
+// }
 
 // int mul_div_mod(int a, int b) {
 //     int m = a * b;
