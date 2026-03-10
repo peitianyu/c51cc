@@ -47,6 +47,7 @@ static int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* n
 static ValueName get_src1_value(Instr* ins);
 static ValueName get_src2_value(Instr* ins);
 static bool is_imm_operand(Instr* ins, int64_t* out_val);
+static int safe_alloc_reg_for_value(ISelContext* isel, ValueName val, int size);
 static void isel_record_dest_type(ISelContext* isel, Instr* ins);
 static void emit_inline_asm_instr(ISelContext* isel, Instr* ins);
 static void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next);
@@ -412,6 +413,14 @@ static int get_value_size(ISelContext* isel, ValueName val) {
     return 1;  // 默认为单字节
 }
 
+static Ctype* get_value_type(ISelContext* isel, ValueName val) {
+    if (!isel || !isel->ctx || !isel->ctx->value_type) return NULL;
+    char* key = int_to_key(val);
+    Ctype* type = (Ctype*)dict_get(isel->ctx->value_type, key);
+    free(key);
+    return type;
+}
+
 static int get_mem_space(Ctype* mem_type) {
     if (!mem_type) return 0;
     return (mem_type->attr >> 7) & 0x7; // ctype_data
@@ -444,6 +453,211 @@ static const char* get_sbit_var_name(ISelContext* isel, Instr* ins) {
     }
 
     return var_name;
+}
+
+static void emit_load_save_byte(ISelContext* isel, int dst_reg, int size, bool high_byte, const char* ssa) {
+    if (!isel || dst_reg < 0) return;
+    const char* dst = NULL;
+    if (size == 2) {
+        dst = high_byte ? isel_reg_name(dst_reg) : isel_reg_name(dst_reg + 1);
+    } else {
+        dst = isel_reg_name(dst_reg);
+    }
+    if (dst && strcmp(dst, "A") != 0) {
+        isel_emit(isel, "MOV", dst, "A", ssa);
+    }
+}
+
+static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueName ptr) {
+    Ctype* ptr_type = get_value_type(isel, ptr);
+    if (!ptr_type || ptr_type->type != CTYPE_PTR) return false;
+
+    int ptr_abi_size = c51_abi_type_size(ptr_type);
+    int load_size = ins->type ? ins->type->size : 1;
+    int ptr_reg = isel_get_value_reg(isel, ptr);
+    if (ptr_reg < 0 || load_size < 1 || load_size > 2) return false;
+
+    int ptr_space = get_mem_space(ptr_type);
+    int dst_reg = safe_alloc_reg_for_value(isel, ins->dest, load_size);
+    char* ssa = instr_to_ssa_str(ins);
+
+    if (ptr_abi_size == 1) {
+        const char* ptr_lo = isel_reg_name(ptr_reg);
+        isel_emit(isel, "MOV", "R0", ptr_lo, NULL);
+        if (ptr_space == 3) {
+            isel_emit(isel, "MOVX", "A", "@R0", ssa);
+        } else {
+            isel_emit(isel, "MOV", "A", "@R0", ssa);
+        }
+        emit_load_save_byte(isel, dst_reg, load_size, false, NULL);
+        if (load_size == 2) {
+            isel_emit(isel, "INC", "R0", NULL, NULL);
+            if (ptr_space == 3) {
+                isel_emit(isel, "MOVX", "A", "@R0", NULL);
+            } else {
+                isel_emit(isel, "MOV", "A", "@R0", NULL);
+            }
+            emit_load_save_byte(isel, dst_reg, load_size, true, NULL);
+        }
+        free(ssa);
+        return true;
+    }
+
+    if (ptr_abi_size == 2) {
+        const char* ptr_lo = isel_get_lo_reg(isel, ptr);
+        const char* ptr_hi = isel_get_hi_reg(isel, ptr);
+        isel_emit(isel, "MOV", "DPL", ptr_lo, NULL);
+        isel_emit(isel, "MOV", "DPH", ptr_hi, NULL);
+        if (ptr_space == 6) {
+            isel_emit(isel, "CLR", "A", NULL, NULL);
+            isel_emit(isel, "MOVC", "A", "@A+DPTR", ssa);
+        } else {
+            isel_emit(isel, "MOVX", "A", "@DPTR", ssa);
+        }
+        emit_load_save_byte(isel, dst_reg, load_size, false, NULL);
+        if (load_size == 2) {
+            isel_emit(isel, "INC", "DPTR", NULL, NULL);
+            if (ptr_space == 6) {
+                isel_emit(isel, "CLR", "A", NULL, NULL);
+                isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
+            } else {
+                isel_emit(isel, "MOVX", "A", "@DPTR", NULL);
+            }
+            emit_load_save_byte(isel, dst_reg, load_size, true, NULL);
+        }
+        free(ssa);
+        return true;
+    }
+
+    if (ptr_abi_size == 3 && ptr_reg + 2 < 8) {
+        const char* ptr_lo = isel_reg_name(ptr_reg);
+        const char* ptr_hi = isel_reg_name(ptr_reg + 1);
+        const char* ptr_tag = isel_reg_name(ptr_reg + 2);
+        char *l_data = isel_new_label(isel, "Lgptr_data");
+        char *l_xdata = isel_new_label(isel, "Lgptr_xdata");
+        char *l_pdata = isel_new_label(isel, "Lgptr_pdata");
+        char *l_code = isel_new_label(isel, "Lgptr_code");
+        char *l_done = isel_new_label(isel, "Lgptr_done");
+        char lb_data[64], lb_xdata[64], lb_pdata[64], lb_code[64], lb_done[64];
+
+        snprintf(lb_data, sizeof(lb_data), "%s:", l_data);
+        snprintf(lb_xdata, sizeof(lb_xdata), "%s:", l_xdata);
+        snprintf(lb_pdata, sizeof(lb_pdata), "%s:", l_pdata);
+        snprintf(lb_code, sizeof(lb_code), "%s:", l_code);
+        snprintf(lb_done, sizeof(lb_done), "%s:", l_done);
+
+        isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+        isel_emit(isel, "JZ", l_data, NULL, NULL);
+        isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+        isel_emit(isel, "XRL", "A", "#1", NULL);
+        isel_emit(isel, "JZ", l_xdata, NULL, NULL);
+        isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+        isel_emit(isel, "XRL", "A", "#254", NULL);
+        isel_emit(isel, "JZ", l_pdata, NULL, NULL);
+        isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+        isel_emit(isel, "XRL", "A", "#255", NULL);
+        isel_emit(isel, "JZ", l_code, NULL, NULL);
+        isel_emit(isel, "SJMP", l_data, NULL, NULL);
+
+        isel_emit(isel, lb_data, NULL, NULL, NULL);
+        isel_emit(isel, "MOV", "R0", ptr_lo, NULL);
+        isel_emit(isel, "MOV", "A", "@R0", ssa);
+        isel_emit(isel, "SJMP", l_done, NULL, NULL);
+
+        isel_emit(isel, lb_xdata, NULL, NULL, NULL);
+        isel_emit(isel, "MOV", "DPL", ptr_lo, NULL);
+        isel_emit(isel, "MOV", "DPH", ptr_hi, NULL);
+        isel_emit(isel, "MOVX", "A", "@DPTR", ssa);
+        isel_emit(isel, "SJMP", l_done, NULL, NULL);
+
+        isel_emit(isel, lb_pdata, NULL, NULL, NULL);
+        isel_emit(isel, "MOV", "R0", ptr_lo, NULL);
+        isel_emit(isel, "MOVX", "A", "@R0", ssa);
+        isel_emit(isel, "SJMP", l_done, NULL, NULL);
+
+        isel_emit(isel, lb_code, NULL, NULL, NULL);
+        isel_emit(isel, "MOV", "DPL", ptr_lo, NULL);
+        isel_emit(isel, "MOV", "DPH", ptr_hi, NULL);
+        isel_emit(isel, "CLR", "A", NULL, NULL);
+        isel_emit(isel, "MOVC", "A", "@A+DPTR", ssa);
+
+        isel_emit(isel, lb_done, NULL, NULL, NULL);
+        emit_load_save_byte(isel, dst_reg, load_size, false, NULL);
+
+        if (load_size == 2) {
+            char *l_data_hi = isel_new_label(isel, "Lgptr_data_hi");
+            char *l_xdata_hi = isel_new_label(isel, "Lgptr_xdata_hi");
+            char *l_pdata_hi = isel_new_label(isel, "Lgptr_pdata_hi");
+            char *l_code_hi = isel_new_label(isel, "Lgptr_code_hi");
+            char *l_done_hi = isel_new_label(isel, "Lgptr_done_hi");
+            char lb_data_hi[64], lb_xdata_hi[64], lb_pdata_hi[64], lb_code_hi[64], lb_done_hi[64];
+
+            snprintf(lb_data_hi, sizeof(lb_data_hi), "%s:", l_data_hi);
+            snprintf(lb_xdata_hi, sizeof(lb_xdata_hi), "%s:", l_xdata_hi);
+            snprintf(lb_pdata_hi, sizeof(lb_pdata_hi), "%s:", l_pdata_hi);
+            snprintf(lb_code_hi, sizeof(lb_code_hi), "%s:", l_code_hi);
+            snprintf(lb_done_hi, sizeof(lb_done_hi), "%s:", l_done_hi);
+
+            isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+            isel_emit(isel, "JZ", l_data_hi, NULL, NULL);
+            isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+            isel_emit(isel, "XRL", "A", "#1", NULL);
+            isel_emit(isel, "JZ", l_xdata_hi, NULL, NULL);
+            isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+            isel_emit(isel, "XRL", "A", "#254", NULL);
+            isel_emit(isel, "JZ", l_pdata_hi, NULL, NULL);
+            isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+            isel_emit(isel, "XRL", "A", "#255", NULL);
+            isel_emit(isel, "JZ", l_code_hi, NULL, NULL);
+            isel_emit(isel, "SJMP", l_data_hi, NULL, NULL);
+
+            isel_emit(isel, lb_data_hi, NULL, NULL, NULL);
+            isel_emit(isel, "MOV", "R0", ptr_lo, NULL);
+            isel_emit(isel, "INC", "R0", NULL, NULL);
+            isel_emit(isel, "MOV", "A", "@R0", NULL);
+            isel_emit(isel, "SJMP", l_done_hi, NULL, NULL);
+
+            isel_emit(isel, lb_xdata_hi, NULL, NULL, NULL);
+            isel_emit(isel, "MOV", "DPL", ptr_lo, NULL);
+            isel_emit(isel, "MOV", "DPH", ptr_hi, NULL);
+            isel_emit(isel, "INC", "DPTR", NULL, NULL);
+            isel_emit(isel, "MOVX", "A", "@DPTR", NULL);
+            isel_emit(isel, "SJMP", l_done_hi, NULL, NULL);
+
+            isel_emit(isel, lb_pdata_hi, NULL, NULL, NULL);
+            isel_emit(isel, "MOV", "R0", ptr_lo, NULL);
+            isel_emit(isel, "INC", "R0", NULL, NULL);
+            isel_emit(isel, "MOVX", "A", "@R0", NULL);
+            isel_emit(isel, "SJMP", l_done_hi, NULL, NULL);
+
+            isel_emit(isel, lb_code_hi, NULL, NULL, NULL);
+            isel_emit(isel, "MOV", "DPL", ptr_lo, NULL);
+            isel_emit(isel, "MOV", "DPH", ptr_hi, NULL);
+            isel_emit(isel, "INC", "DPTR", NULL, NULL);
+            isel_emit(isel, "CLR", "A", NULL, NULL);
+            isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
+
+            isel_emit(isel, lb_done_hi, NULL, NULL, NULL);
+            emit_load_save_byte(isel, dst_reg, load_size, true, NULL);
+
+            free(l_data_hi);
+            free(l_xdata_hi);
+            free(l_pdata_hi);
+            free(l_code_hi);
+            free(l_done_hi);
+        }
+
+        free(l_data);
+        free(l_xdata);
+        free(l_pdata);
+        free(l_code);
+        free(l_done);
+        free(ssa);
+        return true;
+    }
+
+    free(ssa);
+    return false;
 }
 
 static const char* resolve_addr_symbol_in_block(Instr** instrs, int n, ValueName ptr) {
@@ -2302,7 +2516,10 @@ static void emit_load(ISelContext* isel, Instr* ins) {
         }
     }
     
-    if (!var_name) return;
+    if (!var_name) {
+        if (emit_load_from_pointer_value(isel, ins, ptr)) return;
+        return;
+    }
     
     // 获取内存空间类型 (ctype_data 在 bit 7-9)
     int space = get_mem_space(ins->mem_type);
@@ -3215,6 +3432,26 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, int arg_index, V
     }
 }
 
+static void setup_call_param_u24(ISelContext* isel, Instr* ins, int arg_index, ValueName v, RegMove* moves, int* move_count) {
+    if (arg_index != 0) return;
+
+    int base = isel_get_value_reg(isel, v);
+    if (base >= 0 && base + 2 < 8) {
+        if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 1, .src = base};
+        if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 2, .src = base + 1};
+        if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 3, .src = base + 2};
+        return;
+    }
+
+    if (base == -3) {
+        int r = isel_reload_spill(isel, v, 2, ins);
+        if (r >= 0 && r + 1 < 8) {
+            if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 1, .src = r};
+            if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 2, .src = r + 1};
+        }
+    }
+}
+
 static void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins || !ins->labels || ins->labels->len < 1) return;
     const char* fname = list_get(ins->labels, 0);
@@ -3232,11 +3469,13 @@ static void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         free(key);
 
-        int size = t ? t->size : 1;
+        int size = t ? c51_abi_type_size(t) : 1;
         if (size == 1) {
             setup_call_param_u8(isel, ins, k, v, moves, &move_count);
-        } else {
+        } else if (size == 2) {
             setup_call_param_u16(isel, ins, k, v, moves, &move_count);
+        } else if (size == 3) {
+            setup_call_param_u24(isel, ins, k, v, moves, &move_count);
         }
     }
 

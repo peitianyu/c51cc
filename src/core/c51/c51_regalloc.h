@@ -55,6 +55,9 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx);
 /* 为值分配寄存器（返回分配的基寄存器号） */
 int alloc_reg_for_value(ISelContext* isel, ValueName val, int size);
 
+/* 计算类型在 C51 ABI 下参与寄存器传参/返回时的字节数 */
+int c51_abi_type_size(const Ctype* type);
+
 /* 为函数参数分配寄存器 */
 void alloc_param_regs(ISelContext* isel, Func* f);
 

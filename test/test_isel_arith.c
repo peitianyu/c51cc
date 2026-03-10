@@ -4,9 +4,9 @@
 //     return x;
 // }
 
-// int add_sub(int a, int b) {
-//     int c = a + b;
-//     int d = a - b;
+// char add_sub(char a, char b) {
+//     char c = a + b;
+//     char d = a - b;
 //     return c ^ d;
 // }
 

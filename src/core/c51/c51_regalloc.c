@@ -8,6 +8,27 @@ const int param_regs_char[] = {7, 5, 3, 2, 4, 6};
 const int param_regs_int_h[] = {6, 4, 2};
 const int param_regs_int_l[] = {7, 5, 3};
 
+int c51_abi_type_size(const Ctype* type) {
+    if (!type) return 1;
+    if (type->type != CTYPE_PTR) {
+        return (type->size > 0) ? type->size : 1;
+    }
+
+    CtypeAttr attr = get_attr(type->attr);
+    switch (attr.ctype_data) {
+        case 1: /* data */
+        case 2: /* idata */
+        case 3: /* pdata */
+            return 1;
+        case 4: /* xdata */
+        case 5: /* edata */
+        case 6: /* code */
+            return 2;
+        default:
+            return 3; /* generic ptr */
+    }
+}
+
 /* ============================================================
  * 线性扫描寄存器分配实现
  * ============================================================ */
@@ -265,13 +286,18 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
             int* param_reg_ptr = (int*)dict_get(genctx->value_to_reg, key);
             free(key);
             if (param_reg_ptr) {
+                int abi_size = interval->size;
+                if (genctx && genctx->value_type) {
+                    char* type_key = int_to_key(interval->val);
+                    Ctype* type = (Ctype*)dict_get(genctx->value_type, type_key);
+                    free(type_key);
+                    abi_size = c51_abi_type_size(type);
+                }
                 interval->reg = *param_reg_ptr;
                 if (interval->reg >= 0 && interval->reg < 8) {
-                    lsc->active_regs[interval->reg] = interval->val;
-                    lsc->active_reg_end[interval->reg] = interval->end;
-                    if (interval->size == 2 && interval->reg + 1 < 8) {
-                        lsc->active_regs[interval->reg + 1] = interval->val;
-                        lsc->active_reg_end[interval->reg + 1] = interval->end;
+                    for (int j = 0; j < abi_size && interval->reg + j < 8; j++) {
+                        lsc->active_regs[interval->reg + j] = interval->val;
+                        lsc->active_reg_end[interval->reg + j] = interval->end;
                     }
                 }
             }
@@ -519,24 +545,39 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
     if (n == 0) return;
 
     bool used_regs[8] = {false};          // 跟踪已分配的寄存器
-    int param_idx = 0;                     // 参数索引
+    /* 为避免不同大小的参数互相“挤占”导致语义上首个 int 未落在 R6:R7，
+     * 我们按参数大小类别维护独立的索引：
+     *  - size1_idx: 第几个 1 字节参数
+     *  - size2_idx: 第几个 2 字节参数
+     *  - size3_idx: 第几个 3 字节参数
+     *  - size4_idx: 第几个 4 字节参数
+     * 这样分配时会保证 "第一个 2 字节参数" 始终使用 R6:R7（若可用）。
+     */
+    int size1_idx = 0, size2_idx = 0, size3_idx = 0, size4_idx = 0;
     Iter pit = list_iter(f->params);
     Iter tit = list_iter(f->param_types);
 
-    // 遍历所有参数
+    // 遍历所有参数（按声明顺序），但为每个大小类别计算位置索引
     while (!iter_end(pit) && !iter_end(tit)) {
         char* param_name = iter_next(&pit);
         Ctype* param_type = iter_next(&tit);
         if (!param_name || !param_type) continue;
 
-        int size = param_type->size;        // 字节数（1/2/3/4）
+        int size = c51_abi_type_size(param_type);  // ABI 视角下的参数字节数
         int expected_regs[4];
         int reg_count;
 
-        // 获取期望的寄存器组
-        bool has_regs = get_param_register_set(param_idx, size, expected_regs, &reg_count);
+        int class_idx = 0;
+        if (size == 1) { class_idx = size1_idx; }
+        else if (size == 2) { class_idx = size2_idx; }
+        else if (size == 3) { class_idx = size3_idx; }
+        else if (size == 4) { class_idx = size4_idx; }
+
+        // 获取期望的寄存器组（按该大小类别的序号）
+        bool has_regs = get_param_register_set(class_idx, size, expected_regs, &reg_count);
         if (!has_regs) {
-            // 该参数位置没有可用的寄存器组（例如第4个参数），停止后续分配
+            /* 该大小类别的此序号没有可用寄存器组（例如第2个3字节或第4个2字节），
+             * 按之前实现的保守策略停止后续寄存器分配。 */
             break;
         }
 
@@ -550,7 +591,7 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
         }
 
         if (!all_free) {
-            // 寄存器冲突，该参数及后续参数均不使用寄存器
+            /* 冲突：停止后续寄存器分配（保持行为一致） */
             break;
         }
 
@@ -586,6 +627,10 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
             dict_put(isel->ctx->value_to_reg, key, reg_num);
         }
 
-        param_idx++;
+        // 增加对应大小类别的索引
+        if (size == 1) size1_idx++;
+        else if (size == 2) size2_idx++;
+        else if (size == 3) size3_idx++;
+        else if (size == 4) size4_idx++;
     }
 }

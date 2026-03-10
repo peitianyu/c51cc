@@ -11,6 +11,9 @@ extern const int param_regs_char[];
 extern const int param_regs_int_h[];
 extern const int param_regs_int_l[];
 
+/* 计算类型在 C51 ABI 下参与寄存器传参/返回时的字节数 */
+int c51_abi_type_size(const Ctype* type);
+
 /* 辅助函数：将整数键转换为字符串 */
 char* int_to_key(int n);
 

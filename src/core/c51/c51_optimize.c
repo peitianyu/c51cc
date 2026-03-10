@@ -37,6 +37,13 @@ static bool reg_used_in_instr(AsmInstr* ins, const char* reg) {
     return false;
 }
 
+static bool operand_reads_reg(const char* arg, const char* reg) {
+    if (!arg || !reg) return false;
+    if (operands_equal(arg, reg)) return true;
+    if (arg[0] == '@' && operands_equal(arg + 1, reg)) return true;
+    return false;
+}
+
 /* 删除指令 */
 static void remove_instr(List* instrs, int index) {
     if (!instrs || index < 0 || index >= instrs->len) return;
@@ -329,7 +336,7 @@ static bool reg_read_before_write_or_end(List* instrs, int start, const char* re
             // 第一个参数是目标，从第二个开始检查
             for (int j = (is_mov(ins) ? 1 : 0); j < ins->args->len; j++) {
                 const char* arg = (const char*)list_get(ins->args, j);
-                if (operands_equal(arg, reg)) {
+                if (operand_reads_reg(arg, reg)) {
                     return true; // 被读取了
                 }
             }
