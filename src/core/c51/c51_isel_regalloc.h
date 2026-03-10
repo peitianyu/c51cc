@@ -1,9 +1,9 @@
-#ifndef C51_REGALLOC_H
-#define C51_REGALLOC_H
+#ifndef C51_ISEL_REGALLOC_H
+#define C51_ISEL_REGALLOC_H
 
 #include "c51_isel.h"
 
-/* 寄存器约定声明（在 c51_regalloc.c 中定义） */
+/* 寄存器约定声明（在 c51_isel_regalloc.c 中定义） */
 extern const int param_regs_char[];
 extern const int param_regs_int_h[];
 extern const int param_regs_int_l[];

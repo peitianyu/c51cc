@@ -1,0 +1,583 @@
+#include "c51_isel_internal.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "c51_isel_regalloc.h"
+
+static char* instr_ptr_key(const Instr* ins) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%p", (const void*)ins);
+    return strdup(buf);
+}
+
+void free_br_bitinfo(void* p) {
+    BrBitInfo* info = (BrBitInfo*)p;
+    if (!info) return;
+    free(info->bit);
+    free(info);
+}
+
+void br_invert_put(ISelContext* isel, Instr* br, bool invert) {
+    if (!isel || !isel->br_invert || !br) return;
+    bool* v = malloc(sizeof(bool));
+    if (!v) return;
+    *v = invert;
+    char* key = instr_ptr_key(br);
+    dict_put(isel->br_invert, key, v);
+}
+
+bool br_invert_get(ISelContext* isel, Instr* br, bool* out_invert) {
+    if (!isel || !isel->br_invert || !br) return false;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%p", (const void*)br);
+    bool* v = (bool*)dict_get(isel->br_invert, buf);
+    if (!v) return false;
+    if (out_invert) *out_invert = *v;
+    return true;
+}
+
+void br_bitinfo_put(ISelContext* isel, Instr* br, const char* bit, bool invert) {
+    if (!isel || !isel->br_bitinfo || !br || !bit) return;
+    BrBitInfo* info = malloc(sizeof(BrBitInfo));
+    if (!info) return;
+    info->bit = strdup(bit);
+    info->invert = invert;
+    char* key = instr_ptr_key(br);
+    dict_put(isel->br_bitinfo, key, info);
+}
+
+BrBitInfo* br_bitinfo_get(ISelContext* isel, Instr* br) {
+    if (!isel || !isel->br_bitinfo || !br) return NULL;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%p", (const void*)br);
+    return (BrBitInfo*)dict_get(isel->br_bitinfo, buf);
+}
+
+int reg_index_from_name(const char* s) {
+    if (!s) return -1;
+    if (s[0] == 'R' && s[1] >= '0' && s[1] <= '7' && s[2] == '\0') {
+        return s[1] - '0';
+    }
+    return -1;
+}
+
+int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
+    if (!isel) return -2;
+    for (int r = 0; r < 8; r++) {
+        if (r + size - 1 > 7) continue;
+        bool ok = true;
+        for (int j = 0; j < size; j++) {
+            if (isel->reg_busy[r + j]) { ok = false; break; }
+        }
+        if (!ok) continue;
+        for (int j = 0; j < size; j++) {
+            isel->reg_busy[r + j] = true;
+            isel->reg_val[r + j] = val;
+        }
+        return r;
+    }
+    return -2;
+}
+
+void free_temp_reg(ISelContext* isel, int reg, int size) {
+    if (!isel || reg < 0) return;
+    for (int j = 0; j < size; j++) {
+        if (reg + j >= 0 && reg + j < 8) {
+            isel->reg_busy[reg + j] = false;
+            isel->reg_val[reg + j] = -1;
+        }
+    }
+}
+
+void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, bool one) {
+    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(dst_reg);
+    isel_emit(isel, "MOV", "A", one ? "#1" : "#0", NULL);
+    emit_mov(isel, dst_lo, "A", ins);
+    if (size == 2) {
+        emit_mov(isel, dst_hi, "#0", ins);
+    }
+}
+
+void emit_copy_value(ISelContext* isel, Instr* ins, ValueName src, int dst_reg, int size) {
+    const char* src_lo = isel_get_lo_reg(isel, src);
+    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
+    emit_mov(isel, dst_lo, src_lo, ins);
+    if (size == 2) {
+        const char* src_hi = isel_get_hi_reg(isel, src);
+        const char* dst_hi = isel_reg_name(dst_reg);
+        emit_mov(isel, dst_hi, src_hi, ins);
+    }
+}
+
+void emit_add16_regs(ISelContext* isel,
+                     const char* dst_hi, const char* dst_lo,
+                     const char* src_hi, const char* src_lo,
+                     Instr* ins) {
+    emit_mov(isel, "A", dst_lo, ins);
+    isel_emit(isel, "ADD", "A", src_lo, NULL);
+    emit_mov(isel, dst_lo, "A", NULL);
+    emit_mov(isel, "A", dst_hi, NULL);
+    isel_emit(isel, "ADDC", "A", src_hi, NULL);
+    emit_mov(isel, dst_hi, "A", NULL);
+}
+
+void emit_sub16_regs(ISelContext* isel,
+                     const char* dst_hi, const char* dst_lo,
+                     const char* src_hi, const char* src_lo,
+                     Instr* ins) {
+    isel_emit(isel, "CLR", "C", NULL, NULL);
+    emit_mov(isel, "A", dst_lo, ins);
+    isel_emit(isel, "SUBB", "A", src_lo, NULL);
+    emit_mov(isel, dst_lo, "A", NULL);
+    emit_mov(isel, "A", dst_hi, NULL);
+    isel_emit(isel, "SUBB", "A", src_hi, NULL);
+    emit_mov(isel, dst_hi, "A", NULL);
+}
+
+bool is_memory_operand_local(const char* op) {
+    if (!op) return false;
+    if (strcmp(op, "A") == 0) return false;
+    if (op[0] == 'R' && op[1] >= '0' && op[1] <= '7' && op[2] == '\0') return false;
+    if (op[0] == '#') return false;
+    return true;
+}
+
+SectionKind get_symbol_section_kind(ISelContext* isel, const char* var_name) {
+    if (!isel || !isel->ctx || !isel->ctx->obj || !var_name) return SEC_DATA;
+    for (Iter it = list_iter(isel->ctx->obj->symbols); !iter_end(it);) {
+        Symbol *sym = iter_next(&it);
+        if (sym && sym->name && strcmp(sym->name, var_name) == 0) {
+            Section *s = obj_get_section(isel->ctx->obj, sym->section);
+            if (s) return s->kind;
+            break;
+        }
+    }
+    return SEC_DATA;
+}
+
+int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
+    if (!isel || !isel->ctx) return -2;
+    char* key = int_to_key(val);
+    char* var_name = NULL;
+    if (isel->ctx->value_to_addr) {
+        var_name = (char*)dict_get(isel->ctx->value_to_addr, key);
+    }
+    free(key);
+
+    if (!var_name) return -2;
+
+    if (isel->acc_busy && isel->acc_val == val) {
+        return -2;
+    }
+
+    if (isel->ctx && isel->ctx->value_to_reg) {
+        char* k = int_to_key(val);
+        int* existing = (int*)dict_get(isel->ctx->value_to_reg, k);
+        free(k);
+        if (existing && *existing != -3) return *existing;
+    }
+
+    int reg = alloc_temp_reg(isel, val, size);
+    const char* ssa = ins ? instr_to_ssa_str(ins) : NULL;
+
+    if (reg >= 0) {
+        if (isel->ctx && isel->ctx->value_to_reg) {
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = reg;
+            char* k = int_to_key(val);
+            dict_put(isel->ctx->value_to_reg, k, reg_num);
+        }
+        const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+        SectionKind sym_sec = get_symbol_section_kind(isel, var_name);
+
+        if (sym_sec == SEC_XDATA) {
+            char dptr_val[256];
+            snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
+            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+            isel_emit(isel, "MOVX", "A", "@DPTR", ssa);
+        } else if (sym_sec == SEC_IDATA) {
+            isel_emit(isel, "MOV", "R0", var_name, NULL);
+            isel_emit(isel, "MOV", "A", "@R0", ssa);
+        } else if (sym_sec == SEC_CODE) {
+            char dptr_val[256];
+            snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
+            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+            isel_emit(isel, "CLR", "A", NULL, NULL);
+            isel_emit(isel, "MOVC", "A", "@A+DPTR", ssa);
+        } else {
+            isel_emit(isel, "MOV", "A", var_name, ssa);
+        }
+        if (ssa) { free((void*)ssa); ssa = NULL; }
+        if (dst_lo && strcmp(dst_lo, "A") != 0) {
+            isel_emit(isel, "MOV", dst_lo, "A", NULL);
+        }
+
+        if (size == 2) {
+            SectionKind sym_sec_hi = get_symbol_section_kind(isel, var_name);
+            if (sym_sec_hi == SEC_XDATA) {
+                char dptr_val[256];
+                snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
+                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+                isel_emit(isel, "MOVX", "A", "@DPTR", NULL);
+            } else if (sym_sec_hi == SEC_CODE) {
+                char dptr_val[256];
+                snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
+                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+                isel_emit(isel, "CLR", "A", NULL, NULL);
+                isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
+            } else if (sym_sec_hi == SEC_IDATA) {
+                char off1[256];
+                snprintf(off1, sizeof(off1), "%s + 1", var_name);
+                isel_emit(isel, "MOV", "R0", off1, NULL);
+                isel_emit(isel, "MOV", "A", "@R0", NULL);
+            } else {
+                char var_hi[256];
+                snprintf(var_hi, sizeof(var_hi), "(%s + 1)", var_name);
+                isel_emit(isel, "MOV", "A", var_hi, NULL);
+            }
+            const char* dst_hi = isel_reg_name(reg);
+            if (dst_hi && strcmp(dst_hi, "A") != 0) {
+                isel_emit(isel, "MOV", dst_hi, "A", NULL);
+            }
+        }
+        return reg;
+    } else {
+        if (isel->acc_busy && isel->acc_val == val) {
+            if (ssa) free((void*)ssa);
+            return -2;
+        }
+        isel_emit(isel, "MOV", "A", var_name, ssa);
+        if (ssa) free((void*)ssa);
+
+        if (isel->ctx && isel->ctx->value_to_reg) {
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = -2;
+            char* k = int_to_key(val);
+            dict_put(isel->ctx->value_to_reg, k, reg_num);
+        }
+        isel->acc_busy = true;
+        isel->acc_val = val;
+        return -2;
+    }
+}
+
+void emit_parallel_reg_moves(ISelContext* isel, RegMove* moves, int n, Instr* ins) {
+    if (!isel || !moves || n <= 0) return;
+
+    bool done[64] = {0};
+    int remaining = n;
+
+    while (remaining > 0) {
+        bool progressed = false;
+
+        for (int i = 0; i < n; i++) {
+            if (done[i]) continue;
+
+            if (moves[i].dst == moves[i].src) {
+                done[i] = true;
+                remaining--;
+                progressed = true;
+                continue;
+            }
+
+            bool dst_used_as_src = false;
+            for (int j = 0; j < n; j++) {
+                if (j == i || done[j]) continue;
+                if (moves[j].src == moves[i].dst) {
+                    dst_used_as_src = true;
+                    break;
+                }
+            }
+
+            if (!dst_used_as_src) {
+                const char* dst = isel_reg_name(moves[i].dst);
+                const char* src = (moves[i].src == -2) ? "A" : isel_reg_name(moves[i].src);
+                emit_mov(isel, dst, src, ins);
+                done[i] = true;
+                remaining--;
+                progressed = true;
+            }
+        }
+
+        if (progressed) continue;
+
+        int cyc = -1;
+        for (int i = 0; i < n; i++) {
+            if (!done[i] && moves[i].src >= 0) {
+                cyc = i;
+                break;
+            }
+        }
+        if (cyc < 0) break;
+
+        int saved_src = moves[cyc].src;
+        emit_mov(isel, "A", isel_reg_name(saved_src), ins);
+
+        for (int j = 0; j < n; j++) {
+            if (!done[j] && moves[j].src == saved_src) {
+                moves[j].src = -2;
+            }
+        }
+    }
+}
+
+int get_value_size(ISelContext* isel, ValueName val) {
+    if (!isel || !isel->ctx || !isel->ctx->value_type) return 1;
+    char* key = int_to_key(val);
+    Ctype* type = (Ctype*)dict_get(isel->ctx->value_type, key);
+    free(key);
+    if (type && type->size > 0) return type->size;
+    return 1;
+}
+
+Ctype* get_value_type(ISelContext* isel, ValueName val) {
+    if (!isel || !isel->ctx || !isel->ctx->value_type) return NULL;
+    char* key = int_to_key(val);
+    Ctype* type = (Ctype*)dict_get(isel->ctx->value_type, key);
+    free(key);
+    return type;
+}
+
+int get_mem_space(Ctype* mem_type) {
+    if (!mem_type) return 0;
+    return (mem_type->attr >> 7) & 0x7;
+}
+
+bool is_sbit_type(Ctype* mem_type) {
+    if (!mem_type) return false;
+    CtypeAttr a = get_attr(mem_type->attr);
+    return a.ctype_register && mem_type->type == CTYPE_BOOL;
+}
+
+const char* get_sbit_var_name(ISelContext* isel, Instr* ins) {
+    if (!isel || !ins) return NULL;
+    ValueName ptr = -1;
+    if (ins->args && ins->args->len > 0) {
+        ptr = *(ValueName*)list_get(ins->args, 0);
+    }
+
+    const char* var_name = NULL;
+    if (isel->ctx && isel->ctx->value_to_addr && ptr > 0) {
+        char* key = int_to_key(ptr);
+        var_name = (const char*)dict_get(isel->ctx->value_to_addr, key);
+        free(key);
+    }
+
+    if (!var_name && ins->labels && ins->labels->len > 0) {
+        const char* label = list_get(ins->labels, 0);
+        if (label && label[0] == '@') var_name = label + 1;
+        else var_name = label;
+    }
+
+    return var_name;
+}
+
+const char* resolve_addr_symbol_in_block(Instr** instrs, int n, ValueName ptr) {
+    if (!instrs || n <= 0 || ptr <= 0) return NULL;
+    for (int i = 0; i < n; i++) {
+        Instr* ins = instrs[i];
+        if (!ins || ins->op != IROP_ADDR || ins->dest != ptr) continue;
+        if (ins->labels && ins->labels->len > 0) {
+            const char* label = list_get(ins->labels, 0);
+            if (label && label[0] == '@') return label + 1;
+            return label;
+        }
+    }
+    return NULL;
+}
+
+bool instr_uses_value(Instr* ins, ValueName v) {
+    if (!ins || !ins->args) return false;
+    for (int i = 0; i < ins->args->len; i++) {
+        ValueName* p = list_get(ins->args, i);
+        if (p && *p == v) return true;
+    }
+    return false;
+}
+
+int count_value_uses(Instr** instrs, int n, ValueName v) {
+    int count = 0;
+    for (int i = 0; i < n; i++) {
+        if (!instrs[i]) continue;
+        if (instr_uses_value(instrs[i], v)) count++;
+    }
+    return count;
+}
+
+bool find_const_in_block(Instr** instrs, int n, ValueName v, int64_t* out_val) {
+    bool found = false;
+    int64_t val = 0;
+    for (int i = 0; i < n; i++) {
+        Instr* ins = instrs[i];
+        if (!ins || ins->op != IROP_CONST) continue;
+        if (ins->dest == v) {
+            if (found) return false;
+            found = true;
+            val = ins->imm.ival;
+        }
+    }
+    if (found && out_val) *out_val = val;
+    return found;
+}
+
+bool ne_is_compare_zero(Instr** instrs, int n, Instr* ne, ValueName* out_other) {
+    if (!ne) return false;
+    int64_t imm = 0;
+    if (is_imm_operand(ne, &imm)) {
+        if (imm == 0) {
+            if (out_other) *out_other = get_src1_value(ne);
+            return true;
+        }
+        return false;
+    }
+
+    ValueName a = get_src1_value(ne);
+    ValueName b = get_src2_value(ne);
+    int64_t v = 0;
+    if (find_const_in_block(instrs, n, b, &v) && v == 0) {
+        if (out_other) *out_other = a;
+        return true;
+    }
+    if (find_const_in_block(instrs, n, a, &v) && v == 0) {
+        if (out_other) *out_other = b;
+        return true;
+    }
+    return false;
+}
+
+Instr* find_def_instr_in_func(Func* f, ValueName v) {
+    if (!f || v <= 0) return NULL;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block* b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr* ins = iter_next(&jt);
+            if (ins && ins->dest == v) return ins;
+        }
+        for (Iter jt = list_iter(b->phis); !iter_end(jt);) {
+            Instr* ins = iter_next(&jt);
+            if (ins && ins->dest == v) return ins;
+        }
+    }
+    return NULL;
+}
+
+bool is_const_zero_def(Func* f, ValueName v) {
+    Instr* def = find_def_instr_in_func(f, v);
+    return def && def->op == IROP_CONST && def->imm.ival == 0;
+}
+
+bool ne_is_compare_zero_def(Func* f, Instr* ne, ValueName* out_other) {
+    if (!ne) return false;
+    int64_t imm = 0;
+    if (is_imm_operand(ne, &imm)) {
+        if (imm == 0) {
+            if (out_other) *out_other = get_src1_value(ne);
+            return true;
+        }
+        return false;
+    }
+
+    ValueName a = get_src1_value(ne);
+    ValueName b = get_src2_value(ne);
+    if (is_const_zero_def(f, b)) {
+        if (out_other) *out_other = a;
+        return true;
+    }
+    if (is_const_zero_def(f, a)) {
+        if (out_other) *out_other = b;
+        return true;
+    }
+    return false;
+}
+
+int parse_block_id(const char* label) {
+    if (!label) return -1;
+    int id = -1;
+    if (sscanf(label, "block%d", &id) == 1) return id;
+    return -1;
+}
+
+void block_label_name(char* out, size_t out_len, int id) {
+    snprintf(out, out_len, "L%d", id);
+}
+
+int safe_alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
+    int reg = alloc_reg_for_value(isel, val, size);
+    if (reg < 0) {
+        if (isel->ctx && isel->ctx->value_to_reg) {
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = -2;
+            char* key = int_to_key(val);
+            dict_put(isel->ctx->value_to_reg, key, reg_num);
+        }
+        return -2;
+    }
+    return reg;
+}
+
+void emit_mov(ISelContext* isel, const char* dst, const char* src, Instr* ins) {
+    if (!dst || !src || strcmp(dst, src) == 0) return;
+    if (isel && isel->ctx && isel->ctx->obj) {
+        SectionKind sym_sec = get_symbol_section_kind(isel, src);
+        if (sym_sec != SEC_DATA) {
+            char* ssa = instr_to_ssa_str(ins);
+            if (sym_sec == SEC_XDATA) {
+                char dptr_val[256];
+                snprintf(dptr_val, sizeof(dptr_val), "#%s", src);
+                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+                isel_emit(isel, "MOVX", "A", "@DPTR", NULL);
+                isel_emit(isel, "MOV", dst, "A", ssa);
+            } else if (sym_sec == SEC_IDATA) {
+                isel_emit(isel, "MOV", "R0", src, NULL);
+                isel_emit(isel, "MOV", "A", "@R0", NULL);
+                isel_emit(isel, "MOV", dst, "A", ssa);
+            } else if (sym_sec == SEC_CODE) {
+                char dptr_val[256];
+                snprintf(dptr_val, sizeof(dptr_val), "#%s", src);
+                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+                isel_emit(isel, "CLR", "A", NULL, NULL);
+                isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
+                isel_emit(isel, "MOV", dst, "A", ssa);
+            } else {
+                isel_emit(isel, "MOV", dst, src, ssa);
+            }
+            free(ssa);
+            return;
+        }
+    }
+
+    char* ssa = instr_to_ssa_str(ins);
+    isel_emit(isel, "MOV", dst, src, ssa);
+    free(ssa);
+}
+
+ValueName get_src1_value(Instr* ins) {
+    if (ins && ins->args && ins->args->len > 0) {
+        ValueName* p = list_get(ins->args, 0);
+        if (p) return *p;
+    }
+    return -1;
+}
+
+ValueName get_src2_value(Instr* ins) {
+    if (ins && ins->args && ins->args->len > 1) {
+        ValueName* p = list_get(ins->args, 1);
+        if (p) return *p;
+    }
+    return -1;
+}
+
+bool is_imm_operand(Instr* ins, int64_t* out_val) {
+    if (ins->labels && ins->labels->len > 0) {
+        char* tag = (char*)list_get(ins->labels, 0);
+        if (tag && strcmp(tag, "imm") == 0) {
+            if (out_val) *out_val = ins->imm.ival;
+            return true;
+        }
+    }
+    return false;
+}
