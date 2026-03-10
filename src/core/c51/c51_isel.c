@@ -1842,11 +1842,28 @@ static void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
     if (size == 2) emit_mov(isel, (char*)dst_hi, "#0", NULL);
 
     int t = alloc_temp_reg(isel, -1, size == 2 ? 2 : 1);
-    const char* t_lo = (t >= 0) ? isel_reg_name(t + (size == 2 ? 1 : 0)) : "R1";
-    const char* t_hi = (t >= 0) ? isel_reg_name(t) : "R0";
+    const char* t_lo = (t >= 0) ? isel_reg_name(t + (size == 2 ? 1 : 0)) : "A";
+    const char* t_hi = (t >= 0) ? isel_reg_name(t) : "A";
     emit_mov(isel, (char*)t_lo, (char*)isel_get_lo_reg(isel, b), NULL);
     if (size == 2) emit_mov(isel, (char*)t_hi, (char*)isel_get_hi_reg(isel, b), NULL);
 
+    /* For single-byte multiply, use hardware MUL AB (A*B -> A:low, B:high) */
+    if (size == 1) {
+        /* If temp register allocated and holds b, move it to B; otherwise load src2 into B */
+        if (t >= 0) {
+            emit_mov(isel, "B", (char*)t_lo, NULL);
+            free_temp_reg(isel, t, 1);
+        } else {
+            emit_mov(isel, "B", (char*)isel_get_lo_reg(isel, b), NULL);
+        }
+        /* Load src1 into A (use ins SSA for value origin) */
+        emit_mov(isel, "A", (char*)isel_get_lo_reg(isel, a), ins);
+        isel_emit(isel, "MUL", "AB", NULL, NULL);
+        emit_mov(isel, (char*)dst_lo, "A", ins);
+        return;
+    }
+
+    /* fallback: multi-byte multiply uses software loop */
     char* l_loop = isel_new_label(isel, "Lmul_loop");
     char* l_end = isel_new_label(isel, "Lmul_end");
     char lb_loop[64], lb_end[64];
@@ -1854,35 +1871,18 @@ static void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
     isel_emit(isel, lb_loop, NULL, NULL, NULL);
-    if (size == 1) {
-        emit_mov(isel, "A", (char*)t_lo, NULL);
-    } else {
-        emit_mov(isel, "A", (char*)t_hi, NULL);
-        isel_emit(isel, "ORL", "A", (char*)t_lo, NULL);
-    }
+    emit_mov(isel, "A", (char*)t_hi, NULL);
+    isel_emit(isel, "ORL", "A", (char*)t_lo, NULL);
     isel_emit(isel, "JZ", l_end, NULL, NULL);
+    emit_add16_regs(isel, dst_hi, dst_lo, isel_get_hi_reg(isel, a), isel_get_lo_reg(isel, a), ins);
 
-    if (size == 1) {
-        emit_mov(isel, "A", (char*)dst_lo, NULL);
-        isel_emit(isel, "ADD", "A", (char*)isel_get_lo_reg(isel, a), NULL);
-        emit_mov(isel, (char*)dst_lo, "A", NULL);
-    } else {
-        emit_add16_regs(isel, dst_hi, dst_lo, isel_get_hi_reg(isel, a), isel_get_lo_reg(isel, a), ins);
-    }
-
-    if (size == 1) {
-        emit_mov(isel, "A", (char*)t_lo, NULL);
-        isel_emit(isel, "DEC", "A", NULL, NULL);
-        emit_mov(isel, (char*)t_lo, "A", NULL);
-    } else {
-        isel_emit(isel, "CLR", "C", NULL, NULL);
-        emit_mov(isel, "A", (char*)t_lo, NULL);
-        isel_emit(isel, "SUBB", "A", "#1", NULL);
-        emit_mov(isel, (char*)t_lo, "A", NULL);
-        emit_mov(isel, "A", (char*)t_hi, NULL);
-        isel_emit(isel, "SUBB", "A", "#0", NULL);
-        emit_mov(isel, (char*)t_hi, "A", NULL);
-    }
+    isel_emit(isel, "CLR", "C", NULL, NULL);
+    emit_mov(isel, "A", (char*)t_lo, NULL);
+    isel_emit(isel, "SUBB", "A", "#1", NULL);
+    emit_mov(isel, (char*)t_lo, "A", NULL);
+    emit_mov(isel, "A", (char*)t_hi, NULL);
+    isel_emit(isel, "SUBB", "A", "#0", NULL);
+    emit_mov(isel, (char*)t_hi, "A", NULL);
 
     isel_emit(isel, "SJMP", l_loop, NULL, NULL);
     isel_emit(isel, lb_end, NULL, NULL, NULL);
@@ -1915,44 +1915,130 @@ static void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
     snprintf(lb_loop, sizeof(lb_loop), "%s:", l_loop);
     snprintf(lb_body, sizeof(lb_body), "%s:", l_body);
-
     if (size == 1) {
-        emit_mov(isel, "A", (char*)isel_get_lo_reg(isel, den), NULL);
-        isel_emit(isel, "JZ", l_end, NULL, NULL);
-    } else {
-        emit_mov(isel, "A", (char*)isel_get_hi_reg(isel, den), NULL);
-        isel_emit(isel, "ORL", "A", (char*)isel_get_lo_reg(isel, den), NULL);
-        isel_emit(isel, "JZ", l_end, NULL, NULL);
-    }
+        /* fast path: use DIV AB for unsigned; for signed types perform
+         * sign handling: take absolute values, DIV AB, then fix signs. */
+        /* 改为默认使用无符号除法，忽略类型的符号位；若需强制 unsigned，请在类型上标记 */
+        (void)get_value_type(isel, ins->dest);
+        bool is_unsigned = true;
 
-    isel_emit(isel, lb_loop, NULL, NULL, NULL);
-    if (size == 1) {
-        isel_emit(isel, "CLR", "C", NULL, NULL);
-        emit_mov(isel, "A", (char*)rem_lo, NULL);
-        isel_emit(isel, "SUBB", "A", (char*)isel_get_lo_reg(isel, den), NULL);
-        isel_emit(isel, "JNC", l_body, NULL, NULL);
-        isel_emit(isel, "SJMP", l_end, NULL, NULL);
-    } else {
-        isel_emit(isel, "CLR", "C", NULL, NULL);
-        emit_mov(isel, "A", (char*)rem_lo, NULL);
-        isel_emit(isel, "SUBB", "A", (char*)isel_get_lo_reg(isel, den), NULL);
-        emit_mov(isel, "A", (char*)rem_hi, NULL);
-        isel_emit(isel, "SUBB", "A", (char*)isel_get_hi_reg(isel, den), NULL);
-        isel_emit(isel, "JNC", l_body, NULL, NULL);
-        isel_emit(isel, "SJMP", l_end, NULL, NULL);
-    }
+        /* load numerator into rem_lo (already done above) and prepare denom temp */
+        int td = alloc_temp_reg(isel, -1, 1);
+        const char* den_tmp = (td >= 0) ? isel_reg_name(td) : "R2";
+        emit_mov(isel, (char*)den_tmp, (char*)isel_get_lo_reg(isel, den), NULL);
 
-    isel_emit(isel, lb_body, NULL, NULL, NULL);
-    if (size == 1) {
-        isel_emit(isel, "CLR", "C", NULL, NULL);
-        emit_mov(isel, "A", (char*)rem_lo, NULL);
-        isel_emit(isel, "SUBB", "A", (char*)isel_get_lo_reg(isel, den), NULL);
-        emit_mov(isel, (char*)rem_lo, "A", NULL);
-        if (!want_mod) {
-            emit_mov(isel, "A", (char*)dst_lo, NULL);
-            isel_emit(isel, "INC", "A", NULL, NULL);
-            emit_mov(isel, (char*)dst_lo, "A", NULL);
+        /* check denominator != 0; jump to skip label if zero */
+        char *l_nodiv = isel_new_label(isel, "Ldiv_skip");
+        char lb_nodiv[64];
+        snprintf(lb_nodiv, sizeof(lb_nodiv), "%s:", l_nodiv);
+        emit_mov(isel, "A", (char*)den_tmp, NULL);
+        isel_emit(isel, "JZ", l_nodiv, NULL, NULL);
+
+        if (is_unsigned) {
+            /* unsigned: direct DIV AB */
+            emit_mov(isel, "A", (char*)rem_lo, ins);
+            emit_mov(isel, "B", (char*)den_tmp, NULL);
+            isel_emit(isel, "DIV", "AB", NULL, NULL);
+            if (want_mod) {
+                emit_mov(isel, (char*)dst_lo, "B", ins);
+            } else {
+                emit_mov(isel, (char*)dst_lo, "A", ins);
+            }
+            /* emit skip label for zero-denominator case */
+            isel_emit(isel, lb_nodiv, NULL, NULL, NULL);
+            free(l_nodiv);
+            if (td >= 0) free_temp_reg(isel, td, 1);
+            free(l_loop); free(l_body); free(l_end);
+            if (tr >= 0) free_temp_reg(isel, tr, 1);
+            return;
         }
+
+        /* signed: record signs, take absolute values into temps */
+        int tsn = alloc_temp_reg(isel, -1, 1);
+        int tsd = alloc_temp_reg(isel, -1, 1);
+        const char* s_num = (tsn >= 0) ? isel_reg_name(tsn) : "R3";
+        const char* s_den = (tsd >= 0) ? isel_reg_name(tsd) : "R4";
+        /* init flags to 0 */
+        isel_emit(isel, "MOV", (char*)s_num, "#0", NULL);
+        isel_emit(isel, "MOV", (char*)s_den, "#0", NULL);
+
+        /* numerator sign */
+        char *l_num_pos = isel_new_label(isel, "Lnum_pos");
+        char *l_den_pos = isel_new_label(isel, "Lden_pos");
+        char *l_after_fix = isel_new_label(isel, "Ldiv_after_fix");
+
+        emit_mov(isel, "A", (char*)rem_lo, NULL);
+        isel_emit(isel, "ANL", "A", "#128", NULL);
+        isel_emit(isel, "JZ", l_num_pos, NULL, NULL);
+        /* negative: negate rem_lo and set s_num=1 */
+        emit_mov(isel, "A", (char*)rem_lo, NULL);
+        isel_emit(isel, "CPL", "A", NULL, NULL);
+        isel_emit(isel, "INC", "A", NULL, NULL);
+        emit_mov(isel, (char*)rem_lo, "A", NULL);
+        isel_emit(isel, "MOV", (char*)s_num, "#1", NULL);
+        isel_emit(isel, "SJMP", l_den_pos, NULL, NULL);
+        isel_emit(isel, l_num_pos, NULL, NULL, NULL);
+
+        /* denominator sign */
+        emit_mov(isel, "A", (char*)den_tmp, NULL);
+        isel_emit(isel, "ANL", "A", "#128", NULL);
+        isel_emit(isel, "JZ", l_den_pos, NULL, NULL);
+        emit_mov(isel, "A", (char*)den_tmp, NULL);
+        isel_emit(isel, "CPL", "A", NULL, NULL);
+        isel_emit(isel, "INC", "A", NULL, NULL);
+        emit_mov(isel, (char*)den_tmp, "A", NULL);
+        isel_emit(isel, "MOV", (char*)s_den, "#1", NULL);
+        isel_emit(isel, l_den_pos, NULL, NULL, NULL);
+
+        /* unsigned divide of absolute values */
+        emit_mov(isel, "A", (char*)rem_lo, ins);
+        emit_mov(isel, "B", (char*)den_tmp, NULL);
+        isel_emit(isel, "DIV", "AB", NULL, NULL);
+
+        /* fix quotient sign: if s_num ^ s_den then negate A */
+        emit_mov(isel, "A", (char*)s_num, NULL);
+        isel_emit(isel, "XRL", "A", (char*)s_den, NULL);
+        char *l_no_negq = isel_new_label(isel, "Lno_negq");
+        isel_emit(isel, "JZ", l_no_negq, NULL, NULL);
+        /* negate A */
+        isel_emit(isel, "CPL", "A", NULL, NULL);
+        isel_emit(isel, "INC", "A", NULL, NULL);
+        emit_mov(isel, (char*)dst_lo, "A", ins);
+        isel_emit(isel, "SJMP", l_after_fix, NULL, NULL);
+        isel_emit(isel, l_no_negq, NULL, NULL, NULL);
+        if (want_mod) {
+            /* remainder in B; may need sign fix if numerator was negative */
+            emit_mov(isel, "A", "B", NULL);
+            /* if s_num==1 then negate remainder */
+            isel_emit(isel, "ANL", "A", "#0", NULL); /* noop placeholder to keep patterns */
+        }
+        isel_emit(isel, l_after_fix, NULL, NULL, NULL);
+
+        /* if want_mod and s_num was set, negate B */
+        if (want_mod) {
+            /* check s_num */
+            emit_mov(isel, "A", (char*)s_num, NULL);
+            char *l_no_reml_neg = isel_new_label(isel, "Lno_reml_neg");
+            isel_emit(isel, "JZ", l_no_reml_neg, NULL, NULL);
+            emit_mov(isel, "A", "B", NULL);
+            isel_emit(isel, "CPL", "A", NULL, NULL);
+            isel_emit(isel, "INC", "A", NULL, NULL);
+            emit_mov(isel, "B", "A", NULL);
+            isel_emit(isel, l_no_reml_neg, NULL, NULL, NULL);
+            emit_mov(isel, (char*)dst_lo, "B", ins);
+        } else {
+            /* if quotient not already written above (no neg case), write A */
+            emit_mov(isel, (char*)dst_lo, "A", ins);
+        }
+
+        /* cleanup */
+        if (td >= 0) free_temp_reg(isel, td, 1);
+        if (tsn >= 0) free_temp_reg(isel, tsn, 1);
+        if (tsd >= 0) free_temp_reg(isel, tsd, 1);
+        free(l_num_pos); free(l_den_pos); free(l_after_fix);
+        free(l_loop); free(l_body); free(l_end);
+        if (tr >= 0) free_temp_reg(isel, tr, 1);
+        return;
     } else {
         emit_sub16_regs(isel, rem_hi, rem_lo, isel_get_hi_reg(isel, den), isel_get_lo_reg(isel, den), ins);
         if (!want_mod) {

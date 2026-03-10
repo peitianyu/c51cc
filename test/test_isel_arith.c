@@ -4,22 +4,22 @@
 //     return x;
 // }
 
-char add_sub(char a, char b) {
-    char c = a + b;
-    char d = a - b;
-    return c ^ d;
-}
+// char add_sub(char a, char b) {
+//     char c = a + b;
+//     char d = a - b;
+//     return c ^ d;
+// }
 
 // char add_ptr(char *p, char x) {
 //     return *p + x;
 // }
 
-// int mul_div_mod(int a, int b) {
-//     int m = a * b;
-//     int d = a / b;
-//     int r = a % b;
-//     return m + d + r;
-// }
+char mul_div_mod(char a, char b) {
+    char m = a * b;
+    char d = a / b;
+    char r = a % b;
+    return m + d + r;
+}
 
 // unsigned int shl_shr(unsigned int v, int s) {
 //     unsigned int a = v << s;
