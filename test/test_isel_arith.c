@@ -12,9 +12,29 @@
 //     return *p + x;
 // }
 
-char mul_div_mod(char a, char b) {
-    return a * b + a / b + a % b;
+// int add_op(int a, int b) {
+//     return a + b;
+// }
+
+// int sub_op(int a, int b) {
+//     return a - b;
+// }
+
+// int mul_op(int a, int b) {
+//     return a * b;
+// }
+
+// int div_op(int a, int b) {
+//     return a / b;
+// }
+
+char mod_op(char a, char b) {
+    return a % b;
 }
+
+// int mul_div_mod(int a, int b) {
+//     return a * b + a / b + a % b;
+// }
 
 // unsigned int shl_shr(unsigned int v, int s) {
 //     return (v << s) | (v >> s);

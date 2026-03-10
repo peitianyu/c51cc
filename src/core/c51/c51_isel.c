@@ -109,7 +109,30 @@ void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* 
     if (!isel || !isel->sec) return;
 
     AsmInstr* ins = calloc(1, sizeof(AsmInstr));
-    ins->op = strdup(op);
+    /* If this emission is a bare label/op with no args or ssa and
+       it doesn't already end with ':' then treat it as a label and
+       append ':' so the output printer will print it at column 0. */
+    bool is_label_candidate = (op && arg1 == NULL && arg2 == NULL && ssa == NULL);
+    if (is_label_candidate) {
+        size_t oplen = strlen(op);
+        if (oplen == 0) {
+            ins->op = strdup(op);
+        } else if (op[oplen - 1] == ':') {
+            ins->op = strdup(op);
+        } else {
+            char *lbl = malloc(oplen + 2);
+            if (lbl) {
+                strcpy(lbl, op);
+                lbl[oplen] = ':';
+                lbl[oplen+1] = '\0';
+                ins->op = lbl; /* will be freed later */
+            } else {
+                ins->op = strdup(op);
+            }
+        }
+    } else {
+        ins->op = strdup(op);
+    }
     ins->args = make_list();
     if (arg1) list_push(ins->args, strdup(arg1));
     if (arg2) list_push(ins->args, strdup(arg2));

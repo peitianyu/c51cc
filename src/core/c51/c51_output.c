@@ -79,7 +79,12 @@ static void print_asminstr(FILE *fp, AsmInstr *ins)
             while (*s == ' ' || *s == '\t' || *s == ',' ) s++;
         }
 
-        fprintf(fp, "; %s", s);
+        /* Only print SSA comment if there is non-whitespace content left */
+        const char *t = s;
+        while (*t == ' ' || *t == '\t') t++;
+        if (*t != '\0') {
+            fprintf(fp, "; %s", s);
+        }
     }
 
     fprintf(fp, "\n");
