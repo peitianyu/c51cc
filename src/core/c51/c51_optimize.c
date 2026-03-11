@@ -20,6 +20,38 @@ static bool is_mov(AsmInstr* ins) {
     return ins && ins->op && strcmp(ins->op, "MOV") == 0;
 }
 
+static bool is_label_instr(AsmInstr* ins) {
+    if (!ins || !ins->op) return false;
+    size_t len = strlen(ins->op);
+    return len > 0 && ins->op[len - 1] == ':';
+}
+
+static bool is_control_transfer_instr(AsmInstr* ins) {
+    if (!ins || !ins->op) return false;
+    return strcmp(ins->op, "SJMP") == 0 ||
+           strcmp(ins->op, "AJMP") == 0 ||
+           strcmp(ins->op, "LJMP") == 0 ||
+           strcmp(ins->op, "JMP") == 0 ||
+           strcmp(ins->op, "JC") == 0 ||
+           strcmp(ins->op, "JNC") == 0 ||
+           strcmp(ins->op, "JZ") == 0 ||
+           strcmp(ins->op, "JNZ") == 0 ||
+           strcmp(ins->op, "CJNE") == 0 ||
+           strcmp(ins->op, "DJNZ") == 0 ||
+           strcmp(ins->op, "JB") == 0 ||
+           strcmp(ins->op, "JNB") == 0 ||
+           strcmp(ins->op, "JBC") == 0 ||
+           strcmp(ins->op, "RET") == 0 ||
+           strcmp(ins->op, "RETI") == 0 ||
+           strcmp(ins->op, "ACALL") == 0 ||
+           strcmp(ins->op, "LCALL") == 0 ||
+           strcmp(ins->op, "CALL") == 0;
+}
+
+static bool is_basic_block_barrier(AsmInstr* ins) {
+    return is_label_instr(ins) || is_control_transfer_instr(ins);
+}
+
 /* 前向声明：操作数类型检查 */
 static bool is_register_operand(const char* op);
 static bool is_immediate_operand(const char* op);
@@ -78,6 +110,8 @@ static int peephole_mov_chain(List* instrs, int start) {
     
     AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
     AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
     
     if (!is_mov(ins1) || !is_mov(ins2)) return 0;
     
@@ -117,6 +151,8 @@ static int peephole_redundant_load(List* instrs, int start) {
     
     AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
     AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
     
     if (!is_mov(ins1) || !is_mov(ins2)) return 0;
     
@@ -145,6 +181,8 @@ static int peephole_redundant_swap(List* instrs, int start) {
     
     AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
     AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
     
     if (!is_mov(ins1) || !is_mov(ins2)) return 0;
     
@@ -191,6 +229,7 @@ static int peephole_eliminate_temp_reg(List* instrs, int start) {
     if (start + 1 >= instrs->len) return 0;
     
     AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    if (is_basic_block_barrier(ins1)) return 0;
     if (!is_mov(ins1)) return 0;
     
     const char* dst1 = get_operand(ins1, 0);
@@ -208,6 +247,7 @@ static int peephole_eliminate_temp_reg(List* instrs, int start) {
     int offset = 1;
     while (start + offset < instrs->len && offset <= 2) {
         AsmInstr* ins_next = (AsmInstr*)list_get(instrs, start + offset);
+        if (is_basic_block_barrier(ins_next)) break;
         
         if (is_mov(ins_next)) {
             const char* dst_next = get_operand(ins_next, 0);
@@ -246,6 +286,8 @@ static int peephole_mov_propagate(List* instrs, int start) {
     
     AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
     AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
     
     if (!is_mov(ins1) || !is_mov(ins2)) return 0;
     
@@ -273,6 +315,8 @@ static int peephole_mem_to_reg(List* instrs, int start) {
     
     AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
     AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
     
     if (!is_mov(ins1) || !is_mov(ins2)) return 0;
     
@@ -313,6 +357,16 @@ static bool reg_read_before_write_or_end(List* instrs, int start, const char* re
     for (int i = start; i < instrs->len; i++) {
         AsmInstr* ins = (AsmInstr*)list_get(instrs, i);
         if (!ins) continue;
+
+        if (is_basic_block_barrier(ins)) {
+            if (ins->op && strcmp(ins->op, "RET") == 0) {
+                if (operands_equal(reg, "R7") || operands_equal(reg, "R6")) {
+                    return true;
+                }
+                return false;
+            }
+            return true;
+        }
         
         // 检查是否是 RET 指令
         if (ins->op && strcmp(ins->op, "RET") == 0) {

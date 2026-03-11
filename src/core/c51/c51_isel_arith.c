@@ -6,6 +6,95 @@
 
 #include "c51_isel_regalloc.h"
 
+typedef enum SignedCmpKind {
+    SIGNED_CMP_LT,
+    SIGNED_CMP_GT,
+    SIGNED_CMP_LE,
+    SIGNED_CMP_GE,
+} SignedCmpKind;
+
+static bool is_unsigned_compare(ISelContext* isel, ValueName lhs, ValueName rhs) {
+    Ctype* lhs_type = get_value_type(isel, lhs);
+    Ctype* rhs_type = get_value_type(isel, rhs);
+    if (lhs_type && get_attr(lhs_type->attr).ctype_unsigned) return true;
+    if (rhs_type && get_attr(rhs_type->attr).ctype_unsigned) return true;
+    return false;
+}
+
+static void emit_signed_cmp8_result(ISelContext* isel,
+                                    Instr* ins,
+                                    int dst_reg,
+                                    int size,
+                                    ValueName lhs,
+                                    ValueName rhs,
+                                    SignedCmpKind kind) {
+    const char* llo = isel_get_lo_reg(isel, lhs);
+    const char* rlo = isel_get_lo_reg(isel, rhs);
+
+    char* l_same = isel_new_label(isel, "Lscmp_same");
+    char* l_true = isel_new_label(isel, "Lscmp_true");
+    char* l_false = isel_new_label(isel, "Lscmp_false");
+    char* l_end = isel_new_label(isel, "Lscmp_end");
+    char lb_same[64], lb_true[64], lb_false[64], lb_end[64];
+    snprintf(lb_same, sizeof(lb_same), "%s:", l_same);
+    snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
+    snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
+    snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+
+    emit_mov(isel, "A", llo, ins);
+    isel_emit(isel, "XRL", "A", rlo, NULL);
+    isel_emit(isel, "ANL", "A", "#128", NULL);
+    isel_emit(isel, "JZ", l_same, NULL, NULL);
+
+    emit_mov(isel, "A", llo, NULL);
+    isel_emit(isel, "ANL", "A", "#128", NULL);
+    if (kind == SIGNED_CMP_LT || kind == SIGNED_CMP_LE) {
+        isel_emit(isel, "JNZ", l_true, NULL, NULL);
+        isel_emit(isel, "SJMP", l_false, NULL, NULL);
+    } else {
+        isel_emit(isel, "JZ", l_true, NULL, NULL);
+        isel_emit(isel, "SJMP", l_false, NULL, NULL);
+    }
+
+    isel_emit(isel, lb_same, NULL, NULL, NULL);
+    isel_emit(isel, "CLR", "C", NULL, NULL);
+    emit_mov(isel, "A", llo, NULL);
+    isel_emit(isel, "SUBB", "A", rlo, NULL);
+
+    switch (kind) {
+    case SIGNED_CMP_LT:
+        isel_emit(isel, "JC", l_true, NULL, NULL);
+        isel_emit(isel, "SJMP", l_false, NULL, NULL);
+        break;
+    case SIGNED_CMP_GT:
+        isel_emit(isel, "JC", l_false, NULL, NULL);
+        isel_emit(isel, "JZ", l_false, NULL, NULL);
+        isel_emit(isel, "SJMP", l_true, NULL, NULL);
+        break;
+    case SIGNED_CMP_LE:
+        isel_emit(isel, "JC", l_true, NULL, NULL);
+        isel_emit(isel, "JZ", l_true, NULL, NULL);
+        isel_emit(isel, "SJMP", l_false, NULL, NULL);
+        break;
+    case SIGNED_CMP_GE:
+        isel_emit(isel, "JNC", l_true, NULL, NULL);
+        isel_emit(isel, "SJMP", l_false, NULL, NULL);
+        break;
+    }
+
+    isel_emit(isel, lb_false, NULL, NULL, NULL);
+    emit_set_bool_result(isel, ins, dst_reg, size, false);
+    isel_emit(isel, "SJMP", l_end, NULL, NULL);
+    isel_emit(isel, lb_true, NULL, NULL, NULL);
+    emit_set_bool_result(isel, ins, dst_reg, size, true);
+    isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+    free(l_same);
+    free(l_true);
+    free(l_false);
+    free(l_end);
+}
+
 void emit_const(ISelContext* isel, Instr* ins) {
     int size = ins->type ? ins->type->size : 1;
     int val = (int)(ins->imm.ival & 0xFFFF);
@@ -45,6 +134,7 @@ void emit_const(ISelContext* isel, Instr* ins) {
 void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
+    int src1_size = get_value_size(isel, src1);
     int64_t imm_val;
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
 
@@ -128,10 +218,14 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     emit_mov(isel, dst_lo, "A", NULL);
 
     if (size == 2) {
-        const char* src1_hi = isel_get_hi_reg(isel, src1);
         const char* dst_hi = isel_reg_name(dst_reg);
 
-        emit_mov(isel, "A", src1_hi, NULL);
+        if (src1_size == 2) {
+            const char* src1_hi = isel_get_hi_reg(isel, src1);
+            emit_mov(isel, "A", src1_hi, NULL);
+        } else {
+            emit_mov(isel, "A", "#0", NULL);
+        }
 
         if (src2_is_imm) {
             char imm_str[16];
@@ -139,8 +233,13 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
             isel_emit(isel, "ADDC", "A", imm_str, NULL);
         } else {
             ValueName src2 = get_src2_value(ins);
-            const char* src2_hi = isel_get_hi_reg(isel, src2);
-            isel_emit(isel, "ADDC", "A", src2_hi, NULL);
+            int src2_size = get_value_size(isel, src2);
+            if (src2_size == 2) {
+                const char* src2_hi = isel_get_hi_reg(isel, src2);
+                isel_emit(isel, "ADDC", "A", src2_hi, NULL);
+            } else {
+                isel_emit(isel, "ADDC", "A", "#0", NULL);
+            }
         }
 
         emit_mov(isel, dst_hi, "A", NULL);
@@ -436,6 +535,7 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
     ValueName b = get_src2_value(ins);
     ValueName lhs = a;
     ValueName rhs = b;
+    bool unsigned_cmp = is_unsigned_compare(isel, lhs, rhs);
 
     int size = ins->type ? ins->type->size : 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
@@ -447,7 +547,7 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
     snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
-    if (next && next->op == IROP_BR && next->args && next->args->len > 0) {
+    if (unsigned_cmp && next && next->op == IROP_BR && next->args && next->args->len > 0) {
         ValueName cond = *(ValueName*)list_get(next->args, 0);
         if (cond == ins->dest) {
             const char* lbl_t = (const char*)list_get(next->labels, 0);
@@ -490,6 +590,13 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
     }
 
     if (w == 1) {
+        if (!unsigned_cmp) {
+            emit_signed_cmp8_result(isel, ins, dst_reg, size, lhs, rhs,
+                                    is_gt ? SIGNED_CMP_GT : SIGNED_CMP_LT);
+            free(l_true); free(l_end);
+            return;
+        }
+
         const char* llo = isel_get_lo_reg(isel, lhs);
         const char* rlo = isel_get_lo_reg(isel, rhs);
 
@@ -592,6 +699,7 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
     ValueName b = get_src2_value(ins);
     ValueName lhs = is_ge ? a : b;
     ValueName rhs = is_ge ? b : a;
+    bool unsigned_cmp = is_unsigned_compare(isel, lhs, rhs);
 
     int size = ins->type ? ins->type->size : 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
@@ -603,7 +711,7 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
     snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
-    if (next && next->op == IROP_BR && next->args && next->args->len > 0) {
+    if (unsigned_cmp && next && next->op == IROP_BR && next->args && next->args->len > 0) {
         ValueName cond = *(ValueName*)list_get(next->args, 0);
         if (cond == ins->dest) {
             const char* lbl_t = (const char*)list_get(next->labels, 0);
@@ -662,6 +770,13 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
     }
 
     if (w == 1) {
+        if (!unsigned_cmp) {
+            emit_signed_cmp8_result(isel, ins, dst_reg, size, a, b,
+                                    is_ge ? SIGNED_CMP_GE : SIGNED_CMP_LE);
+            free(l_true); free(l_end);
+            return;
+        }
+
         const char* llo = isel_get_lo_reg(isel, lhs);
         const char* rlo = isel_get_lo_reg(isel, rhs);
         isel_emit(isel, "CLR", "C", NULL, NULL);
@@ -1049,6 +1164,7 @@ void emit_simple_cast(ISelContext* isel, Instr* ins, bool sign_extend) {
 void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
+    int src1_size = get_value_size(isel, src1);
     int64_t imm_val;
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
 
@@ -1089,10 +1205,14 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     emit_mov(isel, dst_lo, "A", ins);
 
     if (size == 2) {
-        const char* src1_hi = isel_get_hi_reg(isel, src1);
         const char* dst_hi = isel_reg_name(dst_reg);
 
-        emit_mov(isel, "A", src1_hi, ins);
+        if (src1_size == 2) {
+            const char* src1_hi = isel_get_hi_reg(isel, src1);
+            emit_mov(isel, "A", src1_hi, ins);
+        } else {
+            emit_mov(isel, "A", "#0", ins);
+        }
 
         if (src2_is_imm) {
             char imm_str[16];
@@ -1100,8 +1220,13 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             isel_emit(isel, "SUBB", "A", imm_str, NULL);
         } else {
             ValueName src2 = get_src2_value(ins);
-            const char* src2_hi = isel_get_hi_reg(isel, src2);
-            isel_emit(isel, "SUBB", "A", src2_hi, NULL);
+            int src2_size = get_value_size(isel, src2);
+            if (src2_size == 2) {
+                const char* src2_hi = isel_get_hi_reg(isel, src2);
+                isel_emit(isel, "SUBB", "A", src2_hi, NULL);
+            } else {
+                isel_emit(isel, "SUBB", "A", "#0", NULL);
+            }
         }
 
         emit_mov(isel, dst_hi, "A", ins);

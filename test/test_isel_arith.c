@@ -1,4 +1,4 @@
-// Instruction selection tests: arithmetic/bit/shift/compare
+// // Instruction selection tests: arithmetic/bit/shift/compare
 
 // char ret_param(char x) {
 //     return x;
@@ -36,22 +36,22 @@
 //     return a * b + a / b + a % b;
 // }
 
-unsigned char shl_shr(unsigned char v, char s) {
-    return (v << s) | (v >> s);
-}
+// unsigned char shl_shr(unsigned char v, char s) {
+//     return (v << s) | (v >> s);
+// }
 
 // char logic_ops(char a, char b) {
 //     return ~((a & b) | (a ^ b));
 // }
 
-// char cmp_ops(char a, char b) {
-//     return (a == b) * 1
-//          + (a != b) * 2
-//          + (a <  b) * 4
-//          + (a <= b) * 8
-//          + (a >  b) * 16
-//          + (a >= b) * 32;
-// }
+char cmp_ops(char a, char b) {
+    return (a == b) * 1
+         + (a != b) * 2
+         + (a <  b) * 4
+         + (a <= b) * 8
+         + (a >  b) * 16
+         + (a >= b) * 32;
+}
 
 // char main(void) {
 //     char a = 13;
