@@ -370,7 +370,7 @@ void emit_not(ISelContext* isel, Instr* ins, Instr* next) {
     }
 }
 
-void emit_ne(ISelContext* isel, Instr* ins) {
+void emit_ne(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
     int64_t imm_val;
@@ -445,7 +445,7 @@ void emit_ne(ISelContext* isel, Instr* ins) {
     free(l_end);
 }
 
-void emit_lnot(ISelContext* isel, Instr* ins) {
+void emit_lnot(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
 
@@ -485,7 +485,7 @@ void emit_lnot(ISelContext* isel, Instr* ins) {
     free(l_end);
 }
 
-void emit_cmp_eq(ISelContext* isel, Instr* ins) {
+void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     ValueName src2 = get_src2_value(ins);
     int size = ins->type ? ins->type->size : 1;
@@ -546,6 +546,122 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
     char lb_true[64], lb_end[64];
     snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+
+    /* BR-aware signed compare: if this compare's result is immediately used by
+       a following BR, emit direct conditional branches for signed comparisons
+       (avoid materializing boolean). Wrap in a nested scope to avoid
+       redeclaring locals like `llo`/`rlo`. */
+    if (!unsigned_cmp && next && next->op == IROP_BR && next->args && next->args->len > 0) {
+        {
+            ValueName cond = *(ValueName*)list_get(next->args, 0);
+            if (cond == ins->dest) {
+                const char* lbl_t = (const char*)list_get(next->labels, 0);
+                const char* lbl_f = (const char*)list_get(next->labels, 1);
+                int id_t = parse_block_id(lbl_t);
+                int id_f = parse_block_id(lbl_f);
+                if (id_t >= 0 && id_f >= 0) {
+                    char target_t[32]; char target_f[32];
+                    block_label_name(target_t, sizeof(target_t), id_t);
+                    block_label_name(target_f, sizeof(target_f), id_f);
+
+                    if (w == 1) {
+                        const char* llo = isel_get_lo_reg(isel, lhs);
+                        const char* rlo = isel_get_lo_reg(isel, rhs);
+                        char* l_same = isel_new_label(isel, "Lscmp_same_tmp");
+
+                        emit_mov(isel, "A", llo, ins);
+                        isel_emit(isel, "XRL", "A", rlo, NULL);
+                        isel_emit(isel, "ANL", "A", "#128", NULL);
+                        isel_emit(isel, "JZ", l_same, NULL, NULL);
+
+                        emit_mov(isel, "A", llo, NULL);
+                        isel_emit(isel, "ANL", "A", "#128", NULL);
+                        if (!is_gt) {
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "JNZ", target_t, NULL, instr_to_ssa_str(ins));
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                        } else {
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "JZ", target_t, NULL, instr_to_ssa_str(ins));
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                        }
+
+                        isel_emit(isel, l_same, NULL, NULL, NULL);
+                        isel_emit(isel, "CLR", "C", NULL, NULL);
+                        emit_mov(isel, "A", llo, NULL);
+                        isel_emit(isel, "SUBB", "A", rlo, NULL);
+
+                        if (!is_gt) {
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "JC", target_t, NULL, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                        } else {
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "JC", target_f, NULL, NULL);
+                            isel_emit(isel, "JZ", target_f, NULL, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                        }
+
+                        free(l_same);
+                        next->op = IROP_NOP;
+                        return;
+                    } else {
+                        /* signed 16-bit compare: check high then low */
+                        const char* lhi = isel_get_hi_reg(isel, lhs);
+                        const char* rhi = isel_get_hi_reg(isel, rhs);
+                        const char* llo = isel_get_lo_reg(isel, lhs);
+                        const char* rlo = isel_get_lo_reg(isel, rhs);
+
+                        isel_emit(isel, "CLR", "C", NULL, NULL);
+                        emit_mov(isel, "A", lhi, ins);
+                        isel_emit(isel, "SUBB", "A", rhi, NULL);
+
+                        if (!is_gt) {
+                            char* l_check_low = isel_new_label(isel, "Lcheck_low_tmp");
+                            isel_emit(isel, "JC", target_f, NULL, NULL);
+                            isel_emit(isel, "JZ", l_check_low, NULL, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+
+                            isel_emit(isel, l_check_low, NULL, NULL, NULL);
+                            isel_emit(isel, "CLR", "C", NULL, NULL);
+                            emit_mov(isel, "A", llo, NULL);
+                            isel_emit(isel, "SUBB", "A", rlo, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "JC", target_t, NULL, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                            free(l_check_low);
+                        } else {
+                            char* l_check_low = isel_new_label(isel, "Lcheck_low_tmp");
+                            isel_emit(isel, "JC", target_f, NULL, NULL);
+                            isel_emit(isel, "JZ", l_check_low, NULL, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "SJMP", target_t, NULL, NULL);
+
+                            isel_emit(isel, l_check_low, NULL, NULL, NULL);
+                            isel_emit(isel, "CLR", "C", NULL, NULL);
+                            emit_mov(isel, "A", llo, NULL);
+                            isel_emit(isel, "SUBB", "A", rlo, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "JC", target_f, NULL, NULL);
+                            isel_emit(isel, "JZ", target_f, NULL, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                            free(l_check_low);
+                        }
+
+                        next->op = IROP_NOP;
+                        return;
+                    }
+                }
+            }
+        }
+    }
 
     if (unsigned_cmp && next && next->op == IROP_BR && next->args && next->args->len > 0) {
         ValueName cond = *(ValueName*)list_get(next->args, 0);

@@ -358,7 +358,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_shift(isel, ins, true);
             break;
         case IROP_EQ:
-            emit_cmp_eq(isel, ins);
+            emit_cmp_eq(isel, ins, next);
             break;
         case IROP_LT:
             emit_cmp_lt_gt(isel, ins, next, false);
@@ -373,10 +373,10 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_cmp_le_ge(isel, ins, next, true);
             break;
         case IROP_NE:
-            emit_ne(isel, ins);
+            emit_ne(isel, ins, next);
             break;
         case IROP_LNOT:
-            emit_lnot(isel, ins);
+            emit_lnot(isel, ins, next);
             break;
         case IROP_TRUNC:
             emit_trunc(isel, ins);

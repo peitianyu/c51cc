@@ -728,6 +728,23 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
 }
 
 void emit_ret(ISelContext* isel, Instr* ins) {
+    int64_t imm_val = 0;
+    if (is_imm_operand(ins, &imm_val)) {
+        int ret_size = ins->type ? ins->type->size : 1;
+        int lo = (int)(imm_val & 0xFF);
+        char imm_lo[32]; snprintf(imm_lo, sizeof(imm_lo), "#%d", lo);
+        char* ssa = instr_to_ssa_str(ins);
+        isel_emit(isel, "MOV", "R7", imm_lo, ssa);
+        if (ret_size == 2) {
+            int hi = (int)((imm_val >> 8) & 0xFF);
+            char imm_hi[32]; snprintf(imm_hi, sizeof(imm_hi), "#%d", hi);
+            isel_emit(isel, "MOV", "R6", imm_hi, NULL);
+        }
+        isel_emit(isel, "RET", NULL, NULL, ssa);
+        if (ssa) free(ssa);
+        return;
+    }
+
     if (ins->args && ins->args->len > 0) {
         ValueName ret_val = *(ValueName*)list_get(ins->args, 0);
         int ret_size = ins->type ? ins->type->size : 1;
