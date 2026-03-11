@@ -140,6 +140,11 @@ void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* 
     list_push(isel->sec->asminstrs, ins);
 }
 
+void isel_emit_label(ISelContext* isel, const char* label) {
+    if (!isel || !isel->sec || !label) return;
+    isel_emit(isel, label, NULL, NULL, NULL);
+}
+
 void isel_ensure_in_acc(ISelContext* isel, ValueName val) {
     if (!isel || val <= 0) return;
 

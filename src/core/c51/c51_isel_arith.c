@@ -713,49 +713,42 @@ void emit_neg(ISelContext* isel, Instr* ins) {
 void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     ValueName src = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
+    /* 仅支持 8 位移位；删除对 16 位的支持 */
+    if (size != 1) {
+        fprintf(stderr, "c51 backend: 16-bit SHIFT not supported\n");
+        exit(1);
+    }
+
     int dst_reg = alloc_dest_reg(isel, ins, NULL, size, true);
-    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
-    const char* dst_hi = isel_reg_name(dst_reg);
+    const char* dst_lo = isel_reg_name(dst_reg);
     emit_copy_value(isel, ins, src, dst_reg, size);
 
     int64_t imm = 0;
     if (is_imm_operand(ins, &imm)) {
         int cnt = (int)(imm & 0x1F);
         for (int i = 0; i < cnt; i++) {
-            if (size == 1) {
-                emit_mov(isel, "A", dst_lo, ins);
+            emit_mov(isel, "A", dst_lo, ins);
                 if (is_shr) {
                     isel_emit(isel, "CLR", "C", NULL, NULL);
                     isel_emit(isel, "RRC", "A", NULL, NULL);
                 } else {
-                    isel_emit(isel, "ADD", "A", dst_lo, NULL);
+                    isel_emit(isel, "CLR", "C", NULL, NULL);
+                    isel_emit(isel, "RLC", "A", NULL, NULL);
                 }
                 emit_mov(isel, dst_lo, "A", NULL);
-            } else {
-                if (is_shr) {
-                    isel_emit(isel, "CLR", "C", NULL, NULL);
-                    emit_mov(isel, "A", dst_hi, NULL);
-                    isel_emit(isel, "RRC", "A", NULL, NULL);
-                    emit_mov(isel, dst_hi, "A", NULL);
-                    emit_mov(isel, "A", dst_lo, NULL);
-                    isel_emit(isel, "RRC", "A", NULL, NULL);
-                    emit_mov(isel, dst_lo, "A", NULL);
-                } else {
-                    isel_emit(isel, "CLR", "C", NULL, NULL);
-                    emit_mov(isel, "A", dst_lo, NULL);
-                    isel_emit(isel, "RLC", "A", NULL, NULL);
-                    emit_mov(isel, dst_lo, "A", NULL);
-                    emit_mov(isel, "A", dst_hi, NULL);
-                    isel_emit(isel, "RLC", "A", NULL, NULL);
-                    emit_mov(isel, dst_hi, "A", NULL);
-                }
-            }
         }
         return;
     }
 
     ValueName cntv = get_src2_value(ins);
     const char* tcnt = isel_get_lo_reg(isel, cntv);
+
+    /* 为计数分配临时寄存器，避免在第一个循环中破坏原始计数 */
+    int tcnt_tmp = alloc_temp_reg(isel, -1, 1);
+    const char* tcnt_reg = (tcnt_tmp >= 0) ? isel_reg_name(tcnt_tmp) : tcnt;
+    if (tcnt_tmp >= 0) {
+        emit_mov(isel, tcnt_reg, tcnt, NULL);
+    }
 
     char* l_loop = isel_new_label(isel, "Lsh_loop");
     char* l_end = isel_new_label(isel, "Lsh_end");
@@ -764,45 +757,26 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
     isel_emit(isel, lb_loop, NULL, NULL, NULL);
-    emit_mov(isel, "A", tcnt, NULL);
+    emit_mov(isel, "A", tcnt_reg, NULL);
     isel_emit(isel, "JZ", l_end, NULL, NULL);
 
-    if (size == 1) {
-        emit_mov(isel, "A", dst_lo, NULL);
-        if (is_shr) {
-            isel_emit(isel, "CLR", "C", NULL, NULL);
-            isel_emit(isel, "RRC", "A", NULL, NULL);
-        } else {
-            isel_emit(isel, "ADD", "A", dst_lo, NULL);
-        }
-        emit_mov(isel, dst_lo, "A", NULL);
+    emit_mov(isel, "A", dst_lo, NULL);
+    if (is_shr) {
+        isel_emit(isel, "CLR", "C", NULL, NULL);
+        isel_emit(isel, "RRC", "A", NULL, NULL);
     } else {
-        if (is_shr) {
-            isel_emit(isel, "CLR", "C", NULL, NULL);
-            emit_mov(isel, "A", dst_hi, NULL);
-            isel_emit(isel, "RRC", "A", NULL, NULL);
-            emit_mov(isel, dst_hi, "A", NULL);
-            emit_mov(isel, "A", dst_lo, NULL);
-            isel_emit(isel, "RRC", "A", NULL, NULL);
-            emit_mov(isel, dst_lo, "A", NULL);
-        } else {
-            isel_emit(isel, "CLR", "C", NULL, NULL);
-            emit_mov(isel, "A", dst_lo, NULL);
-            isel_emit(isel, "RLC", "A", NULL, NULL);
-            emit_mov(isel, dst_lo, "A", NULL);
-            emit_mov(isel, "A", dst_hi, NULL);
-            isel_emit(isel, "RLC", "A", NULL, NULL);
-            emit_mov(isel, dst_hi, "A", NULL);
-        }
+        isel_emit(isel, "CLR", "C", NULL, NULL);
+        isel_emit(isel, "RLC", "A", NULL, NULL);
     }
+    emit_mov(isel, dst_lo, "A", NULL);
 
-    emit_mov(isel, "A", tcnt, NULL);
-    isel_emit(isel, "DEC", "A", NULL, NULL);
-    emit_mov(isel, tcnt, "A", NULL);
+    isel_emit(isel, "DEC", tcnt_reg, NULL, NULL);
     isel_emit(isel, "SJMP", l_loop, NULL, NULL);
     isel_emit(isel, lb_end, NULL, NULL, NULL);
 
     free(l_loop); free(l_end);
+
+    if (tcnt_tmp >= 0) free_temp_reg(isel, tcnt_tmp, 1);
 }
 
 void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {

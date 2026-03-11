@@ -57,6 +57,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next);
 /* 辅助函数：发射汇编指令 */
 void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* arg2, const char* ssa);
 
+void isel_emit_label(ISelContext* isel, const char* label);
+
 /* 辅助函数：生成标签 */
 char* isel_new_label(ISelContext* isel, const char* prefix);
 
