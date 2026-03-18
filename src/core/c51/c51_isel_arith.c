@@ -944,70 +944,181 @@ void emit_neg(ISelContext* isel, Instr* ins) {
 void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     ValueName src = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
-    /* 仅支持 8 位移位；删除对 16 位的支持 */
-    if (size != 1) {
-        fprintf(stderr, "c51 backend: 16-bit SHIFT not supported\n");
-        exit(1);
-    }
-
     int dst_reg = alloc_dest_reg(isel, ins, NULL, size, true);
-    const char* dst_lo = isel_reg_name(dst_reg);
+    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(dst_reg);
     emit_copy_value(isel, ins, src, dst_reg, size);
 
     int64_t imm = 0;
-    if (is_imm_operand(ins, &imm)) {
-        int cnt = (int)(imm & 0x1F);
-        for (int i = 0; i < cnt; i++) {
-            emit_mov(isel, "A", dst_lo, ins);
+    if (size == 1) {
+        if (is_imm_operand(ins, &imm)) {
+            int cnt = (int)(imm & 0x1F);
+            for (int i = 0; i < cnt; i++) {
+                emit_mov(isel, "A", dst_lo, ins);
                 if (is_shr) {
-                    isel_emit(isel, "CLR", "C", NULL, NULL);
+                    bool is_unsigned = false;
+                    if (ins && ins->type) {
+                        is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
+                    }
+                    if (is_unsigned) {
+                        isel_emit(isel, "CLR", "C", NULL, NULL);
+                    } else {
+                        isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+                    }
                     isel_emit(isel, "RRC", "A", NULL, NULL);
                 } else {
                     isel_emit(isel, "CLR", "C", NULL, NULL);
                     isel_emit(isel, "RLC", "A", NULL, NULL);
                 }
                 emit_mov(isel, dst_lo, "A", NULL);
+            }
+            return;
         }
+
+        ValueName cntv = get_src2_value(ins);
+        const char* tcnt = isel_get_lo_reg(isel, cntv);
+
+        /* 为计数分配临时寄存器，避免在第一个循环中破坏原始计数 */
+        int tcnt_tmp = alloc_temp_reg(isel, -1, 1);
+        const char* tcnt_reg = (tcnt_tmp >= 0) ? isel_reg_name(tcnt_tmp) : tcnt;
+        if (tcnt_tmp >= 0) {
+            emit_mov(isel, tcnt_reg, tcnt, NULL);
+        }
+
+        char* l_loop = isel_new_label(isel, "Lsh_loop");
+        char* l_end = isel_new_label(isel, "Lsh_end");
+        char lb_loop[64], lb_end[64];
+        snprintf(lb_loop, sizeof(lb_loop), "%s:", l_loop);
+        snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+
+        isel_emit(isel, lb_loop, NULL, NULL, NULL);
+        emit_mov(isel, "A", tcnt_reg, NULL);
+        isel_emit(isel, "JZ", l_end, NULL, NULL);
+
+        emit_mov(isel, "A", dst_lo, NULL);
+        if (is_shr) {
+            bool is_unsigned = false;
+            if (ins && ins->type) is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
+            if (is_unsigned) {
+                isel_emit(isel, "CLR", "C", NULL, NULL);
+            } else {
+                isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+            }
+            isel_emit(isel, "RRC", "A", NULL, NULL);
+        } else {
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            isel_emit(isel, "RLC", "A", NULL, NULL);
+        }
+        emit_mov(isel, dst_lo, "A", NULL);
+
+        isel_emit(isel, "DEC", tcnt_reg, NULL, NULL);
+        isel_emit(isel, "SJMP", l_loop, NULL, NULL);
+        isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+        free(l_loop); free(l_end);
+
+        if (tcnt_tmp >= 0) free_temp_reg(isel, tcnt_tmp, 1);
+        return;
+    } else if (size == 2) {
+        /* 16-bit shift: handle immediate and variable counts */
+        if (is_imm_operand(ins, &imm)) {
+            int cnt = (int)(imm & 0x1F);
+            bool is_unsigned = false;
+            if (ins && ins->type) is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
+            for (int i = 0; i < cnt; i++) {
+                if (is_shr) {
+                    if (is_unsigned) {
+                        /* logical right shift */
+                        emit_mov(isel, "A", dst_hi, NULL);
+                        isel_emit(isel, "CLR", "C", NULL, NULL);
+                        isel_emit(isel, "RRC", "A", NULL, NULL);
+                        emit_mov(isel, dst_hi, "A", NULL);
+                        emit_mov(isel, "A", dst_lo, NULL);
+                        isel_emit(isel, "RRC", "A", NULL, NULL);
+                        emit_mov(isel, dst_lo, "A", NULL);
+                    } else {
+                        /* arithmetic right shift */
+                        emit_mov(isel, "A", dst_hi, NULL);
+                        isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+                        isel_emit(isel, "RRC", "A", NULL, NULL);
+                        emit_mov(isel, dst_hi, "A", NULL);
+                        emit_mov(isel, "A", dst_lo, NULL);
+                        isel_emit(isel, "RRC", "A", NULL, NULL);
+                        emit_mov(isel, dst_lo, "A", NULL);
+                    }
+                } else {
+                    /* left shift */
+                    emit_mov(isel, "A", dst_lo, NULL);
+                    isel_emit(isel, "CLR", "C", NULL, NULL);
+                    isel_emit(isel, "RLC", "A", NULL, NULL);
+                    emit_mov(isel, dst_lo, "A", NULL);
+                    emit_mov(isel, "A", dst_hi, NULL);
+                    isel_emit(isel, "RLC", "A", NULL, NULL);
+                    emit_mov(isel, dst_hi, "A", NULL);
+                }
+            }
+            return;
+        }
+
+        ValueName cntv = get_src2_value(ins);
+        const char* tcnt = isel_get_lo_reg(isel, cntv);
+        int tcnt_tmp = alloc_temp_reg(isel, -1, 1);
+        const char* tcnt_reg = (tcnt_tmp >= 0) ? isel_reg_name(tcnt_tmp) : tcnt;
+        if (tcnt_tmp >= 0) emit_mov(isel, tcnt_reg, tcnt, NULL);
+
+        char* l_loop = isel_new_label(isel, "Lsh_loop16");
+        char* l_end = isel_new_label(isel, "Lsh_end16");
+        char lb_loop[64], lb_end[64];
+        snprintf(lb_loop, sizeof(lb_loop), "%s:", l_loop);
+        snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+
+        isel_emit(isel, lb_loop, NULL, NULL, NULL);
+        emit_mov(isel, "A", tcnt_reg, NULL);
+        isel_emit(isel, "JZ", l_end, NULL, NULL);
+
+        bool is_unsigned = false;
+        if (ins && ins->type) is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
+
+        if (is_shr) {
+            if (is_unsigned) {
+                emit_mov(isel, "A", dst_hi, NULL);
+                isel_emit(isel, "CLR", "C", NULL, NULL);
+                isel_emit(isel, "RRC", "A", NULL, NULL);
+                emit_mov(isel, dst_hi, "A", NULL);
+                emit_mov(isel, "A", dst_lo, NULL);
+                isel_emit(isel, "RRC", "A", NULL, NULL);
+                emit_mov(isel, dst_lo, "A", NULL);
+            } else {
+                emit_mov(isel, "A", dst_hi, NULL);
+                isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+                isel_emit(isel, "RRC", "A", NULL, NULL);
+                emit_mov(isel, dst_hi, "A", NULL);
+                emit_mov(isel, "A", dst_lo, NULL);
+                isel_emit(isel, "RRC", "A", NULL, NULL);
+                emit_mov(isel, dst_lo, "A", NULL);
+            }
+        } else {
+            emit_mov(isel, "A", dst_lo, NULL);
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            isel_emit(isel, "RLC", "A", NULL, NULL);
+            emit_mov(isel, dst_lo, "A", NULL);
+            emit_mov(isel, "A", dst_hi, NULL);
+            isel_emit(isel, "RLC", "A", NULL, NULL);
+            emit_mov(isel, dst_hi, "A", NULL);
+        }
+
+        isel_emit(isel, "DEC", tcnt_reg, NULL, NULL);
+        isel_emit(isel, "SJMP", l_loop, NULL, NULL);
+        isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+        free(l_loop); free(l_end);
+        if (tcnt_tmp >= 0) free_temp_reg(isel, tcnt_tmp, 1);
         return;
     }
 
-    ValueName cntv = get_src2_value(ins);
-    const char* tcnt = isel_get_lo_reg(isel, cntv);
-
-    /* 为计数分配临时寄存器，避免在第一个循环中破坏原始计数 */
-    int tcnt_tmp = alloc_temp_reg(isel, -1, 1);
-    const char* tcnt_reg = (tcnt_tmp >= 0) ? isel_reg_name(tcnt_tmp) : tcnt;
-    if (tcnt_tmp >= 0) {
-        emit_mov(isel, tcnt_reg, tcnt, NULL);
-    }
-
-    char* l_loop = isel_new_label(isel, "Lsh_loop");
-    char* l_end = isel_new_label(isel, "Lsh_end");
-    char lb_loop[64], lb_end[64];
-    snprintf(lb_loop, sizeof(lb_loop), "%s:", l_loop);
-    snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
-
-    isel_emit(isel, lb_loop, NULL, NULL, NULL);
-    emit_mov(isel, "A", tcnt_reg, NULL);
-    isel_emit(isel, "JZ", l_end, NULL, NULL);
-
-    emit_mov(isel, "A", dst_lo, NULL);
-    if (is_shr) {
-        isel_emit(isel, "CLR", "C", NULL, NULL);
-        isel_emit(isel, "RRC", "A", NULL, NULL);
-    } else {
-        isel_emit(isel, "CLR", "C", NULL, NULL);
-        isel_emit(isel, "RLC", "A", NULL, NULL);
-    }
-    emit_mov(isel, dst_lo, "A", NULL);
-
-    isel_emit(isel, "DEC", tcnt_reg, NULL, NULL);
-    isel_emit(isel, "SJMP", l_loop, NULL, NULL);
-    isel_emit(isel, lb_end, NULL, NULL, NULL);
-
-    free(l_loop); free(l_end);
-
-    if (tcnt_tmp >= 0) free_temp_reg(isel, tcnt_tmp, 1);
+    /* other sizes unsupported */
+    fprintf(stderr, "c51 backend: unsupported SHIFT size %d\n", size);
+    exit(1);
 }
 
 void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
@@ -1018,20 +1129,12 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(dst_reg);
 
-    if (size == 2) {
-        fprintf(stderr, "c51 backend: 16-bit MUL not supported\n");
-        exit(1);
-    }
-    emit_mov(isel, dst_lo, "#0", ins);
-
-    int t = alloc_temp_reg(isel, -1, size == 2 ? 2 : 1);
-    const char* t_lo = (t >= 0) ? isel_reg_name(t + (size == 2 ? 1 : 0)) : "A";
-    const char* t_hi = (t >= 0) ? isel_reg_name(t) : "A";
-    emit_mov(isel, t_lo, isel_get_lo_reg(isel, b), NULL);
-    if (size == 2) emit_mov(isel, t_hi, isel_get_hi_reg(isel, b), NULL);
-
     if (size == 1) {
+        emit_mov(isel, dst_lo, "#0", ins);
+        int t = alloc_temp_reg(isel, -1, 1);
+        const char* t_lo = (t >= 0) ? isel_reg_name(t) : "B";
         if (t >= 0) {
+            emit_mov(isel, t_lo, isel_get_lo_reg(isel, b), NULL);
             emit_mov(isel, "B", t_lo, NULL);
             free_temp_reg(isel, t, 1);
         } else {
@@ -1041,10 +1144,47 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
         isel_emit(isel, "MUL", "AB", NULL, NULL);
         emit_mov(isel, dst_lo, "A", ins);
         return;
-    }
+    } else if (size == 2) {
+        // compute low 16 bits of 16x16 multiply using three 8x8 MULs
+        const char* alo = isel_get_lo_reg(isel, a);
+        const char* ahi = isel_get_hi_reg(isel, a);
+        const char* blo = isel_get_lo_reg(isel, b);
+        const char* bhi = isel_get_hi_reg(isel, b);
 
-    /* 16-bit path removed above; only 8-bit (size==1) supported here */
-    if (t >= 0) free_temp_reg(isel, t, size == 2 ? 2 : 1);
+        int t_acc = alloc_temp_reg(isel, -1, 1); // accumulator for high byte
+        int t_tmp = alloc_temp_reg(isel, -1, 1); // temp for p1/p2 low
+        const char* acc = (t_acc >= 0) ? isel_reg_name(t_acc) : "R0";
+        const char* tpp = (t_tmp >= 0) ? isel_reg_name(t_tmp) : "R1";
+
+        // p0 = alo * blo
+        emit_mov(isel, "B", blo, NULL);
+        emit_mov(isel, "A", alo, ins);
+        isel_emit(isel, "MUL", "AB", NULL, NULL); // A=p0_low, B=p0_high
+        emit_mov(isel, dst_lo, "A", ins);
+        emit_mov(isel, acc, "B", NULL); // acc = p0_high
+
+        // p1 = ahi * blo
+        emit_mov(isel, "B", blo, NULL);
+        emit_mov(isel, "A", ahi, NULL);
+        isel_emit(isel, "MUL", "AB", NULL, NULL); // A=p1_low
+        emit_mov(isel, tpp, "A", NULL); // tpp = p1_low
+        emit_mov(isel, "A", acc, NULL);
+        isel_emit(isel, "ADD", "A", tpp, NULL);
+        emit_mov(isel, acc, "A", NULL);
+
+        // p2 = alo * bhi
+        emit_mov(isel, "B", bhi, NULL);
+        emit_mov(isel, "A", alo, NULL);
+        isel_emit(isel, "MUL", "AB", NULL, NULL); // A=p2_low
+        emit_mov(isel, tpp, "A", NULL); // tpp = p2_low
+        emit_mov(isel, "A", acc, NULL);
+        isel_emit(isel, "ADD", "A", tpp, NULL);
+        emit_mov(isel, dst_hi, "A", NULL);
+
+        if (t_acc >= 0) free_temp_reg(isel, t_acc, 1);
+        if (t_tmp >= 0) free_temp_reg(isel, t_tmp, 1);
+        return;
+    }
 }
 
 void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
@@ -1052,123 +1192,336 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
     ValueName den = get_src2_value(ins);
     int size = ins->type ? ins->type->size : 1;
 
-    // 仅支持 8 位操作
-    if (size != 1) {
-        fprintf(stderr, "c51 backend: only 8-bit DIV/MOD supported\n");
-        exit(1);
-    }
+    int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(dst_reg);
 
-    int dst_reg = alloc_reg_for_value(isel, ins->dest, 1);
-    const char* dst_lo = isel_reg_name(dst_reg);
-
-    // 根据类型判断是否为无符号（此处假设有 type_is_signed 函数）
     bool is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
 
-    if (is_unsigned) {
-        // ----- 无符号除法 / 取模 -----
-        emit_mov(isel, "A", isel_get_lo_reg(isel, num), ins);
-        emit_mov(isel, "B", isel_get_lo_reg(isel, den), NULL);
-        isel_emit(isel, "DIV", "AB", NULL, NULL);
-        if (want_mod)
-            emit_mov(isel, dst_lo, "B", ins);
-        else
-            emit_mov(isel, dst_lo, "A", ins);
-        return;
-    }
+    if (size == 1) {
+        if (is_unsigned) {
+            // unsigned 8-bit: use DIV AB
+            emit_mov(isel, "A", isel_get_lo_reg(isel, num), ins);
+            emit_mov(isel, "B", isel_get_lo_reg(isel, den), NULL);
+            isel_emit(isel, "DIV", "AB", NULL, NULL);
+            if (want_mod)
+                emit_mov(isel, dst_lo, "B", ins);
+            else
+                emit_mov(isel, dst_lo, "A", ins);
+            return;
+        }
 
-    // ----- 有符号除法 / 取模 -----
-    // 分配临时寄存器：num副本、den副本、符号标志
-    int tr  = alloc_temp_reg(isel, -1, 1);   // num_tmp
-    int td  = alloc_temp_reg(isel, -1, 1);   // den_tmp
-    int tsn = alloc_temp_reg(isel, -1, 1);   // s_num
-    int tsd = alloc_temp_reg(isel, -1, 1);   // s_den
+        // signed 8-bit: existing algorithm (abs -> DIV AB -> fix signs)
+        int tr  = alloc_temp_reg(isel, -1, 1);   // num_tmp
+        int td  = alloc_temp_reg(isel, -1, 1);   // den_tmp
+        int tsn = alloc_temp_reg(isel, -1, 1);   // s_num
+        int tsd = alloc_temp_reg(isel, -1, 1);   // s_den
 
-    const char* num_tmp = (tr  >= 0) ? isel_reg_name(tr)  : "R1";
-    const char* den_tmp = (td  >= 0) ? isel_reg_name(td)  : "R2";
-    const char* s_num   = (tsn >= 0) ? isel_reg_name(tsn) : "R3";
-    const char* s_den   = (tsd >= 0) ? isel_reg_name(tsd) : "R4";
+        const char* num_tmp = (tr  >= 0) ? isel_reg_name(tr)  : "R1";
+        const char* den_tmp = (td  >= 0) ? isel_reg_name(td)  : "R2";
+        const char* s_num   = (tsn >= 0) ? isel_reg_name(tsn) : "R3";
+        const char* s_den   = (tsd >= 0) ? isel_reg_name(tsd) : "R4";
 
-    // 生成标签
-    char* l_num_pos    = isel_new_label(isel, "Lnum_pos");
-    char* l_den_pos    = isel_new_label(isel, "Lden_pos");
-    char* l_no_negq    = isel_new_label(isel, "Lno_negq");
-    char* l_no_rem_neg = isel_new_label(isel, "Lno_rem_neg");
+        char* l_num_pos    = isel_new_label(isel, "Lnum_pos");
+        char* l_den_pos    = isel_new_label(isel, "Lden_pos");
+        char* l_no_negq    = isel_new_label(isel, "Lno_negq");
+        char* l_no_rem_neg = isel_new_label(isel, "Lno_rem_neg");
 
-    // 初始化符号为 0（正数）
-    emit_mov(isel, s_num, "#0", NULL);
-    emit_mov(isel, s_den, "#0", NULL);
+        emit_mov(isel, s_num, "#0", NULL);
+        emit_mov(isel, s_den, "#0", NULL);
 
-    // --- 处理被除数 num ---
-    emit_mov(isel, num_tmp, isel_get_lo_reg(isel, num), NULL);
-    emit_mov(isel, "A", num_tmp, NULL);
-    isel_emit(isel, "ANL", "A", "#128", NULL);       // 测试符号位
-    isel_emit(isel, "JZ", l_num_pos, NULL, NULL);
-    // num 为负：取绝对值并记录符号
-    emit_mov(isel, "A", num_tmp, NULL);
-    isel_emit(isel, "CPL", "A", NULL, NULL);
-    isel_emit(isel, "INC", "A", NULL, NULL);
-    emit_mov(isel, num_tmp, "A", NULL);
-    isel_emit(isel, "MOV", s_num, "#1", NULL);
-    isel_emit(isel, l_num_pos, NULL, NULL, NULL);
-
-    // --- 处理除数 den ---
-    emit_mov(isel, den_tmp, isel_get_lo_reg(isel, den), NULL);
-    emit_mov(isel, "A", den_tmp, NULL);
-    isel_emit(isel, "ANL", "A", "#128", NULL);
-    isel_emit(isel, "JZ", l_den_pos, NULL, NULL);
-    // den 为负：取绝对值并记录符号
-    emit_mov(isel, "A", den_tmp, NULL);
-    isel_emit(isel, "CPL", "A", NULL, NULL);
-    isel_emit(isel, "INC", "A", NULL, NULL);
-    emit_mov(isel, den_tmp, "A", NULL);
-    isel_emit(isel, "MOV", s_den, "#1", NULL);
-    isel_emit(isel, l_den_pos, NULL, NULL, NULL);
-
-    // --- 执行无符号除法（绝对值）---
-    emit_mov(isel, "A", num_tmp, NULL);
-    emit_mov(isel, "B", den_tmp, NULL);
-    isel_emit(isel, "DIV", "AB", NULL, NULL);   // 商在 A，余数在 B
-
-    if (want_mod) {
-        // 需要余数：根据被除数符号调整
-        emit_mov(isel, "A", s_num, NULL);
-        isel_emit(isel, "JZ", l_no_rem_neg, NULL, NULL);
-        // 被除数为负：余数取反加一
-        emit_mov(isel, "A", "B", NULL);
-        isel_emit(isel, "CPL", "A", NULL, NULL);
-        isel_emit(isel, "INC", "A", NULL, NULL);
-        emit_mov(isel, "B", "A", NULL);
-        isel_emit(isel, l_no_rem_neg, NULL, NULL, NULL);
-        // 存储余数
-        emit_mov(isel, dst_lo, "B", ins);
-    } else {
-        // 需要商：先保存商，再根据符号异或调整
-        emit_mov(isel, num_tmp, "A", NULL);          // 暂存商
-
-        // 计算符号异或 (s_num ^ s_den)
-        emit_mov(isel, "A", s_num, NULL);
-        isel_emit(isel, "XRL", "A", s_den, NULL);
-        isel_emit(isel, "JZ", l_no_negq, NULL, NULL);
-        // 异或非零：商取反加一
+        // num abs
+        emit_mov(isel, num_tmp, isel_get_lo_reg(isel, num), NULL);
+        emit_mov(isel, "A", num_tmp, NULL);
+        isel_emit(isel, "ANL", "A", "#128", NULL);
+        isel_emit(isel, "JZ", l_num_pos, NULL, NULL);
         emit_mov(isel, "A", num_tmp, NULL);
         isel_emit(isel, "CPL", "A", NULL, NULL);
         isel_emit(isel, "INC", "A", NULL, NULL);
         emit_mov(isel, num_tmp, "A", NULL);
-        isel_emit(isel, l_no_negq, NULL, NULL, NULL);
+        isel_emit(isel, "MOV", s_num, "#1", NULL);
+        isel_emit(isel, l_num_pos, NULL, NULL, NULL);
 
-        // 存储商
-        emit_mov(isel, dst_lo, num_tmp, ins);
+        // den abs
+        emit_mov(isel, den_tmp, isel_get_lo_reg(isel, den), NULL);
+        emit_mov(isel, "A", den_tmp, NULL);
+        isel_emit(isel, "ANL", "A", "#128", NULL);
+        isel_emit(isel, "JZ", l_den_pos, NULL, NULL);
+        emit_mov(isel, "A", den_tmp, NULL);
+        isel_emit(isel, "CPL", "A", NULL, NULL);
+        isel_emit(isel, "INC", "A", NULL, NULL);
+        emit_mov(isel, den_tmp, "A", NULL);
+        isel_emit(isel, "MOV", s_den, "#1", NULL);
+        isel_emit(isel, l_den_pos, NULL, NULL, NULL);
+
+        // divide
+        emit_mov(isel, "A", num_tmp, NULL);
+        emit_mov(isel, "B", den_tmp, NULL);
+        isel_emit(isel, "DIV", "AB", NULL, NULL);
+
+        if (want_mod) {
+            emit_mov(isel, "A", s_num, NULL);
+            isel_emit(isel, "JZ", l_no_rem_neg, NULL, NULL);
+            emit_mov(isel, "A", "B", NULL);
+            isel_emit(isel, "CPL", "A", NULL, NULL);
+            isel_emit(isel, "INC", "A", NULL, NULL);
+            emit_mov(isel, "B", "A", NULL);
+            isel_emit(isel, l_no_rem_neg, NULL, NULL, NULL);
+            emit_mov(isel, dst_lo, "B", ins);
+        } else {
+            emit_mov(isel, num_tmp, "A", NULL);
+            emit_mov(isel, "A", s_num, NULL);
+            isel_emit(isel, "XRL", "A", s_den, NULL);
+            isel_emit(isel, "JZ", l_no_negq, NULL, NULL);
+            emit_mov(isel, "A", num_tmp, NULL);
+            isel_emit(isel, "CPL", "A", NULL, NULL);
+            isel_emit(isel, "INC", "A", NULL, NULL);
+            emit_mov(isel, num_tmp, "A", NULL);
+            isel_emit(isel, l_no_negq, NULL, NULL, NULL);
+            emit_mov(isel, dst_lo, num_tmp, ins);
+        }
+
+        if (tr  >= 0) free_temp_reg(isel, tr,  1);
+        if (td  >= 0) free_temp_reg(isel, td,  1);
+        if (tsn >= 0) free_temp_reg(isel, tsn, 1);
+        if (tsd >= 0) free_temp_reg(isel, tsd, 1);
+        free(l_num_pos); free(l_den_pos); free(l_no_negq); free(l_no_rem_neg);
+        return;
+    } else if (size == 2) {
+        // 16-bit division/mod: implement simple unsigned long division via repeated subtraction
+        // temps: rem (2), den_tmp (2), quotient in dst, flags for signs if signed
+        int tr  = alloc_temp_reg(isel, -1, 2); // rem
+        int td  = alloc_temp_reg(isel, -1, 2); // den_tmp
+        int tsn = -1, tsd = -1;
+        const char* rem_lo = (tr >= 0) ? isel_reg_name(tr + 1) : "R1";
+        const char* rem_hi = (tr >= 0) ? isel_reg_name(tr)     : "R2";
+        const char* den_lo = (td >= 0) ? isel_reg_name(td + 1) : "R3";
+        const char* den_hi = (td >= 0) ? isel_reg_name(td)     : "R4";
+
+        const char* q_lo = dst_lo;
+        const char* q_hi = dst_hi;
+
+        if (is_unsigned) {
+            // copy operands
+            emit_mov(isel, rem_lo, isel_get_lo_reg(isel, num), NULL);
+            emit_mov(isel, rem_hi, isel_get_hi_reg(isel, num), NULL);
+            emit_mov(isel, den_lo, isel_get_lo_reg(isel, den), NULL);
+            emit_mov(isel, den_hi, isel_get_hi_reg(isel, den), NULL);
+            // zero quotient
+            emit_mov(isel, q_lo, "#0", NULL);
+            emit_mov(isel, q_hi, "#0", NULL);
+
+            char* l_check = isel_new_label(isel, "Ldiv_check");
+            char* l_done  = isel_new_label(isel, "Ldiv_done");
+            char lb_check[64], lb_done[64];
+            snprintf(lb_check, sizeof(lb_check), "%s:", l_check);
+            snprintf(lb_done, sizeof(lb_done), "%s:", l_done);
+
+            isel_emit(isel, lb_check, NULL, NULL, NULL);
+            // compare rem and den (unsigned): if rem < den -> done; if rem >= den -> subtract
+            emit_mov(isel, "A", rem_hi, NULL);
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            isel_emit(isel, "SUBB", "A", den_hi, NULL);
+            isel_emit(isel, "JC", l_done, NULL, NULL); // rem_hi < den_hi -> done
+            char* l_eq_high = isel_new_label(isel, "Ldiv_eq_high");
+            isel_emit(isel, "JZ", l_eq_high, NULL, NULL); // equal high -> check low
+
+            // rem_hi > den_hi -> subtract
+            // subtract den from rem (16-bit)
+            emit_mov(isel, "A", rem_lo, NULL);
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            isel_emit(isel, "SUBB", "A", den_lo, NULL);
+            emit_mov(isel, rem_lo, "A", NULL);
+            emit_mov(isel, "A", rem_hi, NULL);
+            isel_emit(isel, "SUBB", "A", den_hi, NULL);
+            emit_mov(isel, rem_hi, "A", NULL);
+
+            // increment quotient (16-bit)
+            emit_mov(isel, "A", q_lo, NULL);
+            isel_emit(isel, "ADD", "A", "#1", NULL);
+            emit_mov(isel, q_lo, "A", NULL);
+            emit_mov(isel, "A", q_hi, NULL);
+            isel_emit(isel, "ADDC", "A", "#0", NULL);
+            emit_mov(isel, q_hi, "A", NULL);
+
+            // loop back
+            isel_emit(isel, "SJMP", l_check, NULL, NULL);
+            isel_emit(isel, lb_done, NULL, NULL, NULL);
+            isel_emit(isel, l_eq_high, NULL, NULL, NULL);
+            // equal high bytes: compare low
+            emit_mov(isel, "A", rem_lo, NULL);
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            isel_emit(isel, "SUBB", "A", den_lo, NULL);
+            isel_emit(isel, "JC", l_done, NULL, NULL); // rem_lo < den_lo -> done
+            // else fallthrough to subtract
+
+            // store result
+            if (want_mod) {
+                emit_mov(isel, q_lo, rem_lo, ins);
+                emit_mov(isel, q_hi, rem_hi, NULL);
+            } else {
+                emit_mov(isel, dst_lo, q_lo, ins);
+                emit_mov(isel, dst_hi, q_hi, NULL);
+            }
+
+            free(l_check); free(l_done);
+            if (tr >= 0) free_temp_reg(isel, tr, 2);
+            if (td >= 0) free_temp_reg(isel, td, 2);
+            return;
+        } else {
+            // signed 16-bit: take abs of operands into rem/den_tmp, record signs
+            tsn = alloc_temp_reg(isel, -1, 1);
+            tsd = alloc_temp_reg(isel, -1, 1);
+            const char* s_num = (tsn >= 0) ? isel_reg_name(tsn) : "R5";
+            const char* s_den = (tsd >= 0) ? isel_reg_name(tsd) : "R6";
+            char* l_num_pos = isel_new_label(isel, "Lnum_pos16");
+            char* l_den_pos = isel_new_label(isel, "Lden_pos16");
+            char lb_tmp[64];
+
+            emit_mov(isel, s_num, "#0", NULL);
+            emit_mov(isel, s_den, "#0", NULL);
+
+            // load num into rem
+            emit_mov(isel, rem_lo, isel_get_lo_reg(isel, num), NULL);
+            emit_mov(isel, rem_hi, isel_get_hi_reg(isel, num), NULL);
+            // test sign: check rem_hi & 0x80
+            emit_mov(isel, "A", rem_hi, NULL);
+            isel_emit(isel, "ANL", "A", "#128", NULL);
+            isel_emit(isel, "JZ", l_num_pos, NULL, NULL);
+            // negative: rem = -rem (two's complement 16)
+            emit_mov(isel, "A", rem_lo, NULL);
+            isel_emit(isel, "CPL", "A", NULL, NULL);
+            emit_mov(isel, rem_lo, "A", NULL);
+            emit_mov(isel, "A", rem_hi, NULL);
+            isel_emit(isel, "CPL", "A", NULL, NULL);
+            emit_mov(isel, rem_hi, "A", NULL);
+            // add 1 to low, propagate
+            emit_mov(isel, "A", rem_lo, NULL);
+            isel_emit(isel, "ADD", "A", "#1", NULL);
+            emit_mov(isel, rem_lo, "A", NULL);
+            emit_mov(isel, "A", rem_hi, NULL);
+            isel_emit(isel, "ADDC", "A", "#0", NULL);
+            emit_mov(isel, rem_hi, "A", NULL);
+            isel_emit(isel, "MOV", s_num, "#1", NULL);
+            isel_emit(isel, l_num_pos, NULL, NULL, NULL);
+
+            // load den into den_tmp
+            emit_mov(isel, den_lo, isel_get_lo_reg(isel, den), NULL);
+            emit_mov(isel, den_hi, isel_get_hi_reg(isel, den), NULL);
+            emit_mov(isel, "A", den_hi, NULL);
+            isel_emit(isel, "ANL", "A", "#128", NULL);
+            isel_emit(isel, "JZ", l_den_pos, NULL, NULL);
+            emit_mov(isel, "A", den_lo, NULL);
+            isel_emit(isel, "CPL", "A", NULL, NULL);
+            emit_mov(isel, den_lo, "A", NULL);
+            emit_mov(isel, "A", den_hi, NULL);
+            isel_emit(isel, "CPL", "A", NULL, NULL);
+            emit_mov(isel, den_hi, "A", NULL);
+            emit_mov(isel, "A", den_lo, NULL);
+            isel_emit(isel, "ADD", "A", "#1", NULL);
+            emit_mov(isel, den_lo, "A", NULL);
+            emit_mov(isel, "A", den_hi, NULL);
+            isel_emit(isel, "ADDC", "A", "#0", NULL);
+            emit_mov(isel, den_hi, "A", NULL);
+            isel_emit(isel, "MOV", s_den, "#1", NULL);
+            isel_emit(isel, l_den_pos, NULL, NULL, NULL);
+
+            // perform unsigned division on rem/den_tmp into q
+            emit_mov(isel, q_lo, "#0", NULL);
+            emit_mov(isel, q_hi, "#0", NULL);
+
+            char* l_check = isel_new_label(isel, "Ldiv_check16");
+            char* l_done  = isel_new_label(isel, "Ldiv_done16");
+            char lb_check[64], lb_done[64];
+            snprintf(lb_check, sizeof(lb_check), "%s:", l_check);
+            snprintf(lb_done, sizeof(lb_done), "%s:", l_done);
+
+            isel_emit(isel, lb_check, NULL, NULL, NULL);
+            // compare rem and den (unsigned): if rem < den -> done
+            emit_mov(isel, "A", rem_hi, NULL);
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            isel_emit(isel, "SUBB", "A", den_hi, NULL);
+            isel_emit(isel, "JC", l_done, NULL, NULL);
+            char* l_eq_high2 = isel_new_label(isel, "Ldiv_eq_high2");
+            isel_emit(isel, "JZ", l_eq_high2, NULL, NULL);
+
+            // subtract den from rem
+            emit_mov(isel, "A", rem_lo, NULL);
+            isel_emit(isel, "CLR", "C", NULL, NULL);
+            isel_emit(isel, "SUBB", "A", den_lo, NULL);
+            emit_mov(isel, rem_lo, "A", NULL);
+            emit_mov(isel, "A", rem_hi, NULL);
+            isel_emit(isel, "SUBB", "A", den_hi, NULL);
+            emit_mov(isel, rem_hi, "A", NULL);
+
+            // inc quotient
+            emit_mov(isel, "A", q_lo, NULL);
+            isel_emit(isel, "ADD", "A", "#1", NULL);
+            emit_mov(isel, q_lo, "A", NULL);
+            emit_mov(isel, "A", q_hi, NULL);
+            isel_emit(isel, "ADDC", "A", "#0", NULL);
+            emit_mov(isel, q_hi, "A", NULL);
+
+            isel_emit(isel, "SJMP", l_check, NULL, NULL);
+            isel_emit(isel, lb_done, NULL, NULL, NULL);
+
+            if (want_mod) {
+                // remainder in rem; if original numerator negative, negate rem
+                char* l_rem_pos = isel_new_label(isel, "Lrem_pos16");
+                emit_mov(isel, "A", s_num, NULL);
+                isel_emit(isel, "JZ", l_rem_pos, NULL, NULL);
+                // negate rem
+                emit_mov(isel, "A", rem_lo, NULL);
+                isel_emit(isel, "CPL", "A", NULL, NULL);
+                emit_mov(isel, rem_lo, "A", NULL);
+                emit_mov(isel, "A", rem_hi, NULL);
+                isel_emit(isel, "CPL", "A", NULL, NULL);
+                emit_mov(isel, rem_hi, "A", NULL);
+                emit_mov(isel, "A", rem_lo, NULL);
+                isel_emit(isel, "ADD", "A", "#1", NULL);
+                emit_mov(isel, rem_lo, "A", NULL);
+                emit_mov(isel, "A", rem_hi, NULL);
+                isel_emit(isel, "ADDC", "A", "#0", NULL);
+                emit_mov(isel, rem_hi, "A", NULL);
+                isel_emit(isel, l_rem_pos, NULL, NULL, NULL);
+                emit_mov(isel, dst_lo, rem_lo, ins);
+                emit_mov(isel, dst_hi, rem_hi, NULL);
+            } else {
+                // quotient in q; if signs xor, negate quotient
+                char* l_q_pos = isel_new_label(isel, "Lq_pos16");
+                emit_mov(isel, "A", s_num, NULL);
+                isel_emit(isel, "XRL", "A", s_den, NULL);
+                isel_emit(isel, "JZ", l_q_pos, NULL, NULL);
+                // negate q
+                emit_mov(isel, "A", q_lo, NULL);
+                isel_emit(isel, "CPL", "A", NULL, NULL);
+                emit_mov(isel, q_lo, "A", NULL);
+                emit_mov(isel, "A", q_hi, NULL);
+                isel_emit(isel, "CPL", "A", NULL, NULL);
+                emit_mov(isel, q_hi, "A", NULL);
+                emit_mov(isel, "A", q_lo, NULL);
+                isel_emit(isel, "ADD", "A", "#1", NULL);
+                emit_mov(isel, q_lo, "A", NULL);
+                emit_mov(isel, "A", q_hi, NULL);
+                isel_emit(isel, "ADDC", "A", "#0", NULL);
+                emit_mov(isel, q_hi, "A", NULL);
+                isel_emit(isel, l_q_pos, NULL, NULL, NULL);
+                emit_mov(isel, dst_lo, q_lo, ins);
+                emit_mov(isel, dst_hi, q_hi, NULL);
+            }
+
+            if (tr >= 0) free_temp_reg(isel, tr, 2);
+            if (td >= 0) free_temp_reg(isel, td, 2);
+            if (tsn >= 0) free_temp_reg(isel, tsn, 1);
+            if (tsd >= 0) free_temp_reg(isel, tsd, 1);
+            free(l_check); free(l_done);
+            free(l_num_pos); free(l_den_pos);
+            return;
+        }
     }
 
-    // --- 释放资源 ---
-    if (tr  >= 0) free_temp_reg(isel, tr,  1);
-    if (td  >= 0) free_temp_reg(isel, td,  1);
-    if (tsn >= 0) free_temp_reg(isel, tsn, 1);
-    if (tsd >= 0) free_temp_reg(isel, tsd, 1);
-    free(l_num_pos);
-    free(l_den_pos);
-    free(l_no_negq);
-    free(l_no_rem_neg);
+    fprintf(stderr, "c51 backend: only 8/16-bit DIV/MOD supported\n");
+    exit(1);
 }
 
 void emit_select(ISelContext* isel, Instr* ins) {
