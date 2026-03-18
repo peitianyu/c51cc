@@ -84,6 +84,17 @@ void emit_lnot(ISelContext* isel, Instr* ins, Instr* next);
 void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next);
 void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt);
 void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge);
+
+/* Signed compare helper codes used by C51 isel */
+enum {
+    SIGNED_CMP_LT = 0,
+    SIGNED_CMP_GT = 1,
+    SIGNED_CMP_LE = 2,
+    SIGNED_CMP_GE = 3,
+};
+
+void emit_signed_cmp8_result(ISelContext* isel, Instr* ins, int dst_reg, int size, ValueName lhs, ValueName rhs, int cmp_type);
+bool is_unsigned_compare(ISelContext* isel, ValueName a, ValueName b);
 void emit_neg(ISelContext* isel, Instr* ins);
 void emit_shift(ISelContext* isel, Instr* ins, bool is_shr);
 void emit_mul(ISelContext* isel, Instr* ins, Instr* next);
