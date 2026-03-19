@@ -1938,16 +1938,18 @@ void ast_to_ssa(SSABuild *b, Ast *ast) {
 
 static const char* get_type_str(Ctype *type) {
     if (!type) return "int";
+    CtypeAttr a = get_attr(type->attr);
+    bool uns = a.ctype_unsigned;
     switch (type->type) {
     case CTYPE_VOID: return "void";
-    case CTYPE_BOOL: return "bool";
-    case CTYPE_CHAR: return "char";
-    case CTYPE_INT: return "int";
-    case CTYPE_LONG: return "long";
+    case CTYPE_BOOL: return uns ? "unsigned bool" : "bool";
+    case CTYPE_CHAR: return uns ? "unsigned char" : "char";
+    case CTYPE_INT: return uns ? "unsigned int" : "int";
+    case CTYPE_LONG: return uns ? "unsigned long" : "long";
     case CTYPE_FLOAT: return "float";
     case CTYPE_DOUBLE: return "double";
     case CTYPE_PTR: return "ptr";
-    default: return "int";
+    default: return uns ? "unsigned int" : "int";
     }
 }
 
