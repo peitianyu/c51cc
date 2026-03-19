@@ -6,6 +6,13 @@
 
 #include "c51_isel_regalloc.h"
 
+static void store_spilled_dest_if_needed(ISelContext* isel, ValueName val, int reg, int size, Instr* ins) {
+    if (!isel || val <= 0 || reg < 0) return;
+    if (isel_value_is_spilled(isel, val)) {
+        isel_store_spill_from_reg(isel, val, reg, size, ins);
+    }
+}
+
 void emit_const(ISelContext* isel, Instr* ins) {
     int size = ins->type ? ins->type->size : 1;
     int val = (int)(ins->imm.ival & 0xFFFF);
@@ -21,19 +28,23 @@ void emit_const(ISelContext* isel, Instr* ins) {
     }
 
     int reg = alloc_reg_for_value(isel, ins->dest, size);
+    int phys_reg = reg;
+    if (phys_reg < 0) phys_reg = 0;
 
     if (size == 1) {
         char imm_str[16];
         snprintf(imm_str, sizeof(imm_str), "#%d", val & 0xFF);
-        emit_mov(isel, isel_reg_name(reg), imm_str, ins);
+        emit_mov(isel, isel_reg_name(phys_reg), imm_str, ins);
     } else if (size == 2) {
         char imm_high[16], imm_low[16];
         snprintf(imm_high, sizeof(imm_high), "#%d", (val >> 8) & 0xFF);
         snprintf(imm_low, sizeof(imm_low), "#%d", val & 0xFF);
 
-        emit_mov(isel, isel_reg_name(reg), imm_high, ins);
-        emit_mov(isel, isel_reg_name(reg + 1), imm_low, ins);
+        emit_mov(isel, isel_reg_name(phys_reg), imm_high, ins);
+        emit_mov(isel, isel_reg_name(phys_reg + 1), imm_low, ins);
     }
+
+    store_spilled_dest_if_needed(isel, ins->dest, phys_reg, size, ins);
 
     if (isel) {
         isel->last_const_reg = reg;
@@ -48,6 +59,9 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     int src1_size = get_value_size(isel, src1);
     int64_t imm_val;
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
+    ValueName src2 = src2_is_imm ? -1 : get_src2_value(ins);
+    const char* src2_sym = (!src2_is_imm) ? lookup_value_addr_symbol(isel, src2) : NULL;
+    bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == -3;
 
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
 
@@ -57,9 +71,10 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         free(k);
         if (addrname && src2_is_imm) {
             int addr_dst = alloc_reg_for_value(isel, ins->dest, 2);
-            if (addr_dst < 0) addr_dst = 0;
-            const char* dst_hi = isel_reg_name(addr_dst);
-            const char* dst_lo = isel_reg_name(addr_dst + 1);
+            int phys_addr_dst = addr_dst;
+            if (phys_addr_dst < 0) phys_addr_dst = 0;
+            const char* dst_hi = isel_reg_name(phys_addr_dst);
+            const char* dst_lo = isel_reg_name(phys_addr_dst + 1);
             emit_mov(isel, dst_hi, isel_get_hi_reg(isel, src1), ins);
             emit_mov(isel, dst_lo, isel_get_lo_reg(isel, src1), NULL);
 
@@ -93,12 +108,16 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
                 char* key = int_to_key(ins->dest);
                 dict_put(isel->ctx->value_to_reg, key, regp);
             }
+            store_spilled_dest_if_needed(isel, ins->dest, phys_addr_dst, 2, ins);
             return;
         }
     }
     if (dst_reg < 0) dst_reg = 0;
 
     const char* src1_lo = isel_get_lo_reg(isel, src1);
+    if (src2_spilled_mem) {
+        emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
+    }
     emit_mov(isel, "A", src1_lo, ins);
 
     if (src2_is_imm) {
@@ -120,9 +139,12 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
             free(ssa);
         }
     } else {
-        ValueName src2 = get_src2_value(ins);
-        const char* src2_lo = isel_get_lo_reg(isel, src2);
-        isel_emit(isel, "ADD", "A", src2_lo, NULL);
+        if (src2_spilled_mem) {
+            isel_emit(isel, "ADD", "A", "B", NULL);
+        } else {
+            const char* src2_lo = isel_get_lo_reg(isel, src2);
+            isel_emit(isel, "ADD", "A", src2_lo, NULL);
+        }
     }
 
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
@@ -143,11 +165,15 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
             snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
             isel_emit(isel, "ADDC", "A", imm_str, NULL);
         } else {
-            ValueName src2 = get_src2_value(ins);
             int src2_size = get_value_size(isel, src2);
             if (src2_size == 2) {
-                const char* src2_hi = isel_get_hi_reg(isel, src2);
-                isel_emit(isel, "ADDC", "A", src2_hi, NULL);
+                if (src2_spilled_mem) {
+                    emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
+                    isel_emit(isel, "ADDC", "A", "B", NULL);
+                } else {
+                    const char* src2_hi = isel_get_hi_reg(isel, src2);
+                    isel_emit(isel, "ADDC", "A", src2_hi, NULL);
+                }
             } else {
                 isel_emit(isel, "ADDC", "A", "#0", NULL);
             }
@@ -155,6 +181,8 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
 
         emit_mov(isel, dst_hi, "A", NULL);
     }
+
+    store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
 
     if (next && next->op == IROP_RET) {
         const char* ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
@@ -206,6 +234,8 @@ void emit_neg(ISelContext* isel, Instr* ins) {
         isel_emit(isel, "SUBB", "A", src_hi, NULL);
         emit_mov(isel, dst_hi, "A", NULL);
     }
+
+    store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
 }
 
 void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
@@ -285,6 +315,7 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
         free(l_loop); free(l_end);
 
         if (tcnt_tmp >= 0) free_temp_reg(isel, tcnt_tmp, 1);
+        store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
         return;
     } else if (size == 2) {
         /* 16-bit shift: handle immediate and variable counts */
@@ -324,6 +355,7 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
                     emit_mov(isel, dst_hi, "A", NULL);
                 }
             }
+            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
             return;
         }
 
@@ -380,6 +412,7 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
 
         free(l_loop); free(l_end);
         if (tcnt_tmp >= 0) free_temp_reg(isel, tcnt_tmp, 1);
+        store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
         return;
     }
 
@@ -410,6 +443,7 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
         emit_mov(isel, "A", isel_get_lo_reg(isel, a), ins);
         isel_emit(isel, "MUL", "AB", NULL, NULL);
         emit_mov(isel, dst_lo, "A", ins);
+        store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
         return;
     } else if (size == 2) {
         // compute low 16 bits of 16x16 multiply using three 8x8 MULs
@@ -450,6 +484,7 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
 
         if (t_acc >= 0) free_temp_reg(isel, t_acc, 1);
         if (t_tmp >= 0) free_temp_reg(isel, t_tmp, 1);
+        store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
         return;
     }
 }
@@ -475,6 +510,7 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
                 emit_mov(isel, dst_lo, "B", ins);
             else
                 emit_mov(isel, dst_lo, "A", ins);
+            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
             return;
         }
 
@@ -547,6 +583,8 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
             isel_emit(isel, l_no_negq, NULL, NULL, NULL);
             emit_mov(isel, dst_lo, num_tmp, ins);
         }
+
+        store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
 
         if (tr  >= 0) free_temp_reg(isel, tr,  1);
         if (td  >= 0) free_temp_reg(isel, td,  1);
@@ -630,6 +668,8 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
                 emit_mov(isel, dst_lo, q_lo, ins);
                 emit_mov(isel, dst_hi, q_hi, NULL);
             }
+
+            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
 
             free(l_check); free(l_done);
             if (tr >= 0) free_temp_reg(isel, tr, 2);
@@ -777,6 +817,8 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
                 emit_mov(isel, dst_hi, q_hi, NULL);
             }
 
+            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+
             if (tr >= 0) free_temp_reg(isel, tr, 2);
             if (td >= 0) free_temp_reg(isel, td, 2);
             if (tsn >= 0) free_temp_reg(isel, tsn, 1);
@@ -857,6 +899,8 @@ void emit_select(ISelContext* isel, Instr* ins) {
     if (size == 2) emit_mov(isel, dst_hi, tv_hi_src, NULL);
     isel_emit(isel, lb_end, NULL, NULL, NULL);
 
+    store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+
     if (tr_tv >= 0) free_temp_reg(isel, tr_tv, size);
     if (tr_fv >= 0) free_temp_reg(isel, tr_fv, size);
 
@@ -895,6 +939,8 @@ void emit_simple_cast(ISelContext* isel, Instr* ins, bool sign_extend) {
             emit_mov(isel, dst_hi, "#0", NULL);
         }
     }
+
+    store_spilled_dest_if_needed(isel, ins->dest, dst_reg, dst_size, ins);
 }
 
 void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
@@ -903,11 +949,17 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     int src1_size = get_value_size(isel, src1);
     int64_t imm_val;
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
+    ValueName src2 = src2_is_imm ? -1 : get_src2_value(ins);
+    const char* src2_sym = (!src2_is_imm) ? lookup_value_addr_symbol(isel, src2) : NULL;
+    bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == -3;
 
     const char* src1_lo = isel_get_lo_reg(isel, src1);
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
 
+    if (src2_spilled_mem) {
+        emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
+    }
     emit_mov(isel, "A", src1_lo, ins);
 
     if (src2_is_imm) {
@@ -931,10 +983,13 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         }
     } else {
         isel_emit(isel, "CLR", "C", NULL, NULL);
-        ValueName src2 = get_src2_value(ins);
-        const char* src2_lo = isel_get_lo_reg(isel, src2);
         char* ssa = instr_to_ssa_str(ins);
-        isel_emit(isel, "SUBB", "A", src2_lo, ssa);
+        if (src2_spilled_mem) {
+            isel_emit(isel, "SUBB", "A", "B", ssa);
+        } else {
+            const char* src2_lo = isel_get_lo_reg(isel, src2);
+            isel_emit(isel, "SUBB", "A", src2_lo, ssa);
+        }
         free(ssa);
     }
 
@@ -955,11 +1010,15 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
             isel_emit(isel, "SUBB", "A", imm_str, NULL);
         } else {
-            ValueName src2 = get_src2_value(ins);
             int src2_size = get_value_size(isel, src2);
             if (src2_size == 2) {
-                const char* src2_hi = isel_get_hi_reg(isel, src2);
-                isel_emit(isel, "SUBB", "A", src2_hi, NULL);
+                if (src2_spilled_mem) {
+                    emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
+                    isel_emit(isel, "SUBB", "A", "B", NULL);
+                } else {
+                    const char* src2_hi = isel_get_hi_reg(isel, src2);
+                    isel_emit(isel, "SUBB", "A", src2_hi, NULL);
+                }
             } else {
                 isel_emit(isel, "SUBB", "A", "#0", NULL);
             }
@@ -967,6 +1026,8 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
 
         emit_mov(isel, dst_hi, "A", ins);
     }
+
+    store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
 
     if (next && next->op == IROP_RET) {
         const char* ret_lo = NULL;
@@ -1029,6 +1090,7 @@ void emit_trunc(ISelContext* isel, Instr* ins) {
             if (dst_reg >= 0) {
                 const char* src_lo = isel_get_lo_reg(isel, src);
                 emit_mov(isel, isel_reg_name(dst_reg), src_lo, ins);
+                store_spilled_dest_if_needed(isel, ins->dest, dst_reg, 1, ins);
             }
         }
     } else {

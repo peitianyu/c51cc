@@ -537,9 +537,35 @@ void emit_inline_asm_instr(ISelContext* isel, Instr* ins) {
     free(s);
 }
 
-static void setup_call_param_u8(ISelContext* isel, Instr* ins, int arg_index, ValueName v, RegMove* moves, int* move_count) {
-    if (arg_index >= 6) return;
+static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* callee_name, int arg_index, ValueName v, RegMove* moves, int* move_count) {
+    if (arg_index >= 6) {
+        if (callee_name && isel) {
+            char sym[128];
+            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, arg_index);
+            int64_t imm_val = 0;
+            if (try_get_value_const(isel, v, &imm_val)) {
+                emit_store_symbol_imm_byte(isel, sym, 0, (int)imm_val, ins);
+                return;
+            }
+            const char* src_sym = lookup_value_addr_symbol(isel, v);
+            if (src_sym && isel_get_value_reg(isel, v) == -3) {
+                emit_load_symbol_byte(isel, src_sym, 0, "A", ins);
+                emit_store_symbol_byte(isel, sym, 0, "A", NULL);
+                return;
+            }
+            const char* src_lo = isel_get_lo_reg(isel, v);
+            if (src_lo) emit_store_symbol_byte(isel, sym, 0, src_lo, ins);
+        }
+        return;
+    }
     int targ = param_regs_char[arg_index];
+    int64_t imm_val = 0;
+    if (try_get_value_const(isel, v, &imm_val)) {
+        char imm_str[32];
+        snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
+        emit_mov(isel, isel_reg_name(targ), imm_str, ins);
+        return;
+    }
     const char* src_lo = isel_get_lo_reg(isel, v);
 
     if (isel_get_value_reg(isel, v) == -3) {
@@ -579,11 +605,44 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, int arg_index, Va
     }
 }
 
-static void setup_call_param_u16(ISelContext* isel, Instr* ins, int arg_index, ValueName v, RegMove* moves, int* move_count) {
-    if (arg_index >= 3) return;
+static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* callee_name, int arg_index, ValueName v, RegMove* moves, int* move_count) {
+    if (arg_index >= 3) {
+        if (callee_name && isel) {
+            char sym[128];
+            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, arg_index);
+            int64_t imm_val = 0;
+            if (try_get_value_const(isel, v, &imm_val)) {
+                emit_store_symbol_imm_byte(isel, sym, 0, (int)(imm_val & 0xFF), ins);
+                emit_store_symbol_imm_byte(isel, sym, 1, (int)((imm_val >> 8) & 0xFF), NULL);
+                return;
+            }
+            const char* src_sym = lookup_value_addr_symbol(isel, v);
+            if (src_sym && isel_get_value_reg(isel, v) == -3) {
+                emit_load_symbol_byte(isel, src_sym, 0, "A", ins);
+                emit_store_symbol_byte(isel, sym, 0, "A", NULL);
+                emit_load_symbol_byte(isel, src_sym, 1, "A", NULL);
+                emit_store_symbol_byte(isel, sym, 1, "A", NULL);
+                return;
+            }
+            const char* src_lo = isel_get_lo_reg(isel, v);
+            const char* src_hi = isel_get_hi_reg(isel, v);
+            if (src_lo) emit_store_symbol_byte(isel, sym, 0, src_lo, ins);
+            if (src_hi) emit_store_symbol_byte(isel, sym, 1, src_hi, NULL);
+        }
+        return;
+    }
 
     int targ_hi = param_regs_int_h[arg_index];
     int targ_lo = param_regs_int_l[arg_index];
+    int64_t imm_val = 0;
+    if (try_get_value_const(isel, v, &imm_val)) {
+        char imm_hi[32], imm_lo[32];
+        snprintf(imm_hi, sizeof(imm_hi), "#%d", (int)((imm_val >> 8) & 0xFF));
+        snprintf(imm_lo, sizeof(imm_lo), "#%d", (int)(imm_val & 0xFF));
+        emit_mov(isel, isel_reg_name(targ_hi), imm_hi, ins);
+        emit_mov(isel, isel_reg_name(targ_lo), imm_lo, NULL);
+        return;
+    }
     const char* src_hi = isel_get_hi_reg(isel, v);
     const char* src_lo = isel_get_lo_reg(isel, v);
 
@@ -650,8 +709,35 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, int arg_index, V
     }
 }
 
-static void setup_call_param_u24(ISelContext* isel, Instr* ins, int arg_index, ValueName v, RegMove* moves, int* move_count) {
-    if (arg_index != 0) return;
+static void setup_call_param_u24(ISelContext* isel, Instr* ins, const char* callee_name, int arg_index, ValueName v, RegMove* moves, int* move_count) {
+    if (arg_index != 0) {
+        if (callee_name && isel) {
+            char sym[128];
+            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, arg_index);
+            char sym1[192], sym2[192];
+            snprintf(sym1, sizeof(sym1), "(%s + 1)", sym);
+            snprintf(sym2, sizeof(sym2), "(%s + 2)", sym);
+            const char* lo = isel_get_lo_reg(isel, v);
+            const char* hi = isel_get_hi_reg(isel, v);
+            if (lo) emit_mov(isel, sym, lo, ins);
+            if (hi) emit_mov(isel, sym1, hi, NULL);
+            int base = isel_get_value_reg(isel, v);
+            if (base >= 0 && base + 2 < 8) emit_mov(isel, sym2, isel_reg_name(base + 2), NULL);
+        }
+        return;
+    }
+
+    int64_t imm_val = 0;
+    if (try_get_value_const(isel, v, &imm_val)) {
+        char imm0[32], imm1[32], imm2[32];
+        snprintf(imm0, sizeof(imm0), "#%d", (int)((imm_val >> 16) & 0xFF));
+        snprintf(imm1, sizeof(imm1), "#%d", (int)((imm_val >> 8) & 0xFF));
+        snprintf(imm2, sizeof(imm2), "#%d", (int)(imm_val & 0xFF));
+        emit_mov(isel, "R1", imm0, ins);
+        emit_mov(isel, "R2", imm1, NULL);
+        emit_mov(isel, "R3", imm2, NULL);
+        return;
+    }
 
     int base = isel_get_value_reg(isel, v);
     if (base >= 0 && base + 2 < 8) {
@@ -688,11 +774,11 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
 
         int size = t ? c51_abi_type_size(t) : 1;
         if (size == 1) {
-            setup_call_param_u8(isel, ins, k, v, moves, &move_count);
+            setup_call_param_u8(isel, ins, fname, k, v, moves, &move_count);
         } else if (size == 2) {
-            setup_call_param_u16(isel, ins, k, v, moves, &move_count);
+            setup_call_param_u16(isel, ins, fname, k, v, moves, &move_count);
         } else if (size == 3) {
-            setup_call_param_u24(isel, ins, k, v, moves, &move_count);
+            setup_call_param_u24(isel, ins, fname, k, v, moves, &move_count);
         }
     }
 
@@ -704,6 +790,7 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
 
     if (ins->dest > 0) {
         int size = ins->type ? ins->type->size : 1;
+        bool spill_dest = isel_value_is_spilled(isel, ins->dest);
         bool skip_copy_back = false;
         if (next && next->op == IROP_RET && next->args && next->args->len > 0) {
             ValueName ret_arg = *(ValueName*)list_get(next->args, 0);
@@ -714,14 +801,19 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
 
         if (!skip_copy_back) {
             int reg = alloc_reg_for_value(isel, ins->dest, size);
+            int phys_reg = reg;
+            if (phys_reg < 0) phys_reg = 0;
             if (size == 1) {
-                const char* lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+                const char* lo = isel_reg_name(phys_reg + (size == 2 ? 1 : 0));
                 if (strcmp("R7", lo) != 0) emit_mov(isel, lo, "R7", ins);
             } else if (size == 2) {
-                const char* lo = isel_reg_name(reg + 1);
-                const char* hi = isel_reg_name(reg);
+                const char* lo = isel_reg_name(phys_reg + 1);
+                const char* hi = isel_reg_name(phys_reg);
                 if (strcmp("R7", lo) != 0) emit_mov(isel, lo, "R7", ins);
                 if (strcmp("R6", hi) != 0) emit_mov(isel, hi, "R6", ins);
+            }
+            if (spill_dest) {
+                isel_store_spill_from_reg(isel, ins->dest, phys_reg, size, ins);
             }
         }
     }

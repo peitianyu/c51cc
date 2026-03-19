@@ -4,6 +4,14 @@
 #include <string.h>
 #include "c51_isel_regalloc.h"
 
+static const char* save_acc_operand_in_b(ISelContext* isel, const char* operand) {
+    if (operand && strcmp(operand, "A") == 0) {
+        isel_emit(isel, "MOV", "B", "A", NULL);
+        return "B";
+    }
+    return operand;
+}
+
 void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mnem) {
     ValueName src1 = get_src1_value(ins);
     int size = ins->type ? ins->type->size : 1;
@@ -24,7 +32,7 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
         snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
         isel_emit(isel, op_mnem, "A", imm_str, NULL);
     } else {
-        const char* src2_lo = isel_get_lo_reg(isel, src2);
+        const char* src2_lo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, src2));
         isel_emit(isel, op_mnem, "A", src2_lo, NULL);
     }
     emit_mov(isel, dst_lo, "A", ins);
@@ -36,11 +44,13 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
             snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
             isel_emit(isel, op_mnem, "A", imm_str, NULL);
         } else {
-            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            const char* src2_hi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, src2));
             isel_emit(isel, op_mnem, "A", src2_hi, NULL);
         }
         emit_mov(isel, dst_hi, "A", ins);
     }
+
+    emit_store_spilled_result(isel, ins->dest, reg, size, ins);
 }
 
 void emit_not(ISelContext* isel, Instr* ins, Instr* next) {
@@ -100,6 +110,8 @@ void emit_not(ISelContext* isel, Instr* ins, Instr* next) {
         }
         emit_mov(isel, dst_hi, "A", ins);
     }
+
+    emit_store_spilled_result(isel, ins->dest, reg, dst_size, ins);
 }
 
 void emit_ne(ISelContext* isel, Instr* ins, Instr* next) {
@@ -123,6 +135,12 @@ void emit_ne(ISelContext* isel, Instr* ins, Instr* next) {
     if (size == 2) {
         const char* src1_lo = isel_get_lo_reg(isel, src1);
         const char* src1_hi = isel_get_hi_reg(isel, src1);
+        const char* src2_lo = NULL;
+        const char* src2_hi = NULL;
+
+        if (!src2_is_imm) {
+            src2_lo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, src2));
+        }
 
         emit_mov(isel, "A", src1_lo, ins);
         if (src2_is_imm) {
@@ -130,32 +148,36 @@ void emit_ne(ISelContext* isel, Instr* ins, Instr* next) {
             snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)(imm_val & 0xFF), l_true);
             isel_emit(isel, "CJNE", "A", imm_str, NULL);
         } else {
-            const char* src2_lo = isel_get_lo_reg(isel, src2);
             char arg2[64];
             snprintf(arg2, sizeof(arg2), "%s, %s", src2_lo, l_true);
             isel_emit(isel, "CJNE", "A", arg2, NULL);
         }
 
+        if (!src2_is_imm) {
+            src2_hi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, src2));
+        }
         emit_mov(isel, "A", src1_hi, NULL);
         if (src2_is_imm) {
             char imm_str[32];
             snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)((imm_val >> 8) & 0xFF), l_true);
             isel_emit(isel, "CJNE", "A", imm_str, NULL);
         } else {
-            const char* src2_hi = isel_get_hi_reg(isel, src2);
             char arg2[64];
             snprintf(arg2, sizeof(arg2), "%s, %s", src2_hi, l_true);
             isel_emit(isel, "CJNE", "A", arg2, NULL);
         }
     } else {
         const char* src1_lo = isel_get_lo_reg(isel, src1);
+        const char* src2_lo = NULL;
+        if (!src2_is_imm) {
+            src2_lo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, src2));
+        }
         emit_mov(isel, "A", src1_lo, ins);
         if (src2_is_imm) {
             char imm_str[32];
             snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)(imm_val & 0xFF), l_true);
             isel_emit(isel, "CJNE", "A", imm_str, NULL);
         } else {
-            const char* src2_lo = isel_get_lo_reg(isel, src2);
             char arg2[64];
             snprintf(arg2, sizeof(arg2), "%s, %s", src2_lo, l_true);
             isel_emit(isel, "CJNE", "A", arg2, NULL);
@@ -172,6 +194,8 @@ void emit_ne(ISelContext* isel, Instr* ins, Instr* next) {
     if (size == 2) {
         emit_mov(isel, dst_hi, "#00H", ins);
     }
+
+    emit_store_spilled_result(isel, ins->dest, reg, size, ins);
 
     free(l_true);
     free(l_end);
@@ -193,8 +217,8 @@ void emit_lnot(ISelContext* isel, Instr* ins, Instr* next) {
     snprintf(lbuf_end, sizeof(lbuf_end), "%s:", l_end);
 
     if (size == 2) {
+        const char* lo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, src));
         const char* hi = isel_get_hi_reg(isel, src);
-        const char* lo = isel_get_lo_reg(isel, src);
         emit_mov(isel, "A", hi, ins);
         isel_emit(isel, "ORL", "A", lo, NULL);
     } else {
@@ -212,6 +236,8 @@ void emit_lnot(ISelContext* isel, Instr* ins, Instr* next) {
     if (size == 2) {
         emit_mov(isel, dst_hi, "#0", ins);
     }
+
+    emit_store_spilled_result(isel, ins->dest, reg, size, ins);
 
     free(l_true);
     free(l_end);
@@ -231,8 +257,8 @@ void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
     snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
+    const char* s2_lo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, src2));
     const char* s1_lo = isel_get_lo_reg(isel, src1);
-    const char* s2_lo = isel_get_lo_reg(isel, src2);
     emit_mov(isel, "A", s1_lo, ins);
     {
         char arg2[64];
@@ -241,8 +267,8 @@ void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
     }
 
     if (get_value_size(isel, src1) == 2 || get_value_size(isel, src2) == 2) {
+        const char* s2_hi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, src2));
         const char* s1_hi = isel_get_hi_reg(isel, src1);
-        const char* s2_hi = isel_get_hi_reg(isel, src2);
         emit_mov(isel, "A", s1_hi, NULL);
         {
             char arg2[64];
@@ -271,7 +297,7 @@ void emit_signed_cmp8_result(ISelContext* isel, Instr* ins, int dst_reg, int siz
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
     const char* llo = isel_get_lo_reg(isel, lhs);
-    const char* rlo = isel_get_lo_reg(isel, rhs);
+    const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
 
     emit_mov(isel, "A", llo, NULL);
     isel_emit(isel, "ANL", "A", "#128", NULL);
@@ -338,7 +364,7 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
 
                     if (w == 1) {
                         const char* llo = isel_get_lo_reg(isel, lhs);
-                        const char* rlo = isel_get_lo_reg(isel, rhs);
+                        const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
                         char* l_same = isel_new_label(isel, "Lscmp_same_tmp");
 
                         emit_mov(isel, "A", llo, ins);
@@ -384,9 +410,9 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
                     } else {
                         /* signed 16-bit compare: check high then low */
                         const char* lhi = isel_get_hi_reg(isel, lhs);
-                        const char* rhi = isel_get_hi_reg(isel, rhs);
+                        const char* rhi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, rhs));
                         const char* llo = isel_get_lo_reg(isel, lhs);
-                        const char* rlo = isel_get_lo_reg(isel, rhs);
+                        const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
 
                         isel_emit(isel, "CLR", "C", NULL, NULL);
                         emit_mov(isel, "A", lhi, ins);
@@ -448,7 +474,7 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
 
             if (w == 1) {
                 const char* llo = isel_get_lo_reg(isel, lhs);
-                const char* rlo = isel_get_lo_reg(isel, rhs);
+                const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
                 isel_emit(isel, "CLR", "C", NULL, NULL);
                 emit_mov(isel, "A", llo, ins);
                 isel_emit(isel, "SUBB", "A", rlo, NULL);
@@ -485,8 +511,8 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
             return;
         }
 
+        const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
         const char* llo = isel_get_lo_reg(isel, lhs);
-        const char* rlo = isel_get_lo_reg(isel, rhs);
 
         isel_emit(isel, "CLR", "C", NULL, NULL);
         emit_mov(isel, "A", llo, ins);
@@ -518,10 +544,10 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
             free(l_false);
         }
     } else {
+        const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
+        const char* rhi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, rhs));
         const char* llo = isel_get_lo_reg(isel, lhs);
         const char* lhi = isel_get_hi_reg(isel, lhs);
-        const char* rlo = isel_get_lo_reg(isel, rhs);
-        const char* rhi = isel_get_hi_reg(isel, rhs);
 
         isel_emit(isel, "CLR", "C", NULL, NULL);
         emit_mov(isel, "A", lhi, ins);
@@ -612,7 +638,7 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
 
             if (w == 1) {
                 const char* llo = isel_get_lo_reg(isel, lhs);
-                const char* rlo = isel_get_lo_reg(isel, rhs);
+                const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
                 isel_emit(isel, "CLR", "C", NULL, NULL);
                 emit_mov(isel, "A", llo, ins);
                 isel_emit(isel, "SUBB", "A", rlo, NULL);
@@ -627,8 +653,8 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
                 next->op = IROP_NOP;
                 return;
             } else {
+                const char* rhi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, rhs));
                 const char* lhi = isel_get_hi_reg(isel, lhs);
-                const char* rhi = isel_get_hi_reg(isel, rhs);
 
                 isel_emit(isel, "CLR", "C", NULL, NULL);
                 emit_mov(isel, "A", lhi, ins);
@@ -665,16 +691,16 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
             return;
         }
 
+        const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
         const char* llo = isel_get_lo_reg(isel, lhs);
-        const char* rlo = isel_get_lo_reg(isel, rhs);
         isel_emit(isel, "CLR", "C", NULL, NULL);
         emit_mov(isel, "A", llo, ins);
         isel_emit(isel, "SUBB", "A", rlo, NULL);
     } else {
+        const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
+        const char* rhi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, rhs));
         const char* llo = isel_get_lo_reg(isel, lhs);
         const char* lhi = isel_get_hi_reg(isel, lhs);
-        const char* rlo = isel_get_lo_reg(isel, rhs);
-        const char* rhi = isel_get_hi_reg(isel, rhs);
         isel_emit(isel, "CLR", "C", NULL, NULL);
         emit_mov(isel, "A", llo, ins);
         isel_emit(isel, "SUBB", "A", rlo, NULL);

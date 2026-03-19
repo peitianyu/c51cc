@@ -29,6 +29,7 @@ void emit_parallel_reg_moves(ISelContext* isel, RegMove* moves, int n, Instr* in
 
 void emit_mov(ISelContext* isel, const char* dst, const char* src, Instr* ins);
 void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, bool one);
+void emit_store_spilled_result(ISelContext* isel, ValueName val, int reg, int size, Instr* ins);
 void emit_copy_value(ISelContext* isel, Instr* ins, ValueName src, int dst_reg, int size);
 void emit_add16_regs(ISelContext* isel,
                      const char* dst_hi, const char* dst_lo,
@@ -41,7 +42,13 @@ void emit_sub16_regs(ISelContext* isel,
 
 bool is_memory_operand_local(const char* op);
 SectionKind get_symbol_section_kind(ISelContext* isel, const char* var_name);
+const char* lookup_value_addr_symbol(ISelContext* isel, ValueName val);
+void emit_load_symbol_byte(ISelContext* isel, const char* sym, int offset, const char* dst, Instr* ins);
+void emit_store_symbol_byte(ISelContext* isel, const char* sym, int offset, const char* src, Instr* ins);
+void emit_store_symbol_imm_byte(ISelContext* isel, const char* sym, int offset, int value, Instr* ins);
 int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins);
+bool isel_value_is_spilled(ISelContext* isel, ValueName val);
+void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int size, Instr* ins);
 
 int get_value_size(ISelContext* isel, ValueName val);
 Ctype* get_value_type(ISelContext* isel, ValueName val);
@@ -55,6 +62,7 @@ int count_value_uses(Instr** instrs, int n, ValueName v);
 bool find_const_in_block(Instr** instrs, int n, ValueName v, int64_t* out_val);
 bool ne_is_compare_zero(Instr** instrs, int n, Instr* ne, ValueName* out_other);
 Instr* find_def_instr_in_func(Func* f, ValueName v);
+bool try_get_value_const(ISelContext* isel, ValueName val, int64_t* out_val);
 bool is_const_zero_def(Func* f, ValueName v);
 bool ne_is_compare_zero_def(Func* f, Instr* ne, ValueName* out_other);
 

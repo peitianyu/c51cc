@@ -19,6 +19,19 @@ static void emit_load_save_byte(ISelContext* isel, int dst_reg, int size, bool h
     }
 }
 
+static void store_spilled_mem_result(ISelContext* isel, Instr* ins, int reg, int size) {
+    if (!ins) return;
+    emit_store_spilled_result(isel, ins->dest, reg, size, ins);
+}
+
+static const char* preserve_offset_operand(ISelContext* isel, const char* src) {
+    if (src && strcmp(src, "A") == 0) {
+        isel_emit(isel, "MOV", "B", "A", NULL);
+        return "B";
+    }
+    return src;
+}
+
 static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueName ptr) {
     Ctype* ptr_type = get_value_type(isel, ptr);
     if (!ptr_type || ptr_type->type != CTYPE_PTR) return false;
@@ -50,6 +63,7 @@ static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueNam
             }
             emit_load_save_byte(isel, dst_reg, load_size, true, NULL);
         }
+        store_spilled_mem_result(isel, ins, dst_reg, load_size);
         free(ssa);
         return true;
     }
@@ -76,6 +90,7 @@ static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueNam
             }
             emit_load_save_byte(isel, dst_reg, load_size, true, NULL);
         }
+        store_spilled_mem_result(isel, ins, dst_reg, load_size);
         free(ssa);
         return true;
     }
@@ -198,6 +213,7 @@ static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueNam
             free(l_done_hi);
         }
 
+        store_spilled_mem_result(isel, ins, dst_reg, load_size);
         free(l_data);
         free(l_xdata);
         free(l_pdata);
@@ -226,38 +242,17 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     const char* idx_lo = isel_get_lo_reg(isel, idx);
     const char* idx_hi = isel_get_hi_reg(isel, idx);
 
-    int tmp_idx = -1;
     const char* idx_lo_src = idx_lo;
     const char* idx_hi_src = idx_hi;
 
     bool overlap_low = (idx_lo && dst_lo && strcmp(idx_lo, dst_lo) == 0);
     bool overlap_high = (idx_hi && dst_hi && strcmp(idx_hi, dst_hi) == 0);
-    bool idx_in_acc = (idx_lo && strcmp(idx_lo, "A") == 0) || (idx_hi && strcmp(idx_hi, "A") == 0);
 
-    if (overlap_low || overlap_high || idx_in_acc) {
-        tmp_idx = alloc_temp_reg(isel, idx, 2);
-        if (tmp_idx >= 0) {
-            idx_lo_src = isel_reg_name(tmp_idx + 1);
-            idx_hi_src = isel_reg_name(tmp_idx);
-            if (idx_hi) {
-                if (strcmp(idx_hi, "A") == 0) {
-                    isel_emit(isel, "MOV", idx_hi_src, "A", NULL);
-                } else {
-                    isel_emit(isel, "MOV", idx_hi_src, idx_hi, NULL);
-                }
-            }
-            if (idx_lo) {
-                if (strcmp(idx_lo, "A") == 0) {
-                    isel_emit(isel, "MOV", idx_lo_src, "A", NULL);
-                } else {
-                    isel_emit(isel, "MOV", idx_lo_src, idx_lo, NULL);
-                }
-            }
-        } else {
-            isel_ensure_in_acc(isel, idx);
-            idx_lo_src = "A";
-            idx_hi_src = "A";
-        }
+    if (overlap_low || (idx_lo && strcmp(idx_lo, "A") == 0)) {
+        idx_lo_src = preserve_offset_operand(isel, idx_lo);
+    }
+    if (overlap_high || (idx_hi && strcmp(idx_hi, "A") == 0)) {
+        idx_hi_src = preserve_offset_operand(isel, idx_hi);
     }
 
     emit_mov(isel, "A", dst_lo, NULL);
@@ -268,7 +263,8 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     isel_emit(isel, "ADDC", "A", idx_hi_src, NULL);
     emit_mov(isel, dst_hi, "A", NULL);
 
-    if (tmp_idx >= 0) free_temp_reg(isel, tmp_idx, 2);
+    store_spilled_mem_result(isel, ins, dst_reg, 2);
+
 }
 
 void emit_store(ISelContext* isel, Instr* ins) {
@@ -415,6 +411,7 @@ void emit_load(ISelContext* isel, Instr* ins) {
                         if (dst_lo && strcmp(dst_lo, "A") != 0) {
                             isel_emit(isel, "MOV", dst_lo, "A", NULL);
                         }
+                        store_spilled_mem_result(isel, ins, reg, size);
                         return;
                     }
                 }
@@ -484,4 +481,6 @@ void emit_load(ISelContext* isel, Instr* ins) {
             isel_emit(isel, "MOV", dst_reg_hi, "A", NULL);
         }
     }
+
+    store_spilled_mem_result(isel, ins, reg, size);
 }

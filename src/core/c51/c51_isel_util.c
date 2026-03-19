@@ -103,6 +103,12 @@ void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, 
     if (size == 2) {
         emit_mov(isel, dst_hi, "#0", ins);
     }
+    emit_store_spilled_result(isel, ins ? ins->dest : -1, dst_reg, size, ins);
+}
+
+void emit_store_spilled_result(ISelContext* isel, ValueName val, int reg, int size, Instr* ins) {
+    if (reg < 0 || size < 1 || !ins || val < 0) return;
+    isel_store_spill_from_reg(isel, val, reg, size, ins);
 }
 
 void emit_copy_value(ISelContext* isel, Instr* ins, ValueName src, int dst_reg, int size) {
@@ -162,6 +168,113 @@ SectionKind get_symbol_section_kind(ISelContext* isel, const char* var_name) {
     return SEC_DATA;
 }
 
+const char* lookup_value_addr_symbol(ISelContext* isel, ValueName val) {
+    if (!isel || !isel->ctx || !isel->ctx->value_to_addr || val <= 0) return NULL;
+    char* key = int_to_key(val);
+    const char* sym = (const char*)dict_get(isel->ctx->value_to_addr, key);
+    free(key);
+    return sym;
+}
+
+static void format_symbol_byte_ref(char* out, size_t out_size, const char* sym, int offset) {
+    if (!out || out_size == 0 || !sym) return;
+    if (offset <= 0) snprintf(out, out_size, "%s", sym);
+    else snprintf(out, out_size, "(%s + %d)", sym, offset);
+}
+
+void emit_load_symbol_byte(ISelContext* isel, const char* sym, int offset, const char* dst, Instr* ins) {
+    if (!isel || !sym || !dst) return;
+
+    SectionKind sym_sec = get_symbol_section_kind(isel, sym);
+    char ref[256];
+    char* ssa = instr_to_ssa_str(ins);
+    format_symbol_byte_ref(ref, sizeof(ref), sym, offset);
+
+    if (sym_sec == SEC_XDATA) {
+        char dptr_val[256];
+        snprintf(dptr_val, sizeof(dptr_val), "#%s", ref);
+        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+        isel_emit(isel, "MOVX", "A", "@DPTR", ssa);
+        if (strcmp(dst, "A") != 0) {
+            isel_emit(isel, "MOV", dst, "A", NULL);
+        }
+        free(ssa);
+        return;
+    }
+
+    if (sym_sec == SEC_IDATA) {
+        char r0_ref[256];
+        if (offset <= 0) snprintf(r0_ref, sizeof(r0_ref), "%s", sym);
+        else snprintf(r0_ref, sizeof(r0_ref), "%s + %d", sym, offset);
+        isel_emit(isel, "MOV", "R0", r0_ref, NULL);
+        isel_emit(isel, "MOV", "A", "@R0", ssa);
+        if (strcmp(dst, "A") != 0) {
+            isel_emit(isel, "MOV", dst, "A", NULL);
+        }
+        free(ssa);
+        return;
+    }
+
+    if (sym_sec == SEC_CODE) {
+        char dptr_val[256];
+        snprintf(dptr_val, sizeof(dptr_val), "#%s", ref);
+        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+        isel_emit(isel, "CLR", "A", NULL, NULL);
+        isel_emit(isel, "MOVC", "A", "@A+DPTR", ssa);
+        if (strcmp(dst, "A") != 0) {
+            isel_emit(isel, "MOV", dst, "A", NULL);
+        }
+        free(ssa);
+        return;
+    }
+
+    emit_mov(isel, dst, ref, ins);
+    free(ssa);
+}
+
+void emit_store_symbol_byte(ISelContext* isel, const char* sym, int offset, const char* src, Instr* ins) {
+    if (!isel || !sym || !src) return;
+
+    SectionKind sym_sec = get_symbol_section_kind(isel, sym);
+    char ref[256];
+    format_symbol_byte_ref(ref, sizeof(ref), sym, offset);
+
+    if (sym_sec == SEC_XDATA) {
+        char dptr_val[256];
+        snprintf(dptr_val, sizeof(dptr_val), "#%s", ref);
+        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+        if (strcmp(src, "A") != 0) emit_mov(isel, "A", src, ins);
+        else {
+            char* ssa = instr_to_ssa_str(ins);
+            free(ssa);
+        }
+        isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
+        return;
+    }
+
+    if (sym_sec == SEC_IDATA) {
+        char r0_ref[256];
+        if (offset <= 0) snprintf(r0_ref, sizeof(r0_ref), "%s", sym);
+        else snprintf(r0_ref, sizeof(r0_ref), "%s + %d", sym, offset);
+        isel_emit(isel, "MOV", "R0", r0_ref, NULL);
+        if (strcmp(src, "A") != 0) emit_mov(isel, "A", src, ins);
+        else {
+            char* ssa = instr_to_ssa_str(ins);
+            free(ssa);
+        }
+        isel_emit(isel, "MOV", "@R0", "A", NULL);
+        return;
+    }
+
+    emit_mov(isel, ref, src, ins);
+}
+
+void emit_store_symbol_imm_byte(ISelContext* isel, const char* sym, int offset, int value, Instr* ins) {
+    char imm[32];
+    snprintf(imm, sizeof(imm), "#%d", value & 0xFF);
+    emit_store_symbol_byte(isel, sym, offset, imm, ins);
+}
+
 int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
     if (!isel || !isel->ctx) return -2;
     char* key = int_to_key(val);
@@ -195,57 +308,12 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
             dict_put(isel->ctx->value_to_reg, k, reg_num);
         }
         const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
-        SectionKind sym_sec = get_symbol_section_kind(isel, var_name);
-
-        if (sym_sec == SEC_XDATA) {
-            char dptr_val[256];
-            snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
-            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
-            isel_emit(isel, "MOVX", "A", "@DPTR", ssa);
-        } else if (sym_sec == SEC_IDATA) {
-            isel_emit(isel, "MOV", "R0", var_name, NULL);
-            isel_emit(isel, "MOV", "A", "@R0", ssa);
-        } else if (sym_sec == SEC_CODE) {
-            char dptr_val[256];
-            snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
-            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
-            isel_emit(isel, "CLR", "A", NULL, NULL);
-            isel_emit(isel, "MOVC", "A", "@A+DPTR", ssa);
-        } else {
-            isel_emit(isel, "MOV", "A", var_name, ssa);
-        }
+        emit_load_symbol_byte(isel, var_name, 0, dst_lo, ins);
         if (ssa) { free((void*)ssa); ssa = NULL; }
-        if (dst_lo && strcmp(dst_lo, "A") != 0) {
-            isel_emit(isel, "MOV", dst_lo, "A", NULL);
-        }
 
         if (size == 2) {
-            SectionKind sym_sec_hi = get_symbol_section_kind(isel, var_name);
-            if (sym_sec_hi == SEC_XDATA) {
-                char dptr_val[256];
-                snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
-                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
-                isel_emit(isel, "MOVX", "A", "@DPTR", NULL);
-            } else if (sym_sec_hi == SEC_CODE) {
-                char dptr_val[256];
-                snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
-                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
-                isel_emit(isel, "CLR", "A", NULL, NULL);
-                isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
-            } else if (sym_sec_hi == SEC_IDATA) {
-                char off1[256];
-                snprintf(off1, sizeof(off1), "%s + 1", var_name);
-                isel_emit(isel, "MOV", "R0", off1, NULL);
-                isel_emit(isel, "MOV", "A", "@R0", NULL);
-            } else {
-                char var_hi[256];
-                snprintf(var_hi, sizeof(var_hi), "(%s + 1)", var_name);
-                isel_emit(isel, "MOV", "A", var_hi, NULL);
-            }
             const char* dst_hi = isel_reg_name(reg);
-            if (dst_hi && strcmp(dst_hi, "A") != 0) {
-                isel_emit(isel, "MOV", dst_hi, "A", NULL);
-            }
+            emit_load_symbol_byte(isel, var_name, 1, dst_hi, NULL);
         }
         return reg;
     } else {
@@ -253,18 +321,61 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
             if (ssa) free((void*)ssa);
             return -2;
         }
-        isel_emit(isel, "MOV", "A", var_name, ssa);
         if (ssa) free((void*)ssa);
-
-        if (isel->ctx && isel->ctx->value_to_reg) {
-            int* reg_num = malloc(sizeof(int));
-            *reg_num = -2;
-            char* k = int_to_key(val);
-            dict_put(isel->ctx->value_to_reg, k, reg_num);
-        }
-        isel->acc_busy = true;
-        isel->acc_val = val;
         return -2;
+    }
+}
+
+bool isel_value_is_spilled(ISelContext* isel, ValueName val) {
+    return isel_get_value_reg(isel, val) == -3;
+}
+
+void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int size, Instr* ins) {
+    if (!isel || !isel->ctx || reg < 0 || !isel_value_is_spilled(isel, val)) return;
+
+    char* key = int_to_key(val);
+    const char* var_name = isel->ctx->value_to_addr ? (const char*)dict_get(isel->ctx->value_to_addr, key) : NULL;
+    free(key);
+    if (!var_name) return;
+
+    SectionKind sym_sec = get_symbol_section_kind(isel, var_name);
+    const char* src_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
+    const char* src_hi = isel_reg_name(reg);
+
+    if (sym_sec == SEC_XDATA) {
+        char dptr_val[256];
+        snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
+        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+        emit_mov(isel, "A", src_lo, ins);
+        isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
+        if (size == 2) {
+            snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
+            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+            emit_mov(isel, "A", src_hi, NULL);
+            isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
+        }
+        return;
+    }
+
+    if (sym_sec == SEC_IDATA) {
+        char off1[256];
+        isel_emit(isel, "MOV", "R0", var_name, NULL);
+        emit_mov(isel, "A", src_lo, ins);
+        isel_emit(isel, "MOV", "@R0", "A", NULL);
+        if (size == 2) {
+            snprintf(off1, sizeof(off1), "%s + 1", var_name);
+            isel_emit(isel, "MOV", "R0", off1, NULL);
+            emit_mov(isel, "A", src_hi, NULL);
+            isel_emit(isel, "MOV", "@R0", "A", NULL);
+        }
+        return;
+    }
+
+    emit_mov(isel, var_name, src_lo, ins);
+    if (size == 2) {
+        char var_hi[256];
+        snprintf(var_hi, sizeof(var_hi), "(%s + 1)", var_name);
+        emit_mov(isel, var_hi, src_hi, NULL);
     }
 }
 
@@ -467,6 +578,14 @@ Instr* find_def_instr_in_func(Func* f, ValueName v) {
         }
     }
     return NULL;
+}
+
+bool try_get_value_const(ISelContext* isel, ValueName val, int64_t* out_val) {
+    if (!isel || !isel->ctx || !isel->ctx->current_func || val <= 0) return false;
+    Instr* def = find_def_instr_in_func(isel->ctx->current_func, val);
+    if (!def || def->op != IROP_CONST) return false;
+    if (out_val) *out_val = def->imm.ival;
+    return true;
 }
 
 bool is_const_zero_def(Func* f, ValueName v) {

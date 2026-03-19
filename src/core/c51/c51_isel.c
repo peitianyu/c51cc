@@ -67,6 +67,11 @@ const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
         if (base_reg == -3) {
             int r = isel_reload_spill(isel, val, size, NULL);
             if (r >= 0) return isel_reg_name(r + (size == 2 ? 1 : 0));
+            const char* sym = lookup_value_addr_symbol(isel, val);
+            if (sym) {
+                emit_load_symbol_byte(isel, sym, 0, "A", NULL);
+                return "A";
+            }
             return "A";
         }
         return "R7";
@@ -85,6 +90,11 @@ const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
     if (base_reg == -3) {
         int r = isel_reload_spill(isel, val, size, NULL);
         if (r >= 0) return isel_reg_name(r);
+        const char* sym = lookup_value_addr_symbol(isel, val);
+        if (sym) {
+            emit_load_symbol_byte(isel, sym, size > 1 ? 1 : 0, "A", NULL);
+            return "A";
+        }
         return "A";
     }
     return isel_get_value_reg_at(isel, val, 0);

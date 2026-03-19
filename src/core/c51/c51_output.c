@@ -2,6 +2,28 @@
 #include <string.h>
 #include <stdlib.h>
 
+static bool is_unused_local_spill_symbol(const ObjFile *obj, const Symbol *sym)
+{
+    if (!obj || !sym || !sym->name) return false;
+    if (!(sym->flags & SYM_FLAG_LOCAL)) return false;
+    if (strncmp(sym->name, "__spill_", 8) != 0) return false;
+
+    for (Iter sit = list_iter(obj->sections); !iter_end(sit);) {
+        Section *sec = iter_next(&sit);
+        if (!sec || sec->kind != SEC_CODE || !sec->asminstrs) continue;
+        for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
+            AsmInstr *ins = iter_next(&ait);
+            if (!ins || !ins->args) continue;
+            for (Iter argit = list_iter(ins->args); !iter_end(argit);) {
+                const char *arg = iter_next(&argit);
+                if (arg && strstr(arg, sym->name)) return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 static const char* section_kind_name(SectionKind kind)
 {
     switch (kind) {
@@ -115,7 +137,7 @@ static void print_section_with_symbols(FILE *fp, Section *sec, const ObjFile *ob
     int count = 0;
     for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
         Symbol *sym = iter_next(&it);
-        if (sym && sym->section == sec_idx) count++;
+        if (sym && sym->section == sec_idx && !is_unused_local_spill_symbol(obj, sym)) count++;
     }
     if (count == 0) {
         print_data_section(fp, sec);
@@ -126,7 +148,7 @@ static void print_section_with_symbols(FILE *fp, Section *sec, const ObjFile *ob
     int i = 0;
     for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
         Symbol *sym = iter_next(&it);
-        if (sym && sym->section == sec_idx) arr[i++] = sym;
+        if (sym && sym->section == sec_idx && !is_unused_local_spill_symbol(obj, sym)) arr[i++] = sym;
     }
 
     qsort(arr, count, sizeof(Symbol*), cmp_sym_symbols);
@@ -170,6 +192,7 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
         for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
             Symbol *sym = iter_next(&it);
             if (!sym) continue;
+            if (is_unused_local_spill_symbol(obj, sym)) continue;
 
             if (sym->section < 0) {
                 if (sym->flags & SYM_FLAG_BIT) {
