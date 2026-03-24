@@ -559,11 +559,17 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
         return;
     }
     int targ = param_regs_char[arg_index];
+    const char* dst = isel_reg_name(targ);
     int64_t imm_val = 0;
     if (try_get_value_const(isel, v, &imm_val)) {
         char imm_str[32];
         snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
-        emit_mov(isel, isel_reg_name(targ), imm_str, ins);
+        emit_mov(isel, dst, imm_str, ins);
+        return;
+    }
+    const char* src_sym = lookup_value_addr_symbol(isel, v);
+    if (src_sym && isel_get_value_reg(isel, v) == -3) {
+        emit_load_symbol_byte(isel, src_sym, 0, dst, ins);
         return;
     }
     const char* src_lo = isel_get_lo_reg(isel, v);
@@ -583,7 +589,6 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
         }
     }
 
-    const char* dst = isel_reg_name(targ);
     int src_reg = reg_index_from_name(src_lo);
     if (src_reg < 0 && src_lo && is_memory_operand_local(src_lo)) {
         int r = isel_reload_spill(isel, v, 1, ins);
@@ -634,13 +639,21 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
 
     int targ_hi = param_regs_int_h[arg_index];
     int targ_lo = param_regs_int_l[arg_index];
+    const char* dst_hi = isel_reg_name(targ_hi);
+    const char* dst_lo = isel_reg_name(targ_lo);
     int64_t imm_val = 0;
     if (try_get_value_const(isel, v, &imm_val)) {
         char imm_hi[32], imm_lo[32];
         snprintf(imm_hi, sizeof(imm_hi), "#%d", (int)((imm_val >> 8) & 0xFF));
         snprintf(imm_lo, sizeof(imm_lo), "#%d", (int)(imm_val & 0xFF));
-        emit_mov(isel, isel_reg_name(targ_hi), imm_hi, ins);
-        emit_mov(isel, isel_reg_name(targ_lo), imm_lo, NULL);
+        emit_mov(isel, dst_hi, imm_hi, ins);
+        emit_mov(isel, dst_lo, imm_lo, NULL);
+        return;
+    }
+    const char* src_sym = lookup_value_addr_symbol(isel, v);
+    if (src_sym && isel_get_value_reg(isel, v) == -3) {
+        emit_load_symbol_byte(isel, src_sym, 0, dst_lo, ins);
+        emit_load_symbol_byte(isel, src_sym, 1, dst_hi, NULL);
         return;
     }
     const char* src_hi = isel_get_hi_reg(isel, v);
@@ -671,8 +684,6 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
         }
     }
 
-    const char* dst_hi = isel_reg_name(targ_hi);
-    const char* dst_lo = isel_reg_name(targ_lo);
     int src_hi_reg = reg_index_from_name(src_hi);
     int src_lo_reg = reg_index_from_name(src_lo);
 

@@ -76,6 +76,11 @@ static bool operand_reads_reg(const char* arg, const char* reg) {
     return false;
 }
 
+static bool is_indirect_operand(const char* op) {
+    if (!op) return false;
+    return op[0] == '@';
+}
+
 /* 删除指令 */
 static void remove_instr(List* instrs, int index) {
     if (!instrs || index < 0 || index >= instrs->len) return;
@@ -122,7 +127,7 @@ static int peephole_mov_chain(List* instrs, int start) {
     
     // MOV A, x; MOV y, A -> MOV y, x; MOV A, x
     if (operands_equal(dst1, "A") && operands_equal(src2, "A") && 
-        !operands_equal(dst2, "A") && !operands_equal(src1, "A")) {
+        is_register_operand(dst2) && (is_register_operand(src1) || is_immediate_operand(src1))) {
         
         // 检查第三条指令是否立即使用A
         bool a_used_next = false;
@@ -192,7 +197,7 @@ static int peephole_redundant_swap(List* instrs, int start) {
     const char* src2 = get_operand(ins2, 1);
     
     // MOV A, x; MOV x, A -> NOP (完全冗余)
-    if (operands_equal(dst1, "A") && operands_equal(dst2, src1) && 
+    if (is_register_operand(src1) && operands_equal(dst1, "A") && operands_equal(dst2, src1) && 
         operands_equal(src2, "A")) {
         remove_instr(instrs, start + 1);
         remove_instr(instrs, start);
@@ -297,8 +302,8 @@ static int peephole_mov_propagate(List* instrs, int start) {
     const char* src2 = get_operand(ins2, 1);
     
     // MOV Rx, A; MOV Ry, Rx -> MOV Ry, A; MOV Rx, A
-    if (operands_equal(src1, "A") && operands_equal(src2, dst1) &&
-        !operands_equal(dst2, "A")) {
+    if (is_register_operand(dst1) && operands_equal(src1, "A") && operands_equal(src2, dst1) &&
+        is_register_operand(dst2) && !operands_equal(dst2, "A")) {
         
         // 修改第二条指令的源操作数
         free(ins2->args->head->next->elem);
@@ -327,7 +332,7 @@ static int peephole_mem_to_reg(List* instrs, int start) {
     
     // MOV mem, A; MOV Rx, mem -> MOV Rx, A; MOV mem, A
     if (operands_equal(src1, "A") && operands_equal(src2, dst1) &&
-        dst2 && dst2[0] == 'R' && dst1 && dst1[0] != 'R') {
+        dst2 && dst2[0] == 'R' && dst1 && !is_indirect_operand(dst1) && is_memory_operand(dst1)) {
         
         // 交换两条指令：修改第二条为 MOV Rx, A
         free(ins2->args->head->next->elem);
@@ -380,6 +385,9 @@ static bool reg_read_before_write_or_end(List* instrs, int start, const char* re
         // 检查该寄存器是否被重新赋值（作为目标）
         if (is_mov(ins)) {
             const char* dst = get_operand(ins, 0);
+            if (operand_reads_reg(dst, reg)) {
+                return true;
+            }
             if (operands_equal(dst, reg)) {
                 return false; // 被重新赋值前没有被读取
             }

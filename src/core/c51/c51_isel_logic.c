@@ -289,37 +289,150 @@ void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
 }
 
 void emit_signed_cmp8_result(ISelContext* isel, Instr* ins, int dst_reg, int size, ValueName lhs, ValueName rhs, int cmp_type) {
-    /* Re-implementing helper moved from original file: compare signed 8-bit values and set bool result */
     char* l_true = isel_new_label(isel, "Lscmp_true");
+    char* l_false = isel_new_label(isel, "Lscmp_false");
+    char* l_same = isel_new_label(isel, "Lscmp_same");
     char* l_end = isel_new_label(isel, "Lscmp_end");
-    char lb_true[64], lb_end[64];
+    char lb_true[64], lb_false[64], lb_same[64], lb_end[64];
     snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
+    snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
+    snprintf(lb_same, sizeof(lb_same), "%s:", l_same);
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
     const char* llo = isel_get_lo_reg(isel, lhs);
     const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
 
+    emit_mov(isel, "A", llo, ins);
+    isel_emit(isel, "XRL", "A", rlo, NULL);
+    isel_emit(isel, "ANL", "A", "#128", NULL);
+    isel_emit(isel, "JZ", l_same, NULL, NULL);
+
     emit_mov(isel, "A", llo, NULL);
     isel_emit(isel, "ANL", "A", "#128", NULL);
-    isel_emit(isel, "JZ", l_true, NULL, NULL);
-
-    isel_emit(isel, lb_true, NULL, NULL, NULL);
-    emit_mov(isel, "A", llo, NULL);
-    isel_emit(isel, "SUBB", "A", rlo, NULL);
-
-    if (cmp_type == SIGNED_CMP_LT) {
-        isel_emit(isel, "JC", lb_true, NULL, NULL);
-    } else {
-        isel_emit(isel, "JNC", lb_true, NULL, NULL);
+    switch (cmp_type) {
+        case SIGNED_CMP_LT:
+        case SIGNED_CMP_LE:
+            isel_emit(isel, "JNZ", l_true, NULL, NULL);
+            isel_emit(isel, "SJMP", l_false, NULL, NULL);
+            break;
+        case SIGNED_CMP_GT:
+        case SIGNED_CMP_GE:
+            isel_emit(isel, "JZ", l_true, NULL, NULL);
+            isel_emit(isel, "SJMP", l_false, NULL, NULL);
+            break;
     }
 
+    isel_emit(isel, lb_same, NULL, NULL, NULL);
+    isel_emit(isel, "CLR", "C", NULL, NULL);
+    emit_mov(isel, "A", llo, NULL);
+    isel_emit(isel, "SUBB", "A", rlo, NULL);
+    switch (cmp_type) {
+        case SIGNED_CMP_LT:
+            isel_emit(isel, "JC", l_true, NULL, NULL);
+            isel_emit(isel, "SJMP", l_false, NULL, NULL);
+            break;
+        case SIGNED_CMP_GT:
+            isel_emit(isel, "JC", l_false, NULL, NULL);
+            isel_emit(isel, "JZ", l_false, NULL, NULL);
+            isel_emit(isel, "SJMP", l_true, NULL, NULL);
+            break;
+        case SIGNED_CMP_LE:
+            isel_emit(isel, "JC", l_true, NULL, NULL);
+            isel_emit(isel, "JZ", l_true, NULL, NULL);
+            isel_emit(isel, "SJMP", l_false, NULL, NULL);
+            break;
+        case SIGNED_CMP_GE:
+            isel_emit(isel, "JC", l_false, NULL, NULL);
+            isel_emit(isel, "SJMP", l_true, NULL, NULL);
+            break;
+    }
+
+    isel_emit(isel, lb_false, NULL, NULL, NULL);
     emit_set_bool_result(isel, ins, dst_reg, size, false);
-    isel_emit(isel, "SJMP", lb_end, NULL, NULL);
+    isel_emit(isel, "SJMP", l_end, NULL, NULL);
     isel_emit(isel, lb_true, NULL, NULL, NULL);
     emit_set_bool_result(isel, ins, dst_reg, size, true);
     isel_emit(isel, lb_end, NULL, NULL, NULL);
 
-    free(l_true); free(l_end);
+    free(l_true);
+    free(l_false);
+    free(l_same);
+    free(l_end);
+}
+
+static void emit_signed_cmp16_result(ISelContext* isel, Instr* ins, int dst_reg, int size,
+                                     ValueName lhs, ValueName rhs, bool is_gt) {
+    const char* lhi = isel_get_hi_reg(isel, lhs);
+    const char* rhi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, rhs));
+    const char* llo = isel_get_lo_reg(isel, lhs);
+    const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
+
+    char* l_true = isel_new_label(isel, "Lscmp16_true");
+    char* l_false = isel_new_label(isel, "Lscmp16_false");
+    char* l_same = isel_new_label(isel, "Lscmp16_same");
+    char* l_check_low = isel_new_label(isel, "Lscmp16_low");
+    char* l_end = isel_new_label(isel, "Lscmp16_end");
+    char lb_true[64], lb_false[64], lb_same[64], lb_check_low[64], lb_end[64];
+    snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
+    snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
+    snprintf(lb_same, sizeof(lb_same), "%s:", l_same);
+    snprintf(lb_check_low, sizeof(lb_check_low), "%s:", l_check_low);
+    snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+
+    emit_mov(isel, "A", lhi, ins);
+    isel_emit(isel, "XRL", "A", rhi, NULL);
+    isel_emit(isel, "ANL", "A", "#128", NULL);
+    isel_emit(isel, "JZ", l_same, NULL, NULL);
+
+    emit_mov(isel, "A", lhi, NULL);
+    isel_emit(isel, "ANL", "A", "#128", NULL);
+    if (is_gt) {
+        isel_emit(isel, "JZ", l_true, NULL, NULL);
+        isel_emit(isel, "SJMP", l_false, NULL, NULL);
+    } else {
+        isel_emit(isel, "JZ", l_false, NULL, NULL);
+        isel_emit(isel, "SJMP", l_true, NULL, NULL);
+    }
+
+    isel_emit(isel, lb_same, NULL, NULL, NULL);
+    isel_emit(isel, "CLR", "C", NULL, NULL);
+    emit_mov(isel, "A", lhi, NULL);
+    isel_emit(isel, "SUBB", "A", rhi, NULL);
+    if (is_gt) {
+        isel_emit(isel, "JC", l_false, NULL, NULL);
+        isel_emit(isel, "JZ", l_check_low, NULL, NULL);
+        isel_emit(isel, "SJMP", l_true, NULL, NULL);
+    } else {
+        isel_emit(isel, "JC", l_true, NULL, NULL);
+        isel_emit(isel, "JZ", l_check_low, NULL, NULL);
+        isel_emit(isel, "SJMP", l_false, NULL, NULL);
+    }
+
+    isel_emit(isel, lb_check_low, NULL, NULL, NULL);
+    isel_emit(isel, "CLR", "C", NULL, NULL);
+    emit_mov(isel, "A", llo, NULL);
+    isel_emit(isel, "SUBB", "A", rlo, NULL);
+    if (is_gt) {
+        isel_emit(isel, "JC", l_false, NULL, NULL);
+        isel_emit(isel, "JZ", l_false, NULL, NULL);
+        isel_emit(isel, "SJMP", l_true, NULL, NULL);
+    } else {
+        isel_emit(isel, "JC", l_true, NULL, NULL);
+        isel_emit(isel, "SJMP", l_false, NULL, NULL);
+    }
+
+    isel_emit(isel, lb_false, NULL, NULL, NULL);
+    emit_set_bool_result(isel, ins, dst_reg, size, false);
+    isel_emit(isel, "SJMP", l_end, NULL, NULL);
+    isel_emit(isel, lb_true, NULL, NULL, NULL);
+    emit_set_bool_result(isel, ins, dst_reg, size, true);
+    isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+    free(l_true);
+    free(l_false);
+    free(l_same);
+    free(l_check_low);
+    free(l_end);
 }
 
 bool is_unsigned_compare(ISelContext* isel, ValueName a, ValueName b) {
@@ -408,51 +521,69 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
                         next->op = IROP_NOP;
                         return;
                     } else {
-                        /* signed 16-bit compare: check high then low */
                         const char* lhi = isel_get_hi_reg(isel, lhs);
                         const char* rhi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, rhs));
                         const char* llo = isel_get_lo_reg(isel, lhs);
                         const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
+                        char* l_same = isel_new_label(isel, "Lscmp16_same_tmp");
+                        char* l_check_low = isel_new_label(isel, "Lscmp16_low_tmp");
 
-                        isel_emit(isel, "CLR", "C", NULL, NULL);
                         emit_mov(isel, "A", lhi, ins);
-                        isel_emit(isel, "SUBB", "A", rhi, NULL);
+                        isel_emit(isel, "XRL", "A", rhi, NULL);
+                        isel_emit(isel, "ANL", "A", "#128", NULL);
+                        isel_emit(isel, "JZ", l_same, NULL, NULL);
 
-                        if (!is_gt) {
-                            char* l_check_low = isel_new_label(isel, "Lcheck_low_tmp");
-                            isel_emit(isel, "JC", target_f, NULL, NULL);
-                            isel_emit(isel, "JZ", l_check_low, NULL, NULL);
-                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
-
-                            isel_emit(isel, l_check_low, NULL, NULL, NULL);
-                            isel_emit(isel, "CLR", "C", NULL, NULL);
-                            emit_mov(isel, "A", llo, NULL);
-                            isel_emit(isel, "SUBB", "A", rlo, NULL);
+                        emit_mov(isel, "A", lhi, NULL);
+                        isel_emit(isel, "ANL", "A", "#128", NULL);
+                        if (is_gt) {
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
-                            isel_emit(isel, "JC", target_t, NULL, NULL);
+                            isel_emit(isel, "JZ", target_t, NULL, instr_to_ssa_str(ins));
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
                             isel_emit(isel, "SJMP", target_f, NULL, NULL);
-                            free(l_check_low);
                         } else {
-                            char* l_check_low = isel_new_label(isel, "Lcheck_low_tmp");
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "JZ", target_f, NULL, instr_to_ssa_str(ins));
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                        }
+
+                        isel_emit(isel, l_same, NULL, NULL, NULL);
+                        isel_emit(isel, "CLR", "C", NULL, NULL);
+                        emit_mov(isel, "A", lhi, NULL);
+                        isel_emit(isel, "SUBB", "A", rhi, NULL);
+                        if (is_gt) {
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
                             isel_emit(isel, "JC", target_f, NULL, NULL);
                             isel_emit(isel, "JZ", l_check_low, NULL, NULL);
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                             isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                        } else {
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "JC", target_t, NULL, NULL);
+                            isel_emit(isel, "JZ", l_check_low, NULL, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                        }
 
-                            isel_emit(isel, l_check_low, NULL, NULL, NULL);
-                            isel_emit(isel, "CLR", "C", NULL, NULL);
-                            emit_mov(isel, "A", llo, NULL);
-                            isel_emit(isel, "SUBB", "A", rlo, NULL);
+                        isel_emit(isel, l_check_low, NULL, NULL, NULL);
+                        isel_emit(isel, "CLR", "C", NULL, NULL);
+                        emit_mov(isel, "A", llo, NULL);
+                        isel_emit(isel, "SUBB", "A", rlo, NULL);
+                        if (is_gt) {
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
                             isel_emit(isel, "JC", target_f, NULL, NULL);
                             isel_emit(isel, "JZ", target_f, NULL, NULL);
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                             isel_emit(isel, "SJMP", target_t, NULL, NULL);
-                            free(l_check_low);
+                        } else {
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                            isel_emit(isel, "JC", target_t, NULL, NULL);
+                            emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
                         }
 
+                        free(l_same);
+                        free(l_check_low);
                         next->op = IROP_NOP;
                         return;
                     }
@@ -544,6 +675,12 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
             free(l_false);
         }
     } else {
+        if (!unsigned_cmp) {
+            emit_signed_cmp16_result(isel, ins, dst_reg, size, lhs, rhs, is_gt);
+            free(l_true); free(l_end);
+            return;
+        }
+
         const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
         const char* rhi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, rhs));
         const char* llo = isel_get_lo_reg(isel, lhs);

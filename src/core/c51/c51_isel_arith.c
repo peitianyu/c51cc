@@ -55,6 +55,7 @@ void emit_const(ISelContext* isel, Instr* ins) {
 
 void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
+    Ctype* src1_type = get_value_type(isel, src1);
     int size = ins->type ? ins->type->size : 1;
     int src1_size = get_value_size(isel, src1);
     int64_t imm_val;
@@ -69,7 +70,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         char* k = int_to_key(src1);
         const char* addrname = (const char*)dict_get(isel->ctx->value_to_addr, k);
         free(k);
-        if (addrname && src2_is_imm) {
+        if (addrname && src2_is_imm && src1_type && src1_type->type == CTYPE_PTR) {
             int addr_dst = alloc_reg_for_value(isel, ins->dest, 2);
             int phys_addr_dst = addr_dst;
             if (phys_addr_dst < 0) phys_addr_dst = 0;
@@ -503,14 +504,28 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
     if (size == 1) {
         if (is_unsigned) {
             // unsigned 8-bit: use DIV AB
-            emit_mov(isel, "A", isel_get_lo_reg(isel, num), ins);
-            emit_mov(isel, "B", isel_get_lo_reg(isel, den), NULL);
+            const char* num_src = isel_get_lo_reg(isel, num);
+            const char* den_src = isel_get_lo_reg(isel, den);
+            int tnum = -1;
+            const char* safe_num = num_src;
+
+            if (strcmp(num_src, "A") == 0 || strcmp(den_src, "A") == 0) {
+                tnum = alloc_temp_reg(isel, -1, 1);
+                if (tnum >= 0) {
+                    safe_num = isel_reg_name(tnum);
+                    emit_mov(isel, safe_num, num_src, NULL);
+                }
+            }
+
+            emit_mov(isel, "A", safe_num, ins);
+            emit_mov(isel, "B", den_src, NULL);
             isel_emit(isel, "DIV", "AB", NULL, NULL);
             if (want_mod)
                 emit_mov(isel, dst_lo, "B", ins);
             else
                 emit_mov(isel, dst_lo, "A", ins);
             store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+            if (tnum >= 0) free_temp_reg(isel, tnum, 1);
             return;
         }
 
@@ -975,10 +990,10 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             isel_emit(isel, "DEC", "A", NULL, NULL);
         } else {
             isel_emit(isel, "CLR", "C", NULL, NULL);
-            ValueName src2 = get_src2_value(ins);
-            const char* src2_lo = isel_get_lo_reg(isel, src2);
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%d", imm_low);
             char* ssa = instr_to_ssa_str(ins);
-            isel_emit(isel, "SUBB", "A", src2_lo, ssa);
+            isel_emit(isel, "SUBB", "A", imm_str, ssa);
             free(ssa);
         }
     } else {

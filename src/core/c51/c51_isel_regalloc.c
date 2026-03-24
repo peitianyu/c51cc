@@ -1,4 +1,5 @@
 #include "c51_isel_regalloc.h"
+#include "c51_isel_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -269,6 +270,48 @@ static int find_reusable_spill_slot(SpillSlotInfo* slots, int slot_count,
     return -1;
 }
 
+static bool interval_crosses_call(Func* func, int start, int end) {
+    if (!func || end <= start) return false;
+
+    int instr_idx = 0;
+    for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
+        Block* block = iter_next(&bit);
+
+        for (int pass = 0; pass < 2; pass++) {
+            List* lst = (pass == 0) ? block->phis : block->instrs;
+            if (!lst) continue;
+
+            for (Iter it = list_iter(lst); !iter_end(it);) {
+                Instr* ins = iter_next(&it);
+                if (!ins) continue;
+
+                if (instr_idx > start && instr_idx < end && ins->op == IROP_CALL) {
+                    return true;
+                }
+
+                instr_idx++;
+            }
+        }
+    }
+
+    return false;
+}
+
+static const char* ensure_local_value_symbol(C51GenContext* genctx, const char* name, int size, SectionKind use_kind) {
+    if (!genctx || !genctx->obj || !name || size <= 0) return NULL;
+
+    const char* sec_name = "?DT?";
+    if (use_kind == SEC_IDATA) sec_name = "?ID?";
+    else if (use_kind == SEC_XDATA) sec_name = "?XD?";
+
+    int sec_idx = obj_add_section(genctx->obj, sec_name, use_kind, 0, 1);
+    Section* sec = obj_get_section(genctx->obj, sec_idx);
+    int offset = sec->size;
+    section_append_zeros(sec, size);
+    obj_add_symbol(genctx->obj, name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_LOCAL);
+    return name;
+}
+
 /* 执行线性扫描寄存器分配 */
 void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
     if (!lsc || !genctx) return;
@@ -337,26 +380,33 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
         /* 返回值寄存器保护：如果是函数返回值，生命周期内禁止分配R7/R6等 */
         // TODO: 可根据函数返回类型进一步保护R7/R6/R5/R4等
 
+        bool force_spill = false;
+        if (genctx && genctx->current_func && interval->size <= 2) {
+            force_spill = interval_crosses_call(genctx->current_func, interval->start, interval->end);
+        }
+
         /* 尝试分配寄存器：按Keil约定优先使用R0-R5 */
         bool allocated = false;
-        for (int r = k_temp_reg_min; r <= k_temp_reg_max; r++) {
-            /* 跳过生命周期未结束的参数/返回寄存器 */
-            if (lsc->active_regs[r] >= 0 && lsc->active_reg_end[r] >= interval->start) continue;
-            /* 双字节变量需保证r+1也可用且不冲突 */
-            if (interval->size == 2) {
-                if (r + 1 > k_temp_reg_max) continue;
-                if ((lsc->active_regs[r + 1] >= 0 && lsc->active_reg_end[r + 1] >= interval->start)) continue;
+        if (!force_spill) {
+            for (int r = k_temp_reg_min; r <= k_temp_reg_max; r++) {
+                /* 跳过生命周期未结束的参数/返回寄存器 */
+                if (lsc->active_regs[r] >= 0 && lsc->active_reg_end[r] >= interval->start) continue;
+                /* 双字节变量需保证r+1也可用且不冲突 */
+                if (interval->size == 2) {
+                    if (r + 1 > k_temp_reg_max) continue;
+                    if ((lsc->active_regs[r + 1] >= 0 && lsc->active_reg_end[r + 1] >= interval->start)) continue;
+                }
+                /* 分配 */
+                lsc->active_regs[r] = interval->val;
+                lsc->active_reg_end[r] = interval->end;
+                interval->reg = r;
+                if (interval->size == 2) {
+                    lsc->active_regs[r + 1] = interval->val;
+                    lsc->active_reg_end[r + 1] = interval->end;
+                }
+                allocated = true;
+                break;
             }
-            /* 分配 */
-            lsc->active_regs[r] = interval->val;
-            lsc->active_reg_end[r] = interval->end;
-            interval->reg = r;
-            if (interval->size == 2) {
-                lsc->active_regs[r + 1] = interval->val;
-                lsc->active_reg_end[r + 1] = interval->end;
-            }
-            allocated = true;
-            break;
         }
 
         /* 如果没有空闲寄存器，优先抢占生命周期最晚结束的临时寄存器 */
@@ -419,19 +469,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                         slot_name = spill_slots[spill_slot_count].name;
                         spill_slot_count++;
 
-                        if (genctx->obj) {
-                            const char* sec_name = "?DT?";
-                            if (use_kind == SEC_IDATA) sec_name = "?ID?";
-                            else if (use_kind == SEC_XDATA) sec_name = "?XD?";
-                            else if (use_kind == SEC_DATA) sec_name = "?DT?";
-
-                            int sec_idx = obj_add_section(genctx->obj, sec_name, use_kind, 0, 1);
-                            Section* sec = obj_get_section(genctx->obj, sec_idx);
-                            int offset = sec->size;
-                            section_append_zeros(sec, interval->size);
-                            obj_add_symbol(genctx->obj, slot_name, SYM_DATA, sec_idx, offset,
-                                           interval->size, SYM_FLAG_LOCAL);
-                        }
+                        ensure_local_value_symbol(genctx, slot_name, interval->size, use_kind);
                     }
 
                     char* key = int_to_key(interval->val);
@@ -793,16 +831,45 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
             for (int j = 0; j < reg_count; j++) {
                 int r = expected_regs[j];
                 used_regs[r] = true;
-                // 在isel中标记寄存器忙碌，并记录对应的值
-                isel->reg_busy[r] = true;
-                isel->reg_val[r] = param_ins->dest;
             }
 
-            // 将分配结果存入 value_to_reg（对于多字节，只存第一个寄存器，线性扫描会处理连续）
-            int* reg_num = malloc(sizeof(int));
-            *reg_num = expected_regs[0];
-            char* key = int_to_key(param_ins->dest);
-            dict_put(isel->ctx->value_to_reg, key, reg_num);
+            if (size <= 2 && isel && isel->ctx) {
+                C51GenContext* gen = isel->ctx;
+                char buf[128];
+                snprintf(buf, sizeof(buf), "__arg_%s_%d", f->name, param_pos);
+
+                SectionKind use_kind = gen->spill_section;
+                if (gen->spill_use_xdata_for_large && size > 1) {
+                    use_kind = SEC_XDATA;
+                }
+                ensure_local_value_symbol(gen, buf, size, use_kind);
+
+                char* addr_key = int_to_key(param_ins->dest);
+                dict_put(gen->value_to_addr, addr_key, strdup(buf));
+
+                int* reg_num = malloc(sizeof(int));
+                *reg_num = -3;
+                char* reg_key = int_to_key(param_ins->dest);
+                dict_put(gen->value_to_reg, reg_key, reg_num);
+
+                if (size == 1) {
+                    emit_store_symbol_byte(isel, buf, 0, isel_reg_name(expected_regs[0]), NULL);
+                } else {
+                    emit_store_symbol_byte(isel, buf, 0, isel_reg_name(expected_regs[1]), NULL);
+                    emit_store_symbol_byte(isel, buf, 1, isel_reg_name(expected_regs[0]), NULL);
+                }
+            } else {
+                for (int j = 0; j < reg_count; j++) {
+                    int r = expected_regs[j];
+                    isel->reg_busy[r] = true;
+                    isel->reg_val[r] = param_ins->dest;
+                }
+
+                int* reg_num = malloc(sizeof(int));
+                *reg_num = expected_regs[0];
+                char* key = int_to_key(param_ins->dest);
+                dict_put(isel->ctx->value_to_reg, key, reg_num);
+            }
         }
 
         // 增加对应大小类别的索引

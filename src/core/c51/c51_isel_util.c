@@ -203,11 +203,7 @@ void emit_load_symbol_byte(ISelContext* isel, const char* sym, int offset, const
     }
 
     if (sym_sec == SEC_IDATA) {
-        char r0_ref[256];
-        if (offset <= 0) snprintf(r0_ref, sizeof(r0_ref), "%s", sym);
-        else snprintf(r0_ref, sizeof(r0_ref), "%s + %d", sym, offset);
-        isel_emit(isel, "MOV", "R0", r0_ref, NULL);
-        isel_emit(isel, "MOV", "A", "@R0", ssa);
+        isel_emit(isel, "MOV", "A", ref, ssa);
         if (strcmp(dst, "A") != 0) {
             isel_emit(isel, "MOV", dst, "A", NULL);
         }
@@ -253,16 +249,12 @@ void emit_store_symbol_byte(ISelContext* isel, const char* sym, int offset, cons
     }
 
     if (sym_sec == SEC_IDATA) {
-        char r0_ref[256];
-        if (offset <= 0) snprintf(r0_ref, sizeof(r0_ref), "%s", sym);
-        else snprintf(r0_ref, sizeof(r0_ref), "%s + %d", sym, offset);
-        isel_emit(isel, "MOV", "R0", r0_ref, NULL);
         if (strcmp(src, "A") != 0) emit_mov(isel, "A", src, ins);
         else {
             char* ssa = instr_to_ssa_str(ins);
             free(ssa);
         }
-        isel_emit(isel, "MOV", "@R0", "A", NULL);
+        isel_emit(isel, "MOV", ref, "A", NULL);
         return;
     }
 
@@ -359,14 +351,12 @@ void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int si
 
     if (sym_sec == SEC_IDATA) {
         char off1[256];
-        isel_emit(isel, "MOV", "R0", var_name, NULL);
         emit_mov(isel, "A", src_lo, ins);
-        isel_emit(isel, "MOV", "@R0", "A", NULL);
+        isel_emit(isel, "MOV", var_name, "A", NULL);
         if (size == 2) {
-            snprintf(off1, sizeof(off1), "%s + 1", var_name);
-            isel_emit(isel, "MOV", "R0", off1, NULL);
+            snprintf(off1, sizeof(off1), "(%s + 1)", var_name);
             emit_mov(isel, "A", src_hi, NULL);
-            isel_emit(isel, "MOV", "@R0", "A", NULL);
+            isel_emit(isel, "MOV", off1, "A", NULL);
         }
         return;
     }
