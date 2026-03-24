@@ -785,6 +785,13 @@ void emit_load(ISelContext* isel, Instr* ins) {
 
     int space = get_mem_space(ins->mem_type);
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
+    if (var_name && isel->ctx && isel->ctx->obj) {
+        SectionKind sym_sec = get_symbol_section_kind(isel, var_name);
+        if (sym_sec == SEC_XDATA) space = 4;
+        else if (sym_sec == SEC_IDATA) space = 2;
+        else if (sym_sec == SEC_CODE) space = 6;
+        else space = 1;
+    }
     int reg = alloc_reg_for_value(isel, ins->dest, size);
     int phys_reg = reg;
     bool temp_result = false;

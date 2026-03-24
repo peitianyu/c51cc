@@ -35,10 +35,22 @@ void add_data_symbol(C51GenContext *ctx, const char *name,
     obj_add_symbol(ctx->obj, name, SYM_DATA, sec_idx, addr_or_offset, size, flags);
 }
 
+static bool is_pointer_object_to_code(const GlobalVar *g)
+{
+    if (!g || !g->type || g->type->type != CTYPE_PTR) return false;
+    return get_attr(g->type->attr).ctype_data == CTYPE_DATA_CODE;
+}
+
 /* 根据存储属性选择段类型和前缀 */
 void select_section_kind_and_prefix(CtypeAttr attr, GlobalVar *g,
                                     SectionKind *out_kind, const char **out_prefix)
 {
+    if (is_pointer_object_to_code(g)) {
+        *out_kind = SEC_DATA;
+        *out_prefix = "?DT?";
+        return;
+    }
+
     switch (attr.ctype_data) {
         case CTYPE_DATA_IDATA:
             *out_kind = SEC_IDATA; *out_prefix = "?ID?"; break;
@@ -61,7 +73,8 @@ bool handle_const_global_var(C51GenContext *ctx, GlobalVar *g)
 {
     CtypeAttr attr = get_attr(g->type->attr);
 
-    if (attr.ctype_data == CTYPE_DATA_CODE || (attr.ctype_const && g->type->type != CTYPE_ARRAY)) {
+    if (!is_pointer_object_to_code(g) &&
+        (attr.ctype_data == CTYPE_DATA_CODE || (attr.ctype_const && g->type->type != CTYPE_ARRAY))) {
         int sec_idx = obj_add_section(ctx->obj, "?CO?", SEC_CODE, 0, 1);
         Section *sec = obj_get_section(ctx->obj, sec_idx);
 
