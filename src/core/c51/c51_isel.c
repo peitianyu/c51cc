@@ -354,11 +354,34 @@ static bool detect_two_counter_loops(Func* f, int *out_outer, int *out_inner) {
     return false;
 }
 
+static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
+    if (!isel || !ins) return NULL;
+    if (ins->type) return ins->type;
+
+    if (ins->op == IROP_SELECT && ins->args && ins->args->len >= 3) {
+        ValueName tv = *(ValueName*)list_get(ins->args, 1);
+        ValueName fv = *(ValueName*)list_get(ins->args, 2);
+        Ctype* tv_type = get_value_type(isel, tv);
+        Ctype* fv_type = get_value_type(isel, fv);
+        if (tv_type) return tv_type;
+        if (fv_type) return fv_type;
+    }
+
+    if (ins->op == IROP_PHI && ins->args && ins->args->len > 0) {
+        ValueName src = *(ValueName*)list_get(ins->args, 0);
+        return get_value_type(isel, src);
+    }
+
+    return NULL;
+}
+
 static void isel_record_dest_type(ISelContext* isel, Instr* ins) {
-    if (!isel || !ins) return;
-    if (ins->dest > 0 && ins->type && isel->ctx && isel->ctx->value_type) {
+    if (!isel || !ins || ins->dest <= 0 || !isel->ctx || !isel->ctx->value_type) return;
+
+    Ctype* type = infer_dest_type(isel, ins);
+    if (type) {
         char* key = int_to_key(ins->dest);
-        dict_put(isel->ctx->value_type, key, ins->type);
+        dict_put(isel->ctx->value_type, key, type);
     }
 }
 

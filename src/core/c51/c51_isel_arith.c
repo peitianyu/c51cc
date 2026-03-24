@@ -169,7 +169,9 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
             int src2_size = get_value_size(isel, src2);
             if (src2_size == 2) {
                 if (src2_spilled_mem) {
+                    emit_mov(isel, dst_hi, "A", NULL);
                     emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
+                    emit_mov(isel, "A", dst_hi, NULL);
                     isel_emit(isel, "ADDC", "A", "B", NULL);
                 } else {
                     const char* src2_hi = isel_get_hi_reg(isel, src2);
@@ -854,10 +856,23 @@ void emit_select(ISelContext* isel, Instr* ins) {
     ValueName tv = *(ValueName*)list_get(ins->args, 1);
     ValueName fv = *(ValueName*)list_get(ins->args, 2);
 
-    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
+    int tv_size = get_value_size(isel, tv);
+    int fv_size = get_value_size(isel, fv);
+    if (tv_size > size) size = tv_size;
+    if (fv_size > size) size = fv_size;
+    if (size < 1) size = 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
-    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
-    const char* dst_hi = isel_reg_name(dst_reg);
+    int phys_dst_reg = dst_reg;
+    bool temp_result = false;
+    if (phys_dst_reg < 0 || phys_dst_reg + size - 1 > 7) {
+        phys_dst_reg = alloc_temp_reg(isel, ins->dest, size);
+        temp_result = phys_dst_reg >= 0;
+    }
+    if (phys_dst_reg < 0) phys_dst_reg = 0;
+
+    const char* dst_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(phys_dst_reg);
 
     char* l_true = isel_new_label(isel, "Lsel_true");
     char* l_end = isel_new_label(isel, "Lsel_end");
@@ -879,6 +894,12 @@ void emit_select(ISelContext* isel, Instr* ins) {
 
     bool need_temp_tv = (strcmp(src_tv_lo, "A") == 0) || (strcmp(src_tv_lo, dst_lo) == 0);
     bool need_temp_fv = (strcmp(src_fv_lo, "A") == 0) || (strcmp(src_fv_lo, dst_lo) == 0);
+    if (size == 2) {
+        need_temp_tv = need_temp_tv || (strcmp(src_tv_hi, "A") == 0) || (strcmp(src_tv_hi, dst_hi) == 0) ||
+                       (strcmp(src_tv_lo, dst_hi) == 0) || (strcmp(src_tv_hi, dst_lo) == 0);
+        need_temp_fv = need_temp_fv || (strcmp(src_fv_hi, "A") == 0) || (strcmp(src_fv_hi, dst_hi) == 0) ||
+                       (strcmp(src_fv_lo, dst_hi) == 0) || (strcmp(src_fv_hi, dst_lo) == 0);
+    }
 
     int tr_tv = -1, tr_fv = -1;
     const char* tv_lo_src = src_tv_lo;
@@ -914,10 +935,11 @@ void emit_select(ISelContext* isel, Instr* ins) {
     if (size == 2) emit_mov(isel, dst_hi, tv_hi_src, NULL);
     isel_emit(isel, lb_end, NULL, NULL, NULL);
 
-    store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+    store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
 
     if (tr_tv >= 0) free_temp_reg(isel, tr_tv, size);
     if (tr_fv >= 0) free_temp_reg(isel, tr_fv, size);
+    if (temp_result) free_temp_reg(isel, phys_dst_reg, size);
 
     free(l_true); free(l_end);
 }
@@ -970,7 +992,15 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
 
     const char* src1_lo = isel_get_lo_reg(isel, src1);
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
-    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
+    int phys_dst_reg = dst_reg;
+    bool temp_result = false;
+    if (phys_dst_reg < 0 || phys_dst_reg + size - 1 > 7) {
+        phys_dst_reg = alloc_temp_reg(isel, ins->dest, size);
+        temp_result = phys_dst_reg >= 0;
+    }
+    if (phys_dst_reg < 0) phys_dst_reg = 0;
+
+    const char* dst_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
 
     if (src2_spilled_mem) {
         emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
@@ -1011,7 +1041,7 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     emit_mov(isel, dst_lo, "A", ins);
 
     if (size == 2) {
-        const char* dst_hi = isel_reg_name(dst_reg);
+        const char* dst_hi = isel_reg_name(phys_dst_reg);
 
         if (src1_size == 2) {
             const char* src1_hi = isel_get_hi_reg(isel, src1);
@@ -1028,7 +1058,9 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             int src2_size = get_value_size(isel, src2);
             if (src2_size == 2) {
                 if (src2_spilled_mem) {
+                    emit_mov(isel, dst_hi, "A", NULL);
                     emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
+                    emit_mov(isel, "A", dst_hi, NULL);
                     isel_emit(isel, "SUBB", "A", "B", NULL);
                 } else {
                     const char* src2_hi = isel_get_hi_reg(isel, src2);
@@ -1042,14 +1074,14 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         emit_mov(isel, dst_hi, "A", ins);
     }
 
-    store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+    store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
 
     if (next && next->op == IROP_RET) {
         const char* ret_lo = NULL;
         const char* ret_hi = NULL;
-        if (dst_reg >= 0) {
-            ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
-            ret_hi = isel_reg_name(dst_reg);
+        if (phys_dst_reg >= 0) {
+            ret_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
+            ret_hi = isel_reg_name(phys_dst_reg);
         } else {
             ret_lo = isel_get_lo_reg(isel, ins->dest);
             ret_hi = isel_get_hi_reg(isel, ins->dest);
@@ -1074,6 +1106,10 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             char* key = int_to_key(ins->dest);
             dict_put(isel->ctx->value_to_reg, key, reg_num);
         }
+    }
+
+    if (temp_result) {
+        free_temp_reg(isel, phys_dst_reg, size);
     }
 }
 

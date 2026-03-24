@@ -331,7 +331,11 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     if (ptr_size < 2) ptr_size = 2;
 
     int dst_reg = alloc_reg_for_value(isel, ins->dest, ptr_size);
-    if (dst_reg < 0) dst_reg = alloc_temp_reg(isel, ins->dest, ptr_size);
+    bool temp_dst = false;
+    if (dst_reg < 0) {
+        dst_reg = alloc_temp_reg(isel, ins->dest, ptr_size);
+        temp_dst = dst_reg >= 0;
+    }
     if (dst_reg < 0) return;
 
     const char* dst_regs[3] = {
@@ -342,6 +346,46 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     const char* dst_lo = (ptr_size == 2) ? isel_reg_name(dst_reg + 1) : isel_reg_name(dst_reg);
     const char* dst_hi = isel_reg_name(dst_reg + (ptr_size == 2 ? 0 : 1));
     const char* dst_tag = (ptr_size >= 3) ? isel_reg_name(dst_reg + 2) : NULL;
+
+    int scale = (int)(ins->imm.ival ? ins->imm.ival : 1);
+    int64_t idx_imm = 0;
+    bool idx_is_imm = try_get_value_const(isel, idx, &idx_imm);
+    const char* idx_lo = NULL;
+    const char* idx_hi = NULL;
+    int scaled_reg = -1;
+    const char* scaled_lo = NULL;
+    const char* scaled_hi = NULL;
+
+    if (!idx_is_imm) {
+        idx_lo = isel_get_lo_reg(isel, idx);
+        idx_hi = isel_get_hi_reg(isel, idx);
+
+        bool overlap_dst = (strcmp(idx_lo, dst_lo) == 0) || (strcmp(idx_lo, dst_hi) == 0) ||
+                           (strcmp(idx_hi, dst_lo) == 0) || (strcmp(idx_hi, dst_hi) == 0);
+        if (scale != 1 || overlap_dst) {
+            scaled_reg = alloc_temp_reg(isel, -1, 2);
+            if (scaled_reg >= 0) {
+                scaled_hi = isel_reg_name(scaled_reg);
+                scaled_lo = isel_reg_name(scaled_reg + 1);
+                emit_mov(isel, scaled_lo, idx_lo, ins);
+                emit_mov(isel, scaled_hi, idx_hi, NULL);
+            }
+        }
+
+        if (!scaled_lo) {
+            scaled_lo = idx_lo;
+            scaled_hi = idx_hi;
+        }
+
+        for (int i = 1; scaled_reg >= 0 && i < scale; i++) {
+            emit_mov(isel, "A", scaled_lo, NULL);
+            isel_emit(isel, "ADD", "A", idx_lo, NULL);
+            emit_mov(isel, scaled_lo, "A", NULL);
+            emit_mov(isel, "A", scaled_hi, NULL);
+            isel_emit(isel, "ADDC", "A", idx_hi, NULL);
+            emit_mov(isel, scaled_hi, "A", NULL);
+        }
+    }
 
     int base_reg = isel_get_value_reg(isel, base);
     if (base_reg == -3) {
@@ -358,13 +402,13 @@ void emit_offset(ISelContext* isel, Instr* ins) {
         }
     } else {
         const char* sym = lookup_value_addr_symbol(isel, base);
-        if (!sym) return;
+        if (!sym) {
+            if (scaled_reg >= 0) free_temp_reg(isel, scaled_reg, 2);
+            if (temp_dst) free_temp_reg(isel, dst_reg, ptr_size);
+            return;
+        }
         emit_materialize_pointer_symbol(isel, sym, ptr_size, dst_lo, dst_hi, dst_tag, ins);
     }
-
-    int scale = (int)(ins->imm.ival ? ins->imm.ival : 1);
-    int64_t idx_imm = 0;
-    bool idx_is_imm = try_get_value_const(isel, idx, &idx_imm);
 
     if (idx_is_imm) {
         int total = (int)(idx_imm * scale);
@@ -378,28 +422,6 @@ void emit_offset(ISelContext* isel, Instr* ins) {
         isel_emit(isel, "ADDC", "A", imm_hi, NULL);
         emit_mov(isel, dst_hi, "A", NULL);
     } else {
-        const char* idx_lo = isel_get_lo_reg(isel, idx);
-        const char* idx_hi = isel_get_hi_reg(isel, idx);
-        int scaled_reg = alloc_temp_reg(isel, -1, 2);
-        const char* scaled_lo = idx_lo;
-        const char* scaled_hi = idx_hi;
-
-        if (scaled_reg >= 0) {
-            scaled_hi = isel_reg_name(scaled_reg);
-            scaled_lo = isel_reg_name(scaled_reg + 1);
-            emit_mov(isel, scaled_lo, idx_lo, ins);
-            emit_mov(isel, scaled_hi, idx_hi, NULL);
-
-            for (int i = 1; i < scale; i++) {
-                emit_mov(isel, "A", scaled_lo, NULL);
-                isel_emit(isel, "ADD", "A", idx_lo, NULL);
-                emit_mov(isel, scaled_lo, "A", NULL);
-                emit_mov(isel, "A", scaled_hi, NULL);
-                isel_emit(isel, "ADDC", "A", idx_hi, NULL);
-                emit_mov(isel, scaled_hi, "A", NULL);
-            }
-        }
-
         emit_mov(isel, "A", dst_lo, NULL);
         isel_emit(isel, "ADD", "A", scaled_lo, NULL);
         emit_mov(isel, dst_lo, "A", NULL);
@@ -408,12 +430,11 @@ void emit_offset(ISelContext* isel, Instr* ins) {
         isel_emit(isel, "ADDC", "A", scaled_hi, NULL);
         emit_mov(isel, dst_hi, "A", NULL);
 
-        if (scaled_reg >= 0) {
-            free_temp_reg(isel, scaled_reg, 2);
-        }
+        if (scaled_reg >= 0) free_temp_reg(isel, scaled_reg, 2);
     }
 
     store_spilled_mem_result(isel, ins, dst_reg, ptr_size);
+    if (temp_dst) free_temp_reg(isel, dst_reg, ptr_size);
 
 }
 
