@@ -322,6 +322,161 @@ static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueNam
     return false;
 }
 
+static bool emit_store_to_pointer_value(ISelContext* isel, Instr* ins, ValueName ptr, ValueName val) {
+    Ctype* ptr_type = get_value_type(isel, ptr);
+    if (!ptr_type || ptr_type->type != CTYPE_PTR) return false;
+
+    int ptr_abi_size = c51_abi_type_size(ptr_type);
+    int store_size = (ptr_type->ptr ? c51_abi_type_size(ptr_type->ptr) : get_value_size(isel, val));
+    if (store_size < 1) store_size = 1;
+    if (store_size > 2) store_size = 2;
+
+    int ptr_reg = isel_get_value_reg(isel, ptr);
+    if (ptr_reg == -3) {
+        ptr_reg = isel_reload_spill(isel, ptr, ptr_abi_size, ins);
+    }
+    if (ptr_reg < 0) return false;
+
+    int ptr_space = get_mem_space(ptr_type);
+    const char* val_lo = isel_get_lo_reg(isel, val);
+    const char* val_hi = (store_size == 2) ? isel_get_hi_reg(isel, val) : NULL;
+    int scratch_reg = -1;
+    const char* scratch = NULL;
+
+    if (ptr_abi_size == 1 || ptr_abi_size == 3) {
+        scratch_reg = alloc_temp_reg(isel, -1, 1);
+        scratch = (scratch_reg >= 0) ? isel_reg_name(scratch_reg) : "R0";
+    }
+
+    if (ptr_abi_size == 1) {
+        const char* ptr_lo = isel_reg_name(ptr_reg);
+        char ref[16];
+
+        isel_emit(isel, "MOV", scratch, ptr_lo, NULL);
+        if (strcmp(val_lo, "A") != 0) emit_mov(isel, "A", val_lo, ins);
+        snprintf(ref, sizeof(ref), "@%s", scratch);
+        if (ptr_space == 3) isel_emit(isel, "MOVX", ref, "A", instr_to_ssa_str(ins));
+        else isel_emit(isel, "MOV", ref, "A", instr_to_ssa_str(ins));
+
+        if (store_size == 2 && val_hi) {
+            isel_emit(isel, "INC", scratch, NULL, NULL);
+            if (strcmp(val_hi, "A") != 0) emit_mov(isel, "A", val_hi, NULL);
+            snprintf(ref, sizeof(ref), "@%s", scratch);
+            if (ptr_space == 3) isel_emit(isel, "MOVX", ref, "A", NULL);
+            else isel_emit(isel, "MOV", ref, "A", NULL);
+        }
+
+        if (scratch_reg >= 0) free_temp_reg(isel, scratch_reg, 1);
+        return true;
+    }
+
+    if (ptr_abi_size == 2) {
+        const char* ptr_lo = isel_get_lo_reg(isel, ptr);
+        const char* ptr_hi = isel_get_hi_reg(isel, ptr);
+        if (ptr_space == 6) return false;
+
+        isel_emit(isel, "MOV", "DPL", ptr_lo, NULL);
+        isel_emit(isel, "MOV", "DPH", ptr_hi, NULL);
+        if (strcmp(val_lo, "A") != 0) emit_mov(isel, "A", val_lo, ins);
+        isel_emit(isel, "MOVX", "@DPTR", "A", instr_to_ssa_str(ins));
+
+        if (store_size == 2 && val_hi) {
+            isel_emit(isel, "INC", "DPTR", NULL, NULL);
+            if (strcmp(val_hi, "A") != 0) emit_mov(isel, "A", val_hi, NULL);
+            isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
+        }
+
+        return true;
+    }
+
+    if (ptr_abi_size == 3 && ptr_reg + 2 < 8) {
+        const char* ptr_lo = isel_reg_name(ptr_reg);
+        const char* ptr_hi = isel_reg_name(ptr_reg + 1);
+        const char* ptr_tag = isel_reg_name(ptr_reg + 2);
+        char *l_data = isel_new_label(isel, "Lsptr_data");
+        char *l_xdata = isel_new_label(isel, "Lsptr_xdata");
+        char *l_pdata = isel_new_label(isel, "Lsptr_pdata");
+        char *l_done = isel_new_label(isel, "Lsptr_done");
+        char lb_data[64], lb_xdata[64], lb_pdata[64], lb_done[64];
+
+        snprintf(lb_data, sizeof(lb_data), "%s:", l_data);
+        snprintf(lb_xdata, sizeof(lb_xdata), "%s:", l_xdata);
+        snprintf(lb_pdata, sizeof(lb_pdata), "%s:", l_pdata);
+        snprintf(lb_done, sizeof(lb_done), "%s:", l_done);
+
+        isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+        isel_emit(isel, "JZ", l_data, NULL, NULL);
+        isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+        isel_emit(isel, "XRL", "A", "#1", NULL);
+        isel_emit(isel, "JZ", l_xdata, NULL, NULL);
+        isel_emit(isel, "MOV", "A", ptr_tag, NULL);
+        isel_emit(isel, "XRL", "A", "#254", NULL);
+        isel_emit(isel, "JZ", l_pdata, NULL, NULL);
+        isel_emit(isel, "SJMP", l_done, NULL, NULL);
+
+        isel_emit(isel, lb_data, NULL, NULL, NULL);
+        isel_emit(isel, "MOV", scratch, ptr_lo, NULL);
+        if (strcmp(val_lo, "A") != 0) emit_mov(isel, "A", val_lo, ins);
+        {
+            char ref[16];
+            snprintf(ref, sizeof(ref), "@%s", scratch);
+            isel_emit(isel, "MOV", ref, "A", instr_to_ssa_str(ins));
+        }
+        if (store_size == 2 && val_hi) {
+            isel_emit(isel, "INC", scratch, NULL, NULL);
+            if (strcmp(val_hi, "A") != 0) emit_mov(isel, "A", val_hi, NULL);
+            {
+                char ref[16];
+                snprintf(ref, sizeof(ref), "@%s", scratch);
+                isel_emit(isel, "MOV", ref, "A", NULL);
+            }
+        }
+        isel_emit(isel, "SJMP", l_done, NULL, NULL);
+
+        isel_emit(isel, lb_xdata, NULL, NULL, NULL);
+        isel_emit(isel, "MOV", "DPL", ptr_lo, NULL);
+        isel_emit(isel, "MOV", "DPH", ptr_hi, NULL);
+        if (strcmp(val_lo, "A") != 0) emit_mov(isel, "A", val_lo, ins);
+        isel_emit(isel, "MOVX", "@DPTR", "A", instr_to_ssa_str(ins));
+        if (store_size == 2 && val_hi) {
+            isel_emit(isel, "INC", "DPTR", NULL, NULL);
+            if (strcmp(val_hi, "A") != 0) emit_mov(isel, "A", val_hi, NULL);
+            isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
+        }
+        isel_emit(isel, "SJMP", l_done, NULL, NULL);
+
+        isel_emit(isel, lb_pdata, NULL, NULL, NULL);
+        isel_emit(isel, "MOV", scratch, ptr_lo, NULL);
+        if (strcmp(val_lo, "A") != 0) emit_mov(isel, "A", val_lo, ins);
+        {
+            char ref[16];
+            snprintf(ref, sizeof(ref), "@%s", scratch);
+            isel_emit(isel, "MOVX", ref, "A", instr_to_ssa_str(ins));
+        }
+        if (store_size == 2 && val_hi) {
+            isel_emit(isel, "INC", scratch, NULL, NULL);
+            if (strcmp(val_hi, "A") != 0) emit_mov(isel, "A", val_hi, NULL);
+            {
+                char ref[16];
+                snprintf(ref, sizeof(ref), "@%s", scratch);
+                isel_emit(isel, "MOVX", ref, "A", NULL);
+            }
+        }
+
+        isel_emit(isel, lb_done, NULL, NULL, NULL);
+
+        if (scratch_reg >= 0) free_temp_reg(isel, scratch_reg, 1);
+        free(l_data);
+        free(l_xdata);
+        free(l_pdata);
+        free(l_done);
+        return true;
+    }
+
+    if (scratch_reg >= 0) free_temp_reg(isel, scratch_reg, 1);
+    return false;
+}
+
 void emit_offset(ISelContext* isel, Instr* ins) {
     if (!ins->args || ins->args->len < 2) return;
     ValueName base = *(ValueName*)list_get(ins->args, 0);
@@ -464,6 +619,10 @@ void emit_store(ISelContext* isel, Instr* ins) {
         }
     }
 
+    if ((!ins->labels || ins->labels->len == 0) && ptr > 0 && emit_store_to_pointer_value(isel, ins, ptr, val)) {
+        return;
+    }
+
     if (!var_name) return;
 
     if (label && label[0] == '@' && (!ins->args || ins->args->len == 0)) {
@@ -482,6 +641,9 @@ void emit_store(ISelContext* isel, Instr* ins) {
     }
 
     int space = get_mem_space(ins->mem_type);
+    int val_size = get_value_size(isel, val);
+    if (val_size < 1) val_size = 1;
+    if (val_size > 2) val_size = 2;
     if (var_name && isel->ctx && isel->ctx->obj) {
         SectionKind sym_sec = get_symbol_section_kind(isel, var_name);
         if (sym_sec == SEC_XDATA) space = 4;
@@ -490,27 +652,21 @@ void emit_store(ISelContext* isel, Instr* ins) {
         else space = 1;
     }
 
-    const char* val_reg = isel_get_lo_reg(isel, val);
-    if (strcmp(val_reg, "A") != 0) {
-        isel_emit(isel, "MOV", "A", val_reg, NULL);
-    }
-
     if (is_sbit_type(ins->mem_type)) {
+        const char* val_reg = isel_get_lo_reg(isel, val);
+        if (strcmp(val_reg, "A") != 0) {
+            isel_emit(isel, "MOV", "A", val_reg, NULL);
+        }
         isel_emit(isel, "MOV", "C", "ACC.0", NULL);
         isel_emit(isel, "MOV", var_name, "C", instr_to_ssa_str(ins));
         return;
     }
 
-    if (space == 4) {
-        char dptr_val[256];
-        snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
-        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
-        isel_emit(isel, "MOVX", "@DPTR", "A", instr_to_ssa_str(ins));
-    } else if (space == 2) {
-        isel_emit(isel, "MOV", "R0", var_name, NULL);
-        isel_emit(isel, "MOV", "@R0", "A", instr_to_ssa_str(ins));
-    } else {
-        isel_emit(isel, "MOV", var_name, "A", instr_to_ssa_str(ins));
+    const char* val_lo = isel_get_lo_reg(isel, val);
+    emit_store_symbol_byte(isel, var_name, 0, val_lo, ins);
+    if (val_size == 2) {
+        const char* val_hi = isel_get_hi_reg(isel, val);
+        emit_store_symbol_byte(isel, var_name, 1, val_hi, NULL);
     }
 }
 
@@ -525,6 +681,27 @@ void emit_addr(ISelContext* isel, Instr* ins) {
     if (isel->ctx && isel->ctx->value_to_addr) {
         char* key = int_to_key(ins->dest);
         dict_put(isel->ctx->value_to_addr, key, strdup(var_name));
+    }
+
+    int ptr_size = ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
+    if (ptr_size < 2) ptr_size = 2;
+
+    int reg = safe_alloc_reg_for_value(isel, ins->dest, ptr_size);
+    int phys_reg = reg;
+    bool temp_result = false;
+    if (phys_reg < 0 || phys_reg + ptr_size - 1 > 7) {
+        phys_reg = alloc_temp_reg(isel, ins ? ins->dest : -1, ptr_size);
+        temp_result = phys_reg >= 0;
+    }
+    if (phys_reg < 0) phys_reg = 0;
+
+    const char* dst_lo = (ptr_size == 2) ? isel_reg_name(phys_reg + 1) : isel_reg_name(phys_reg);
+    const char* dst_hi = (ptr_size >= 2) ? isel_reg_name(phys_reg + (ptr_size == 2 ? 0 : 1)) : NULL;
+    const char* dst_tag = (ptr_size >= 3) ? isel_reg_name(phys_reg + 2) : NULL;
+    emit_materialize_pointer_symbol(isel, var_name, ptr_size, dst_lo, dst_hi, dst_tag, ins);
+    store_spilled_mem_result(isel, ins, phys_reg, ptr_size);
+    if (temp_result) {
+        free_temp_reg(isel, phys_reg, ptr_size);
     }
 }
 
@@ -608,41 +785,14 @@ void emit_load(ISelContext* isel, Instr* ins) {
 
     int space = get_mem_space(ins->mem_type);
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
-    int reg = safe_alloc_reg_for_value(isel, ins->dest, size);
-
-    if (ins->type && ins->type->type == CTYPE_PTR) {
-        SectionKind sym_sec = get_symbol_section_kind(isel, var_name);
-        if (size == 1) {
-            char imm[256];
-            snprintf(imm, sizeof(imm), "#%s", var_name);
-            if (reg >= 0) emit_mov(isel, isel_reg_name(reg), imm, ins);
-            store_spilled_mem_result(isel, ins, reg, size);
-            return;
-        }
-
-        char dptr_val[256];
-        snprintf(dptr_val, sizeof(dptr_val), "#%s", var_name);
-        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
-
-        if (size == 2 && reg >= 0) {
-            isel_emit(isel, "MOV", isel_reg_name(reg + 1), "DPL", instr_to_ssa_str(ins));
-            isel_emit(isel, "MOV", isel_reg_name(reg), "DPH", NULL);
-            store_spilled_mem_result(isel, ins, reg, size);
-            return;
-        }
-
-        if (size == 3 && reg >= 0) {
-            const char* tag_imm = "#0";
-            if (sym_sec == SEC_XDATA) tag_imm = "#1";
-            else if (sym_sec == SEC_CODE) tag_imm = "#255";
-            else if (sym_sec == SEC_IDATA) tag_imm = "#0";
-            emit_mov(isel, isel_reg_name(reg), "DPL", ins);
-            emit_mov(isel, isel_reg_name(reg + 1), "DPH", NULL);
-            emit_mov(isel, isel_reg_name(reg + 2), tag_imm, NULL);
-            store_spilled_mem_result(isel, ins, reg, size);
-            return;
-        }
+    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    int phys_reg = reg;
+    bool temp_result = false;
+    if (phys_reg < 0 || phys_reg + size - 1 > 7) {
+        phys_reg = alloc_temp_reg(isel, ins ? ins->dest : -1, size);
+        temp_result = phys_reg >= 0;
     }
+    if (phys_reg < 0) phys_reg = 0;
 
     if (is_sbit_type(ins->mem_type)) {
         isel_emit(isel, "MOV", "C", var_name, instr_to_ssa_str(ins));
@@ -659,15 +809,12 @@ void emit_load(ISelContext* isel, Instr* ins) {
         isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
         isel_emit(isel, "CLR", "A", NULL, NULL);
         isel_emit(isel, "MOVC", "A", "@A+DPTR", instr_to_ssa_str(ins));
-    } else if (space == 2) {
-        isel_emit(isel, "MOV", "R0", var_name, NULL);
-        isel_emit(isel, "MOV", "A", "@R0", instr_to_ssa_str(ins));
     } else {
-        isel_emit(isel, "MOV", "A", var_name, instr_to_ssa_str(ins));
+        emit_load_symbol_byte(isel, var_name, 0, "A", ins);
     }
 
-    if (reg >= 0) {
-        const char* dst_reg = isel_reg_name(reg + (size == 2 ? 1 : 0));
+    if (phys_reg >= 0) {
+        const char* dst_reg = isel_reg_name(phys_reg + (size == 2 ? 1 : 0));
         if (dst_reg && strcmp(dst_reg, "A") != 0) {
             char* ssa = instr_to_ssa_str(ins);
             isel_emit(isel, "MOV", dst_reg, "A", ssa);
@@ -675,28 +822,16 @@ void emit_load(ISelContext* isel, Instr* ins) {
         }
     }
 
-    if (size == 2 && reg >= 0) {
-        if (space == 4) {
-            char dptr_val[256];
-            snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
-            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
-            isel_emit(isel, "MOVX", "A", "@DPTR", NULL);
-        } else if (space == 6) {
-            char dptr_val[256];
-            snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
-            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
-            isel_emit(isel, "CLR", "A", NULL, NULL);
-            isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
-        } else {
-            char source_hi[256];
-            snprintf(source_hi, sizeof(source_hi), "(%s + 1)", var_name);
-            isel_emit(isel, "MOV", "A", source_hi, NULL);
-        }
-        const char* dst_reg_hi = isel_reg_name(reg);
+    if (size == 2 && phys_reg >= 0) {
+        emit_load_symbol_byte(isel, var_name, 1, "A", NULL);
+        const char* dst_reg_hi = isel_reg_name(phys_reg);
         if (dst_reg_hi && strcmp(dst_reg_hi, "A") != 0) {
             isel_emit(isel, "MOV", dst_reg_hi, "A", NULL);
         }
     }
 
-    store_spilled_mem_result(isel, ins, reg, size);
+    store_spilled_mem_result(isel, ins, phys_reg, size);
+    if (temp_result) {
+        free_temp_reg(isel, phys_reg, size);
+    }
 }

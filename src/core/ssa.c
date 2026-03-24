@@ -729,6 +729,7 @@ static void ssa_build_store(SSABuild *b, ValueName ptr, ValueName val, Ctype *me
 extern List *ctypes;
 static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
 static Ctype *ctype_ptr = &(Ctype){0, CTYPE_PTR, 2, NULL};
+static Ctype *ctype_func_ptr = &(Ctype){0, CTYPE_PTR, 3, NULL};
 static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
 static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
 static Ctype *ctype_bool = &(Ctype){0, CTYPE_BOOL, 1, NULL};
@@ -771,14 +772,26 @@ static ValueName gen_logical_short_circuit(SSABuild *b, Ast *ast, bool is_and) {
     return ssa_build_read(b, tmp_name);
 }
 
-static ValueName ssa_build_addr(SSABuild *b, const char *var, Ctype *mem_type) {
+static ValueName ssa_build_addr_typed(SSABuild *b, const char *var, Ctype *result_type, Ctype *mem_type) {
     Instr *i = ssa_make_instr(b, IROP_ADDR);
     i->dest = ssa_new_value(b);
-    i->type = ctype_ptr;
+    i->type = result_type ? result_type : ctype_ptr;
     i->mem_type = mem_type;
     ssa_add_label(i, var);
     ssa_emit(b, i);
     return i->dest;
+}
+
+static ValueName ssa_build_addr(SSABuild *b, const char *var, Ctype *mem_type) {
+    return ssa_build_addr_typed(b, var, ctype_ptr, mem_type);
+}
+
+static Ctype* expr_value_type(Ast* ast) {
+    if (!ast) return NULL;
+    if (ast->type == AST_FUNC_DECL || ast->type == AST_FUNC_DEF) {
+        return ctype_func_ptr;
+    }
+    return ast->ctype;
 }
 
 static ValueName ssa_build_select(SSABuild *b, ValueName cond, ValueName v_true, ValueName v_false) {
@@ -960,6 +973,10 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
     switch (ast->type) {
     case AST_LITERAL:
         return ssa_build_const_t(b, ast->ival, ast->ctype);
+
+    case AST_FUNC_DECL:
+    case AST_FUNC_DEF:
+        return ssa_build_addr_typed(b, ast->fname, ctype_func_ptr, ctype_func_ptr);
         
     case AST_LVAR: {
         if (ast->ctype && ast->ctype->type == CTYPE_ARRAY) {
@@ -1024,12 +1041,17 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             i->dest = 0;
         }
         ssa_add_label(i, ast->fname);
+        if (ast->fnexpr) {
+            ValueName callee = gen_expr(b, ast->fnexpr);
+            ssa_add_label(i, "indirect");
+            ssa_add_arg(i, callee);
+        }
         for (Iter it = list_iter(args); !iter_end(it);) {
             ValueName *p = iter_next(&it);
             ssa_add_arg(i, *p);
         }
         ssa_emit(b, i);
-        Func *callee = ssa_find_func(b->unit, ast->fname);
+        Func *callee = ast->fnexpr ? NULL : ssa_find_func(b->unit, ast->fname);
         if (callee && callee->is_noreturn) {
             b->cur_block = NULL;
         }
@@ -1159,20 +1181,20 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         if (ast->left && ast->left->type == AST_LVAR) {
             ValueName val = gen_expr(b, ast->right);
             // 可能需要类型转换
-            val = gen_type_cast(b, val, ast->right->ctype, ast->left->ctype);
+            val = gen_type_cast(b, val, expr_value_type(ast->right), ast->left->ctype);
             ssa_build_write(b, ast->left->varname, val);
             return val;
         } else if (ast->left && ast->left->type == AST_GVAR) {
             ValueName addr = ssa_build_addr(b, ast->left->varname, ast->left->ctype);
             ValueName val = gen_expr(b, ast->right);
-            val = gen_type_cast(b, val, ast->right->ctype, ast->left->ctype);
+            val = gen_type_cast(b, val, expr_value_type(ast->right), ast->left->ctype);
             ssa_build_store(b, addr, val, ast->left->ctype);
             return val;
         } else if (ast->left && ast->left->type == AST_DEREF) {
             // *ptr = val
             ValueName ptr = gen_expr(b, ast->left->operand);
             ValueName val = gen_expr(b, ast->right);
-            val = gen_type_cast(b, val, ast->right->ctype, ast->left->ctype);
+            val = gen_type_cast(b, val, expr_value_type(ast->right), ast->left->ctype);
             ssa_build_store(b, ptr, val, ast->left->ctype);
             return val;
         } else if (ast->left && ast->left->type == AST_STRUCT_REF) {
@@ -1195,7 +1217,7 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             if (!field) return 0;
 
             ValueName val = gen_expr(b, ast->right);
-            val = gen_type_cast(b, val, ast->right->ctype, field);
+            val = gen_type_cast(b, val, expr_value_type(ast->right), field);
 
             if (field->bit_size > 0) {
                 int container_bits = 8;
@@ -1444,7 +1466,7 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
                     }
 
                     ValueName val = gen_expr(b, ast->declinit);
-                    val = gen_type_cast(b, val, ast->declinit->ctype, var->ctype);
+                    val = gen_type_cast(b, val, expr_value_type(ast->declinit), var->ctype);
                     ssa_build_write(b, var->varname, val);
                 } else {
                     ssa_build_write(b, var->varname, 0);
@@ -2343,9 +2365,16 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
         break;
     }
     case IROP_CALL: {
-        fprintf(fp, "call @%s(", (char*)list_get(i->labels, 0));
-        for (int k = 0; k < i->args->len; k++) {
-            if (k > 0) fprintf(fp, ", ");
+        bool indirect = i->labels && i->labels->len > 1 && strcmp((char*)list_get(i->labels, 1), "indirect") == 0;
+        int arg_start = indirect ? 1 : 0;
+        if (indirect && i->args && i->args->len > 0) {
+            ValueName *callee = list_get(i->args, 0);
+            fprintf(fp, "call *v%d @%s(", *callee, (char*)list_get(i->labels, 0));
+        } else {
+            fprintf(fp, "call @%s(", (char*)list_get(i->labels, 0));
+        }
+        for (int k = arg_start; k < i->args->len; k++) {
+            if (k > arg_start) fprintf(fp, ", ");
             ValueName *v = list_get(i->args, k);
             fprintf(fp, "v%d", *v);
         }

@@ -576,11 +576,11 @@ void emit_inline_asm_instr(ISelContext* isel, Instr* ins) {
     free(s);
 }
 
-static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* callee_name, int arg_index, ValueName v, RegMove* moves, int* move_count) {
-    if (arg_index >= 6) {
+static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* callee_name, int param_pos, int class_index, ValueName v, RegMove* moves, int* move_count) {
+    if (class_index >= 6) {
         if (callee_name && isel) {
             char sym[128];
-            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, arg_index);
+            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, param_pos);
             int64_t imm_val = 0;
             if (try_get_value_const(isel, v, &imm_val)) {
                 emit_store_symbol_imm_byte(isel, sym, 0, (int)imm_val, ins);
@@ -597,7 +597,7 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
         }
         return;
     }
-    int targ = param_regs_char[arg_index];
+    int targ = param_regs_char[class_index];
     const char* dst = isel_reg_name(targ);
     int64_t imm_val = 0;
     if (try_get_value_const(isel, v, &imm_val)) {
@@ -649,11 +649,11 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
     }
 }
 
-static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* callee_name, int arg_index, ValueName v, RegMove* moves, int* move_count) {
-    if (arg_index >= 3) {
+static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* callee_name, int param_pos, int class_index, ValueName v, RegMove* moves, int* move_count) {
+    if (class_index >= 3) {
         if (callee_name && isel) {
             char sym[128];
-            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, arg_index);
+            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, param_pos);
             int64_t imm_val = 0;
             if (try_get_value_const(isel, v, &imm_val)) {
                 emit_store_symbol_imm_byte(isel, sym, 0, (int)(imm_val & 0xFF), ins);
@@ -676,8 +676,8 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
         return;
     }
 
-    int targ_hi = param_regs_int_h[arg_index];
-    int targ_lo = param_regs_int_l[arg_index];
+    int targ_hi = param_regs_int_h[class_index];
+    int targ_lo = param_regs_int_l[class_index];
     const char* dst_hi = isel_reg_name(targ_hi);
     const char* dst_lo = isel_reg_name(targ_lo);
     int64_t imm_val = 0;
@@ -759,11 +759,11 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
     }
 }
 
-static void setup_call_param_u24(ISelContext* isel, Instr* ins, const char* callee_name, int arg_index, ValueName v, RegMove* moves, int* move_count) {
-    if (arg_index != 0) {
+static void setup_call_param_u24(ISelContext* isel, Instr* ins, const char* callee_name, int param_pos, int class_index, ValueName v, RegMove* moves, int* move_count) {
+    if (class_index != 0) {
         if (callee_name && isel) {
             char sym[128];
-            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, arg_index);
+            snprintf(sym, sizeof(sym), "__param_%s_%d", callee_name, param_pos);
             char sym1[192], sym2[192];
             snprintf(sym1, sizeof(sym1), "(%s + 1)", sym);
             snprintf(sym2, sizeof(sym2), "(%s + 2)", sym);
@@ -798,10 +798,56 @@ static void setup_call_param_u24(ISelContext* isel, Instr* ins, const char* call
     }
 
     if (base == -3) {
-        int r = isel_reload_spill(isel, v, 2, ins);
-        if (r >= 0 && r + 1 < 8) {
+        int r = isel_reload_spill(isel, v, 3, ins);
+        if (r >= 0 && r + 2 < 8) {
             if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 1, .src = r};
             if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 2, .src = r + 1};
+            if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 3, .src = r + 2};
+        }
+    }
+}
+
+static void emit_indirect_call(ISelContext* isel, Instr* ins, ValueName callee) {
+    const char* callee_lo = isel_get_lo_reg(isel, callee);
+    const char* callee_hi = isel_get_hi_reg(isel, callee);
+
+    char* l_cont = isel_new_label(isel, "Lcall_indirect_cont");
+    char lbuf_cont[64];
+    snprintf(lbuf_cont, sizeof(lbuf_cont), "%s:", l_cont);
+
+    char cont_addr[256];
+    snprintf(cont_addr, sizeof(cont_addr), "#%s", l_cont);
+    isel_emit(isel, "MOV", "DPTR", cont_addr, NULL);
+    isel_emit(isel, "PUSH", "DPH", NULL, NULL);
+    isel_emit(isel, "PUSH", "DPL", NULL, NULL);
+
+    emit_mov(isel, "DPL", callee_lo, ins);
+    emit_mov(isel, "DPH", callee_hi, NULL);
+    isel_emit(isel, "CLR", "A", NULL, NULL);
+    isel_emit(isel, "JMP", "@A+DPTR", NULL, instr_to_ssa_str(ins));
+    isel_emit(isel, lbuf_cont, NULL, NULL, NULL);
+
+    free(l_cont);
+}
+
+static void bind_call_result_to_return_regs(ISelContext* isel, ValueName dest, int size) {
+    if (!isel || !isel->ctx || !isel->ctx->value_to_reg || dest <= 0) return;
+
+    int base_reg = -1;
+    if (size == 1) base_reg = 7;
+    else if (size == 2) base_reg = 6;
+    else return;
+
+    int* reg_num = malloc(sizeof(int));
+    if (!reg_num) return;
+    *reg_num = base_reg;
+
+    char* key = int_to_key(dest);
+    dict_put(isel->ctx->value_to_reg, key, reg_num);
+
+    for (int offset = 0; offset < size; offset++) {
+        if (base_reg + offset < 8) {
+            isel->reg_val[base_reg + offset] = dest;
         }
     }
 }
@@ -811,9 +857,19 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
     const char* fname = list_get(ins->labels, 0);
     if (!fname) return;
 
+    bool indirect = ins->labels->len > 1 && strcmp((const char*)list_get(ins->labels, 1), "indirect") == 0;
+    int arg_start = indirect ? 1 : 0;
+    ValueName callee_val = (indirect && ins->args && ins->args->len > 0)
+        ? *(ValueName*)list_get(ins->args, 0)
+        : -1;
+    int size1_index = 0;
+    int size2_index = 0;
+    int size3_index = 0;
+    int size4_index = 0;
+
     RegMove moves[64];
     int move_count = 0;
-    for (int k = 0; ins->args && k < ins->args->len; k++) {
+    for (int k = arg_start; ins->args && k < ins->args->len; k++) {
         ValueName v = *(ValueName*)list_get(ins->args, k);
         char* key = int_to_key(v);
         Ctype* t = NULL;
@@ -823,20 +879,36 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
         free(key);
 
         int size = t ? c51_abi_type_size(t) : 1;
+        int param_pos = k - arg_start;
+        int class_index = 0;
         if (size == 1) {
-            setup_call_param_u8(isel, ins, fname, k, v, moves, &move_count);
+            class_index = size1_index++;
         } else if (size == 2) {
-            setup_call_param_u16(isel, ins, fname, k, v, moves, &move_count);
+            class_index = size2_index++;
         } else if (size == 3) {
-            setup_call_param_u24(isel, ins, fname, k, v, moves, &move_count);
+            class_index = size3_index++;
+        } else if (size == 4) {
+            class_index = size4_index++;
+        }
+
+        if (size == 1) {
+            setup_call_param_u8(isel, ins, fname, param_pos, class_index, v, moves, &move_count);
+        } else if (size == 2) {
+            setup_call_param_u16(isel, ins, fname, param_pos, class_index, v, moves, &move_count);
+        } else if (size == 3) {
+            setup_call_param_u24(isel, ins, fname, param_pos, class_index, v, moves, &move_count);
         }
     }
 
     emit_parallel_reg_moves(isel, moves, move_count, ins);
 
-    char callee[256];
-    snprintf(callee, sizeof(callee), "_%s", fname);
-    isel_emit(isel, "LCALL", callee, NULL, instr_to_ssa_str(ins));
+    if (indirect && callee_val > 0) {
+        emit_indirect_call(isel, ins, callee_val);
+    } else {
+        char callee[256];
+        snprintf(callee, sizeof(callee), "_%s", fname);
+        isel_emit(isel, "LCALL", callee, NULL, instr_to_ssa_str(ins));
+    }
 
     if (ins->dest > 0) {
         int size = ins->type ? c51_abi_type_size(ins->type) : 1;
@@ -849,7 +921,9 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
             }
         }
 
-        if (!skip_copy_back) {
+        if (skip_copy_back) {
+            bind_call_result_to_return_regs(isel, ins->dest, size);
+        } else {
             int reg = alloc_reg_for_value(isel, ins->dest, size);
             int phys_reg = reg;
             if (phys_reg < 0) phys_reg = 0;

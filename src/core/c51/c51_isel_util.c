@@ -301,12 +301,6 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
     const char* ssa = ins ? instr_to_ssa_str(ins) : NULL;
 
     if (reg >= 0) {
-        if (isel->ctx && isel->ctx->value_to_reg) {
-            int* reg_num = malloc(sizeof(int));
-            *reg_num = reg;
-            char* k = int_to_key(val);
-            dict_put(isel->ctx->value_to_reg, k, reg_num);
-        }
         const char* dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
         emit_load_symbol_byte(isel, var_name, 0, dst_lo, ins);
         if (ssa) { free((void*)ssa); ssa = NULL; }
@@ -332,7 +326,11 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
 }
 
 bool isel_value_is_spilled(ISelContext* isel, ValueName val) {
-    return isel_get_value_reg(isel, val) == -3;
+    if (!isel || !isel->ctx || !isel->ctx->value_to_reg) return false;
+    char* key = int_to_key(val);
+    int* reg_ptr = (int*)dict_get(isel->ctx->value_to_reg, key);
+    free(key);
+    return reg_ptr && *reg_ptr == -3;
 }
 
 void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int size, Instr* ins) {

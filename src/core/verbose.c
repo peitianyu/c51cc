@@ -143,7 +143,10 @@ static void ast_to_string_int(String *buf, Ast *ast)
         string_appendf(buf, "%s", ast->varname);
         break;
     case AST_FUNCALL: {
-        string_appendf(buf, "(%s)%s(", ctype_to_string(ast->ctype), ast->fname);
+        if (ast->fnexpr)
+            string_appendf(buf, "(%s)(*%s)(", ctype_to_string(ast->ctype), ast_to_string(ast->fnexpr));
+        else
+            string_appendf(buf, "(%s)%s(", ctype_to_string(ast->ctype), ast->fname);
         for (Iter i = list_iter(ast->args); !iter_end(i);) {
             string_appendf(buf, "%s", ast_to_string(iter_next(&i)));
             if (!iter_end(i))

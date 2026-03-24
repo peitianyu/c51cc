@@ -43,6 +43,13 @@ int isel_get_value_reg(ISelContext* isel, ValueName val) {
     char* key = int_to_key(val);
     int* reg_ptr = (int*)dict_get(isel->ctx->value_to_reg, key);
     free(key);
+    if (reg_ptr && *reg_ptr >= 0) return *reg_ptr;
+    if (reg_ptr && *reg_ptr == -2) return *reg_ptr;
+    if (isel) {
+        for (int reg = 0; reg < 8; reg++) {
+            if (isel->reg_val[reg] == val) return reg;
+        }
+    }
     if (reg_ptr) return *reg_ptr;
     return -1;
 }
@@ -355,6 +362,7 @@ static bool detect_two_counter_loops(Func* f, int *out_outer, int *out_inner) {
 }
 
 static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
+    static Ctype inferred_int_type = {0, CTYPE_INT, 2, NULL};
     if (!isel || !ins) return NULL;
     if (ins->type) return ins->type;
 
@@ -370,6 +378,37 @@ static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
     if (ins->op == IROP_PHI && ins->args && ins->args->len > 0) {
         ValueName src = *(ValueName*)list_get(ins->args, 0);
         return get_value_type(isel, src);
+    }
+
+    if (ins->args && ins->args->len > 0) {
+        ValueName src0 = *(ValueName*)list_get(ins->args, 0);
+        Ctype* src0_type = get_value_type(isel, src0);
+
+        switch (ins->op) {
+            case IROP_ADD:
+            case IROP_SUB:
+            case IROP_MUL:
+            case IROP_DIV:
+            case IROP_MOD:
+            case IROP_NEG:
+            case IROP_AND:
+            case IROP_OR:
+            case IROP_XOR:
+            case IROP_NOT:
+            case IROP_SHL:
+            case IROP_SHR:
+                return src0_type;
+            case IROP_EQ:
+            case IROP_NE:
+            case IROP_LT:
+            case IROP_LE:
+            case IROP_GT:
+            case IROP_GE:
+            case IROP_LNOT:
+                return &inferred_int_type;
+            default:
+                break;
+        }
     }
 
     return NULL;

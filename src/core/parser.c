@@ -163,13 +163,14 @@ static Ast *ast_string(char *str)
     return r;
 }
 
-static Ast *ast_funcall(Ctype *ctype, char *fname, List *args)
+static Ast *ast_funcall(Ctype *ctype, char *fname, List *args, Ast *fnexpr)
 {
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_FUNCALL;
     r->ctype = ctype;
     r->fname = fname;
     r->args = args;
+    r->fnexpr = fnexpr;
     return r;
 }
 
@@ -778,13 +779,13 @@ static Ast *read_func_args(char *fname, Ast *func_ptr)
 
     // 如果提供了函数指针，使用函数指针的类型
     if (func_ptr) {
-        return ast_funcall(func_ptr->ctype->ptr, fname, args);
+        return ast_funcall(func_ptr->ctype->ptr, fname, args, func_ptr);
     }
     
     Ast *func = dict_get(functionenv, fname);
     if(!func) error("Undecl function: %s", fname);
     
-    return ast_funcall(func->ctype, fname, args);
+    return ast_funcall(func->ctype, fname, args, NULL);
 }
 
 static Ast *read_ident_or_func(char *name)

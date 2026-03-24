@@ -181,6 +181,7 @@ typedef struct __Ast {
             char *fname;
             struct {
                 List *args;
+                struct __Ast *fnexpr;
                 struct {
                     List *params;
                     List *localvars;
