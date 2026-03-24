@@ -66,7 +66,10 @@ const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
     if (base_reg < 0) {
         if (base_reg == -3) {
             int r = isel_reload_spill(isel, val, size, NULL);
-            if (r >= 0) return isel_reg_name(r + (size == 2 ? 1 : 0));
+            if (r >= 0) {
+                if (size == 2) return isel_reg_name(r + 1);
+                return isel_reg_name(r);
+            }
             const char* sym = lookup_value_addr_symbol(isel, val);
             if (sym) {
                 emit_load_symbol_byte(isel, sym, 0, "A", NULL);
@@ -79,8 +82,10 @@ const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
 
     if (size == 1) {
         return isel_reg_name(base_reg);
-    } else {
+    } else if (size == 2) {
         return isel_reg_name(base_reg + 1);
+    } else {
+        return isel_reg_name(base_reg);
     }
 }
 
@@ -89,15 +94,53 @@ const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
     int size = get_value_size(isel, val);
     if (base_reg == -3) {
         int r = isel_reload_spill(isel, val, size, NULL);
-        if (r >= 0) return isel_reg_name(r);
+        if (r >= 0) {
+            if (size == 2) return isel_reg_name(r);
+            if (size >= 3) return isel_reg_name(r + 1);
+            return isel_reg_name(r);
+        }
         const char* sym = lookup_value_addr_symbol(isel, val);
         if (sym) {
-            emit_load_symbol_byte(isel, sym, size > 1 ? 1 : 0, "A", NULL);
+            emit_load_symbol_byte(isel, sym, size == 2 ? 1 : 0, "A", NULL);
             return "A";
         }
         return "A";
     }
+    if (base_reg >= 0 && size >= 3) return isel_reg_name(base_reg + 1);
     return isel_get_value_reg_at(isel, val, 0);
+}
+
+static void mark_value_regs_busy(ISelContext* isel, ValueName val) {
+    if (!isel || val <= 0) return;
+    int base_reg = isel_get_value_reg(isel, val);
+    int size = get_value_size(isel, val);
+    if (base_reg < 0 || size <= 0) return;
+    for (int i = 0; i < size && base_reg + i < 8; i++) {
+        isel->reg_busy[base_reg + i] = true;
+        isel->reg_val[base_reg + i] = val;
+    }
+}
+
+static void prepare_reg_state_for_instr(ISelContext* isel, Instr* ins, Instr* next) {
+    if (!isel) return;
+    for (int i = 0; i < 8; i++) {
+        isel->reg_busy[i] = false;
+        isel->reg_val[i] = -1;
+    }
+    if (ins && ins->args) {
+        for (int i = 0; i < ins->args->len; i++) {
+            ValueName* pv = list_get(ins->args, i);
+            if (pv) mark_value_regs_busy(isel, *pv);
+        }
+    }
+    if (next && next->args) {
+        for (int i = 0; i < next->args->len; i++) {
+            ValueName* pv = list_get(next->args, i);
+            if (pv) mark_value_regs_busy(isel, *pv);
+        }
+    }
+    isel->acc_busy = false;
+    isel->acc_val = -1;
 }
 
 int alloc_dest_reg(ISelContext* isel, Instr* ins, Instr* next, int size, bool try_bind) {
@@ -322,6 +365,7 @@ static void isel_record_dest_type(ISelContext* isel, Instr* ins) {
 void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins) return;
     isel_record_dest_type(isel, ins);
+    prepare_reg_state_for_instr(isel, ins, next);
 
     switch (ins->op) {
         case IROP_NOP:

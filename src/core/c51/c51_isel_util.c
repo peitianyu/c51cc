@@ -96,14 +96,22 @@ void free_temp_reg(ISelContext* isel, int reg, int size) {
 }
 
 void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, bool one) {
-    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
-    const char* dst_hi = isel_reg_name(dst_reg);
+    int phys_reg = dst_reg;
+    if (phys_reg < 0 && ins) {
+        phys_reg = alloc_temp_reg(isel, ins->dest, size);
+    }
+    if (phys_reg < 0) {
+        phys_reg = 0;
+    }
+
+    const char* dst_lo = isel_reg_name(phys_reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(phys_reg);
     isel_emit(isel, "MOV", "A", one ? "#1" : "#0", NULL);
     emit_mov(isel, dst_lo, "A", ins);
     if (size == 2) {
         emit_mov(isel, dst_hi, "#0", ins);
     }
-    emit_store_spilled_result(isel, ins ? ins->dest : -1, dst_reg, size, ins);
+    emit_store_spilled_result(isel, ins ? ins->dest : -1, phys_reg, size, ins);
 }
 
 void emit_store_spilled_result(ISelContext* isel, ValueName val, int reg, int size, Instr* ins) {
@@ -306,6 +314,11 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
         if (size == 2) {
             const char* dst_hi = isel_reg_name(reg);
             emit_load_symbol_byte(isel, var_name, 1, dst_hi, NULL);
+        } else if (size >= 3) {
+            const char* dst_hi = isel_reg_name(reg + 1);
+            const char* dst_tag = isel_reg_name(reg + 2);
+            emit_load_symbol_byte(isel, var_name, 1, dst_hi, NULL);
+            emit_load_symbol_byte(isel, var_name, 2, dst_tag, NULL);
         }
         return reg;
     } else {
@@ -333,6 +346,8 @@ void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int si
     SectionKind sym_sec = get_symbol_section_kind(isel, var_name);
     const char* src_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
     const char* src_hi = isel_reg_name(reg);
+    const char* src_ptr_hi = (size >= 3) ? isel_reg_name(reg + 1) : NULL;
+    const char* src_tag = (size >= 3) ? isel_reg_name(reg + 2) : NULL;
 
     if (sym_sec == SEC_XDATA) {
         char dptr_val[256];
@@ -344,6 +359,15 @@ void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int si
             snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
             isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
             emit_mov(isel, "A", src_hi, NULL);
+            isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
+        } else if (size >= 3) {
+            snprintf(dptr_val, sizeof(dptr_val), "#(%s + 1)", var_name);
+            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+            emit_mov(isel, "A", src_ptr_hi, NULL);
+            isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
+            snprintf(dptr_val, sizeof(dptr_val), "#(%s + 2)", var_name);
+            isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+            emit_mov(isel, "A", src_tag, NULL);
             isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
         }
         return;
@@ -357,6 +381,14 @@ void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int si
             snprintf(off1, sizeof(off1), "(%s + 1)", var_name);
             emit_mov(isel, "A", src_hi, NULL);
             isel_emit(isel, "MOV", off1, "A", NULL);
+        } else if (size >= 3) {
+            char off2[256];
+            snprintf(off1, sizeof(off1), "(%s + 1)", var_name);
+            snprintf(off2, sizeof(off2), "(%s + 2)", var_name);
+            emit_mov(isel, "A", src_ptr_hi, NULL);
+            isel_emit(isel, "MOV", off1, "A", NULL);
+            emit_mov(isel, "A", src_tag, NULL);
+            isel_emit(isel, "MOV", off2, "A", NULL);
         }
         return;
     }
@@ -366,6 +398,13 @@ void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int si
         char var_hi[256];
         snprintf(var_hi, sizeof(var_hi), "(%s + 1)", var_name);
         emit_mov(isel, var_hi, src_hi, NULL);
+    } else if (size >= 3) {
+        char var_hi[256];
+        char var_tag[256];
+        snprintf(var_hi, sizeof(var_hi), "(%s + 1)", var_name);
+        snprintf(var_tag, sizeof(var_tag), "(%s + 2)", var_name);
+        emit_mov(isel, var_hi, src_ptr_hi, NULL);
+        emit_mov(isel, var_tag, src_tag, NULL);
     }
 }
 
@@ -434,7 +473,7 @@ int get_value_size(ISelContext* isel, ValueName val) {
     char* key = int_to_key(val);
     Ctype* type = (Ctype*)dict_get(isel->ctx->value_type, key);
     free(key);
-    if (type && type->size > 0) return type->size;
+    if (type) return c51_abi_type_size(type);
     return 1;
 }
 

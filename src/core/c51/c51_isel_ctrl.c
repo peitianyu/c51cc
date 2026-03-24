@@ -16,6 +16,35 @@ Block* find_block_by_id(Func* f, int id) {
     return NULL;
 }
 
+static bool reg_range_used_by_moves(RegMove* moves, int move_count, int reg) {
+    for (int i = 0; i < move_count; i++) {
+        if (moves[i].dst == reg) return true;
+    }
+    return false;
+}
+
+static int rebind_phi_dest_reg(ISelContext* isel, ValueName val, int size, RegMove* moves, int move_count) {
+    if (!isel || !isel->ctx || !isel->ctx->value_to_reg) return -1;
+    for (int base = 7 - size + 1; base >= 0; base--) {
+        bool ok = true;
+        for (int offset = 0; offset < size; offset++) {
+            if (reg_range_used_by_moves(moves, move_count, base + offset)) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) continue;
+
+        int* reg_num = malloc(sizeof(int));
+        if (!reg_num) return -1;
+        *reg_num = base;
+        char* key = int_to_key(val);
+        dict_put(isel->ctx->value_to_reg, key, reg_num);
+        return base;
+    }
+    return -1;
+}
+
 int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, int size) {
     if (!isel || !ins || !next || next->op != IROP_JMP || !next->labels || next->labels->len == 0) return -1;
     const char* lbl = list_get(next->labels, 0);
@@ -39,7 +68,9 @@ int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, in
             ValueName arg = *(ValueName*)list_get(phi->args, i);
             if (arg != ins->dest) continue;
             int phi_dst_reg = isel_get_value_reg(isel, phi->dest);
-            if (phi_dst_reg >= 0 && phi_dst_reg + size - 1 < 8) {
+            int phi_size = phi->type ? c51_abi_type_size(phi->type) : get_value_size(isel, phi->dest);
+            if (phi_size < size) phi_size = size;
+            if (phi_dst_reg >= 0 && phi_dst_reg + phi_size - 1 < 8) {
                 if (isel->ctx && isel->ctx->value_to_reg) {
                     int* reg_num = malloc(sizeof(int));
                     *reg_num = phi_dst_reg;
@@ -82,9 +113,17 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
 
         ValueName src = *(ValueName*)list_get(phi->args, idx);
         ValueName dst = phi->dest;
-        int size = phi->type ? phi->type->size : get_value_size(isel, dst);
+        int size = phi->type ? c51_abi_type_size(phi->type) : get_value_size(isel, dst);
+        int src_size = get_value_size(isel, src);
+        int dst_size = get_value_size(isel, dst);
+        if (src_size > size) size = src_size;
+        if (dst_size > size) size = dst_size;
+        if (size < 1) size = 1;
 
         int dst_base = isel_get_value_reg(isel, dst);
+        if (dst_base >= 0 && dst_base + size - 1 > 7) {
+            dst_base = rebind_phi_dest_reg(isel, dst, size, moves, move_count);
+        }
         if (dst_base < 0) continue;
 
         const char* dst_lo = isel_reg_name(dst_base + (size == 2 ? 1 : 0));
@@ -800,7 +839,7 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
     isel_emit(isel, "LCALL", callee, NULL, instr_to_ssa_str(ins));
 
     if (ins->dest > 0) {
-        int size = ins->type ? ins->type->size : 1;
+        int size = ins->type ? c51_abi_type_size(ins->type) : 1;
         bool spill_dest = isel_value_is_spilled(isel, ins->dest);
         bool skip_copy_back = false;
         if (next && next->op == IROP_RET && next->args && next->args->len > 0) {
@@ -833,7 +872,7 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
 void emit_ret(ISelContext* isel, Instr* ins) {
     int64_t imm_val = 0;
     if (is_imm_operand(ins, &imm_val)) {
-        int ret_size = ins->type ? ins->type->size : 1;
+        int ret_size = ins->type ? c51_abi_type_size(ins->type) : 1;
         int lo = (int)(imm_val & 0xFF);
         char imm_lo[32]; snprintf(imm_lo, sizeof(imm_lo), "#%d", lo);
         char* ssa = instr_to_ssa_str(ins);
@@ -850,7 +889,7 @@ void emit_ret(ISelContext* isel, Instr* ins) {
 
     if (ins->args && ins->args->len > 0) {
         ValueName ret_val = *(ValueName*)list_get(ins->args, 0);
-        int ret_size = ins->type ? ins->type->size : 1;
+        int ret_size = ins->type ? c51_abi_type_size(ins->type) : 1;
         int val_size = get_value_size(isel, ret_val);
 
         const char* ret_lo = isel_get_lo_reg(isel, ret_val);

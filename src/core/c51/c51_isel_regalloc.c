@@ -184,7 +184,7 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
                         iv->val = ins->dest;
                         iv->start = instr_idx;
                         iv->end = instr_idx;
-                        iv->size = (ins->type && ins->type->size > 0) ? ins->type->size : 1;
+                        iv->size = ins->type ? c51_abi_type_size(ins->type) : 1;
                         iv->reg = -1;
                         iv->spill_slot = -1;
                         iv->is_param = (ins->op == IROP_PARAM);
@@ -258,6 +258,29 @@ static int find_longest_interval(LinearScanContext* lsc) {
     }
     
     return longest_idx;
+}
+
+static bool interval_fits_regs(LinearScanContext* lsc, int start_reg, int size, int current_start) {
+    if (!lsc || size <= 0) return false;
+    if (start_reg < k_temp_reg_min) return false;
+    if (start_reg + size - 1 > k_temp_reg_max) return false;
+
+    for (int i = 0; i < size; i++) {
+        int reg = start_reg + i;
+        if (lsc->active_regs[reg] >= 0 && lsc->active_reg_end[reg] >= current_start) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void occupy_interval_regs(LinearScanContext* lsc, LiveInterval* interval, int start_reg) {
+    if (!lsc || !interval || start_reg < 0) return;
+    interval->reg = start_reg;
+    for (int i = 0; i < interval->size && start_reg + i <= k_temp_reg_max; i++) {
+        lsc->active_regs[start_reg + i] = interval->val;
+        lsc->active_reg_end[start_reg + i] = interval->end;
+    }
 }
 
 static int find_reusable_spill_slot(SpillSlotInfo* slots, int slot_count,
@@ -389,50 +412,15 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
         bool allocated = false;
         if (!force_spill) {
             for (int r = k_temp_reg_min; r <= k_temp_reg_max; r++) {
-                /* 跳过生命周期未结束的参数/返回寄存器 */
-                if (lsc->active_regs[r] >= 0 && lsc->active_reg_end[r] >= interval->start) continue;
-                /* 双字节变量需保证r+1也可用且不冲突 */
-                if (interval->size == 2) {
-                    if (r + 1 > k_temp_reg_max) continue;
-                    if ((lsc->active_regs[r + 1] >= 0 && lsc->active_reg_end[r + 1] >= interval->start)) continue;
-                }
-                /* 分配 */
-                lsc->active_regs[r] = interval->val;
-                lsc->active_reg_end[r] = interval->end;
-                interval->reg = r;
-                if (interval->size == 2) {
-                    lsc->active_regs[r + 1] = interval->val;
-                    lsc->active_reg_end[r + 1] = interval->end;
-                }
+                if (!interval_fits_regs(lsc, r, interval->size, interval->start)) continue;
+                occupy_interval_regs(lsc, interval, r);
                 allocated = true;
                 break;
             }
         }
 
-        /* 如果没有空闲寄存器，优先抢占生命周期最晚结束的临时寄存器 */
+        /* 如果没有空闲寄存器，直接spill，避免多字节值被部分抢占后破坏布局 */
         if (!allocated) {
-            int spill_reg = find_longest_interval(lsc);
-            if (spill_reg >= 0) {
-                LiveInterval* spill_interval = NULL;
-                int spill_reg_val = lsc->active_regs[spill_reg];
-                for (int j = 0; j < lsc->interval_count; j++) {
-                    if (lsc->intervals[j].val == spill_reg_val) {
-                        spill_interval = &lsc->intervals[j];
-                        break;
-                    }
-                }
-                if (spill_interval && spill_interval->end > interval->end && !spill_interval->is_param) {
-                    spill_interval->reg = -1;  /* 被抢占，后续按需重分配 */
-                    lsc->active_regs[spill_reg] = interval->val;
-                    lsc->active_reg_end[spill_reg] = interval->end;
-                    interval->reg = spill_reg;
-                    if (interval->size == 2 && spill_reg + 1 <= k_temp_reg_max) {
-                        lsc->active_regs[spill_reg + 1] = interval->val;
-                        lsc->active_reg_end[spill_reg + 1] = interval->end;
-                    }
-                    allocated = true;
-                }
-            }
             if (!allocated) {
                 /* 无空寄存器可用：将此区间 spill 到内存（生成一个临时 spill 符号） */
                 if (genctx) {
@@ -493,12 +481,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
 
                 /* 兜底：避免返回负寄存器导致后续错误默认到R7 */
                 interval->reg = k_temp_reg_min;
-                lsc->active_regs[k_temp_reg_min] = interval->val;
-                lsc->active_reg_end[k_temp_reg_min] = interval->end;
-                if (interval->size == 2 && k_temp_reg_min + 1 <= k_temp_reg_max) {
-                    lsc->active_regs[k_temp_reg_min + 1] = interval->val;
-                    lsc->active_reg_end[k_temp_reg_min + 1] = interval->end;
-                }
+                occupy_interval_regs(lsc, interval, k_temp_reg_min);
             }
         }
 
@@ -561,6 +544,9 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
 
     /* 首先检查是否已经被线性扫描分配过 */
     int existing = isel_get_value_reg(isel, val);
+    if (existing >= 0 && existing + size - 1 > k_temp_reg_max) {
+        existing = -1;
+    }
     if (existing >= 0 || existing == -2 || existing == -3) {
         /* If linear scan already assigned a register, ensure the
          * isel context marks those physical registers as busy so

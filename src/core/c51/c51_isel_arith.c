@@ -14,7 +14,7 @@ static void store_spilled_dest_if_needed(ISelContext* isel, ValueName val, int r
 }
 
 void emit_const(ISelContext* isel, Instr* ins) {
-    int size = ins->type ? ins->type->size : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int val = (int)(ins->imm.ival & 0xFFFF);
 
     if (isel && isel->last_const_reg != -100 && isel->last_const_size == size && isel->last_const_val == val) {
@@ -56,7 +56,7 @@ void emit_const(ISelContext* isel, Instr* ins) {
 void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     Ctype* src1_type = get_value_type(isel, src1);
-    int size = ins->type ? ins->type->size : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int src1_size = get_value_size(isel, src1);
     int64_t imm_val;
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
@@ -188,7 +188,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     if (next && next->op == IROP_RET) {
         const char* ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
         const char* ret_hi = isel_reg_name(dst_reg);
-        int ret_size = next->type ? next->type->size : 1;
+        int ret_size = next->type ? c51_abi_type_size(next->type) : 1;
 
         if (strcmp(ret_lo, "R7") != 0) {
             emit_mov(isel, "R7", ret_lo, NULL);
@@ -218,7 +218,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
 
 void emit_neg(ISelContext* isel, Instr* ins) {
     ValueName src = get_src1_value(ins);
-    int size = ins->type ? ins->type->size : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     const char* src_lo = isel_get_lo_reg(isel, src);
@@ -241,7 +241,7 @@ void emit_neg(ISelContext* isel, Instr* ins) {
 
 void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     ValueName src = get_src1_value(ins);
-    int size = ins->type ? ins->type->size : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int dst_reg = alloc_dest_reg(isel, ins, NULL, size, true);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(dst_reg);
@@ -425,7 +425,7 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
 void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName a = get_src1_value(ins);
     ValueName b = get_src2_value(ins);
-    int size = ins->type ? ins->type->size : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(dst_reg);
@@ -493,7 +493,7 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
 void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
     ValueName num = get_src1_value(ins);
     ValueName den = get_src2_value(ins);
-    int size = ins->type ? ins->type->size : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
 
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
@@ -854,7 +854,7 @@ void emit_select(ISelContext* isel, Instr* ins) {
     ValueName tv = *(ValueName*)list_get(ins->args, 1);
     ValueName fv = *(ValueName*)list_get(ins->args, 2);
 
-    int size = ins->type ? ins->type->size : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(dst_reg);
@@ -925,7 +925,7 @@ void emit_select(ISelContext* isel, Instr* ins) {
 void emit_simple_cast(ISelContext* isel, Instr* ins, bool sign_extend) {
     ValueName src = get_src1_value(ins);
     int src_size = get_value_size(isel, src);
-    int dst_size = ins->type ? ins->type->size : src_size;
+    int dst_size = ins->type ? c51_abi_type_size(ins->type) : src_size;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, dst_size);
     const char* dst_lo = isel_reg_name(dst_reg + (dst_size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(dst_reg);
@@ -960,7 +960,7 @@ void emit_simple_cast(ISelContext* isel, Instr* ins, bool sign_extend) {
 
 void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
-    int size = ins->type ? ins->type->size : 1;
+    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int src1_size = get_value_size(isel, src1);
     int64_t imm_val;
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
@@ -1054,7 +1054,7 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             ret_lo = isel_get_lo_reg(isel, ins->dest);
             ret_hi = isel_get_hi_reg(isel, ins->dest);
         }
-        int ret_size = next->type ? next->type->size : 1;
+        int ret_size = next->type ? c51_abi_type_size(next->type) : 1;
         if (ret_lo && strcmp(ret_lo, "R7") != 0) {
             emit_mov(isel, "R7", ret_lo, ins);
         }
