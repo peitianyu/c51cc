@@ -655,9 +655,16 @@ static bool phi_pred(void *phi_, void *f_) {
     Instr *p = phi_; Func *f = f_;
     if (p->op != IROP_PHI) return true;
     ValueName first = 0;
+    bool has_first = false;
     for (int i = 0; i < p->args->len; ++i) {
         ValueName v = *(ValueName *)list_get(p->args, i);
-        if (v != p->dest) { if (!first) first = v; else if (v != first) return true; }
+        if (v == p->dest) continue;
+        if (!has_first) {
+            first = v;
+            has_first = true;
+        } else if (v != first) {
+            return true;
+        }
     }
     return false;
 }
@@ -711,33 +718,9 @@ static bool phi_label_in_preds(Block *b, const char *lbl) {
 }
 
 static bool phi_prune_dead_edges(Block *b, Instr *p) {
-    if (!b || !p || p->op != IROP_PHI || !p->args || !p->labels) return false;
-    int n = p->args->len < p->labels->len ? p->args->len : p->labels->len;
-    if (n == 0) return false;
-
-    List *args_tmp = make_list(), *labels_tmp = make_list();
-    bool changed = false;
-
-    for (int i = 0; i < n; ++i) {
-        ValueName *v = list_get(p->args, i);
-        char *lbl = list_get(p->labels, i);
-        if (!lbl || phi_label_in_preds(b, lbl)) {
-            list_push(args_tmp, v);
-            list_push(labels_tmp, lbl);
-        } else changed = true;
-    }
-
-    if (changed) {
-        list_clear_shallow(p->args);
-        list_clear_shallow(p->labels);
-        for (Iter it = list_iter(args_tmp); !iter_end(it);) list_push(p->args, iter_next(&it));
-        for (Iter it = list_iter(labels_tmp); !iter_end(it);) list_push(p->labels, iter_next(&it));
-    }
-
-    list_clear_shallow(args_tmp);
-    list_clear_shallow(labels_tmp);
-    free(args_tmp); free(labels_tmp);
-    return changed;
+    (void)b;
+    (void)p;
+    return false;
 }
 
 static bool phi_dedup_edges(Instr *p) {

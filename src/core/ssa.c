@@ -732,6 +732,45 @@ static Ctype *ctype_ptr = &(Ctype){0, CTYPE_PTR, 2, NULL};
 static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
 static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
 static Ctype *ctype_bool = &(Ctype){0, CTYPE_BOOL, 1, NULL};
+static int ssa_temp_var_seq = 0;
+
+static ValueName gen_logical_short_circuit(SSABuild *b, Ast *ast, bool is_and) {
+    Ctype *rtype = (ast && ast->ctype) ? ast->ctype : ctype_int;
+    char tmp_name[32];
+    snprintf(tmp_name, sizeof(tmp_name), "__sc_tmp_%d", ++ssa_temp_var_seq);
+
+    ValueName lhs = gen_expr(b, ast->left);
+    ValueName lhs_zero = ssa_build_const_t(b, 0, rtype);
+    ValueName lhs_bool = ssa_build_binop_t(b, IROP_NE, lhs, lhs_zero, rtype);
+
+    Block *rhs_b = ssa_build_block(b);
+    Block *short_b = ssa_build_block(b);
+    Block *merge_b = ssa_build_block(b);
+
+    if (is_and) {
+        ssa_build_br(b, lhs_bool, rhs_b, short_b);
+    } else {
+        ssa_build_br(b, lhs_bool, short_b, rhs_b);
+    }
+
+    ssa_build_position(b, rhs_b);
+    ValueName rhs = gen_expr(b, ast->right);
+    ValueName rhs_zero = ssa_build_const_t(b, 0, rtype);
+    ValueName rhs_bool = ssa_build_binop_t(b, IROP_NE, rhs, rhs_zero, rtype);
+    ssa_build_write(b, tmp_name, rhs_bool);
+    ssa_build_jmp(b, merge_b);
+    ssa_build_seal(b, rhs_b);
+
+    ssa_build_position(b, short_b);
+    ssa_build_write(b, tmp_name, ssa_build_const_t(b, is_and ? 0 : 1, rtype));
+    ssa_build_jmp(b, merge_b);
+    ssa_build_seal(b, short_b);
+
+    ssa_build_position(b, merge_b);
+    ssa_build_seal(b, merge_b);
+    return ssa_build_read(b, tmp_name);
+}
+
 static ValueName ssa_build_addr(SSABuild *b, const char *var, Ctype *mem_type) {
     Instr *i = ssa_make_instr(b, IROP_ADDR);
     i->dest = ssa_new_value(b);
@@ -997,6 +1036,12 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         return i->dest;
     }
     
+    case PUNCT_LOGAND:
+        return gen_logical_short_circuit(b, ast, true);
+
+    case PUNCT_LOGOR:
+        return gen_logical_short_circuit(b, ast, false);
+
     case '+': case '-': case '*': case '/': case '%':
     case '&': case '|': case '^': 
     case PUNCT_LSHIFT: case PUNCT_RSHIFT:
