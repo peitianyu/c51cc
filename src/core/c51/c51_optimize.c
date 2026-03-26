@@ -81,6 +81,30 @@ static bool is_indirect_operand(const char* op) {
     return op[0] == '@';
 }
 
+static bool is_local_numeric_label(const char* op) {
+    if (!op) return false;
+    size_t len = strlen(op);
+    if (len < 3 || op[len - 1] != ':') return false;
+    if (op[0] != 'L') return false;
+    for (size_t i = 1; i + 1 < len; i++) {
+        if (op[i] < '0' || op[i] > '9') return false;
+    }
+    return true;
+}
+
+static bool label_is_referenced(List* instrs, const char* label) {
+    if (!instrs || !label) return false;
+    for (int i = 0; i < instrs->len; i++) {
+        AsmInstr* ins = (AsmInstr*)list_get(instrs, i);
+        if (!ins || !ins->args) continue;
+        for (int j = 0; j < ins->args->len; j++) {
+            const char* arg = (const char*)list_get(ins->args, j);
+            if (arg && strcmp(arg, label) == 0) return true;
+        }
+    }
+    return false;
+}
+
 /* 删除指令 */
 static void remove_instr(List* instrs, int index) {
     if (!instrs || index < 0 || index >= instrs->len) return;
@@ -148,6 +172,69 @@ static int peephole_mov_chain(List* instrs, int start) {
     }
     
     return 0;
+}
+
+static bool reg_read_before_write_or_end(List* instrs, int start, const char* reg);
+static int peephole_mov_reg_to_any(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
+    if (!is_mov(ins1) || !is_mov(ins2)) return 0;
+
+    const char* dst1 = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+    const char* dst2 = get_operand(ins2, 0);
+    const char* src2 = get_operand(ins2, 1);
+
+    if (!dst1 || !src1 || !dst2 || !src2) return 0;
+    if (!(dst1[0] == 'R' && dst1[1] >= '0' && dst1[1] <= '7' && dst1[2] == '\0')) return 0;
+    if (!operands_equal(src2, dst1)) return 0;
+    if (is_indirect_operand(src1) || is_indirect_operand(dst2)) return 0;
+
+    if (!reg_read_before_write_or_end(instrs, start + 2, dst1)) {
+        free(ins2->args->head->next->elem);
+        ins2->args->head->next->elem = strdup(src1);
+        remove_instr(instrs, start);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int peephole_drop_dead_mov_before_bit_branch(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    if (!ins1 || !ins2 || !is_mov(ins1) || !ins2->op) return 0;
+
+    const char* dst1 = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+    if (!dst1 || !src1) return 0;
+    if (!(dst1[0] == 'R' && dst1[1] >= '0' && dst1[1] <= '7' && dst1[2] == '\0')) return 0;
+    if (!is_immediate_operand(src1)) return 0;
+    if (!(strcmp(ins2->op, "JNB") == 0 || strcmp(ins2->op, "JB") == 0 || strcmp(ins2->op, "JBC") == 0)) return 0;
+    if (reg_used_in_instr(ins2, dst1)) return 0;
+
+    remove_instr(instrs, start);
+    return 1;
+}
+
+static int peephole_remove_empty_local_label(List* instrs, int start) {
+    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
+    if (!ins || !ins->op || !is_local_numeric_label(ins->op)) return 0;
+
+    char label[64];
+    size_t len = strlen(ins->op);
+    if (len >= sizeof(label)) return 0;
+    strncpy(label, ins->op, len - 1);
+    label[len - 1] = '\0';
+
+    if (label_is_referenced(instrs, label)) return 0;
+    remove_instr(instrs, start);
+    return 1;
 }
 
 /* 窥孔优化：MOV x, A; MOV A, x -> MOV x, A (删除冗余加载) */
@@ -474,6 +561,12 @@ static void optimize_section(Section* sec) {
         for (int i = 0; i < sec->asminstrs->len; i++) {
             int removed = 0;
 
+            removed = peephole_remove_empty_local_label(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_drop_dead_mov_before_bit_branch(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
             removed = peephole_redundant_swap(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
@@ -490,6 +583,9 @@ static void optimize_section(Section* sec) {
             if (removed) { changed = 1; continue; }
 
             removed = peephole_mov_propagate(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_mov_reg_to_any(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_mov_chain(sec->asminstrs, i);
