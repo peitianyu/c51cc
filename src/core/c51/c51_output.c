@@ -283,10 +283,50 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
 
 int c51_write_hex(FILE *fp, const ObjFile *obj)
 {
+    int code_base = 0;
+    unsigned upper = 0xFFFFFFFFu;
+    int sec_idx = 0;
+
     if (!fp || !obj) return -1;
-    
-    fprintf(fp, "; Intel HEX format not yet implemented\n");
-    fprintf(fp, "; Use ASM output for now\n");
-    
+
+    for (Iter it = list_iter(obj->sections); !iter_end(it); sec_idx++) {
+        Section *sec = iter_next(&it);
+        if (!sec || sec->kind != SEC_CODE || sec->bytes_len <= 0) continue;
+
+        if (sec->align > 1) {
+            code_base = ((code_base + sec->align - 1) / sec->align) * sec->align;
+        }
+
+        for (int offset = 0; offset < sec->bytes_len; offset += 16) {
+            unsigned address = (unsigned)(code_base + offset);
+            unsigned chunk = (unsigned)((sec->bytes_len - offset) > 16 ? 16 : (sec->bytes_len - offset));
+            unsigned need_upper = address >> 16;
+            unsigned sum;
+
+            if (need_upper != upper) {
+                unsigned char ext[2];
+                unsigned char checksum;
+                ext[0] = (unsigned char)((need_upper >> 8) & 0xFF);
+                ext[1] = (unsigned char)(need_upper & 0xFF);
+                sum = 2 + 0 + 0 + 4 + ext[0] + ext[1];
+                checksum = (unsigned char)((-((int)sum)) & 0xFF);
+                fprintf(fp, ":02000004%02X%02X%02X\n", ext[0], ext[1], checksum);
+                upper = need_upper;
+            }
+
+            sum = chunk + ((address >> 8) & 0xFF) + (address & 0xFF);
+            fprintf(fp, ":%02X%04X00", chunk, address & 0xFFFF);
+            for (unsigned i = 0; i < chunk; i++) {
+                unsigned char byte = sec->bytes[offset + (int)i];
+                sum += byte;
+                fprintf(fp, "%02X", byte);
+            }
+            fprintf(fp, "%02X\n", (unsigned char)((-((int)sum)) & 0xFF));
+        }
+
+        code_base += sec->bytes_len;
+    }
+
+    fprintf(fp, ":00000001FF\n");
     return 0;
 }

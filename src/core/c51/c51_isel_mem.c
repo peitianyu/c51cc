@@ -59,6 +59,17 @@ static const char* preserve_offset_operand(ISelContext* isel, const char* src) {
     return src;
 }
 
+static int alloc_indirect_scratch_reg(ISelContext* isel) {
+    if (!isel) return -1;
+    for (int reg = 0; reg <= 1; reg++) {
+        if (isel->reg_busy[reg]) continue;
+        isel->reg_busy[reg] = true;
+        isel->reg_val[reg] = -1;
+        return reg;
+    }
+    return -1;
+}
+
 static void emit_materialize_pointer_symbol(ISelContext* isel, const char* sym,
                                             int ptr_size,
                                             const char* dst_lo,
@@ -145,7 +156,7 @@ static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueNam
     const char* scratch = NULL;
 
     if (ptr_abi_size == 1 || ptr_abi_size == 3 || ((ptr_space == 1 || ptr_space == 2 || ptr_space == 3) && ptr_abi_size == 2)) {
-        scratch_reg = alloc_temp_reg(isel, -1, 1);
+        scratch_reg = alloc_indirect_scratch_reg(isel);
         scratch = (scratch_reg >= 0) ? isel_reg_name(scratch_reg) : "R0";
     }
 
@@ -420,7 +431,7 @@ static bool emit_store_to_pointer_value(ISelContext* isel, Instr* ins, ValueName
     const char* scratch = NULL;
 
     if (ptr_abi_size == 1 || ptr_abi_size == 3 || ((ptr_space == 1 || ptr_space == 2 || ptr_space == 3) && ptr_abi_size == 2)) {
-        scratch_reg = alloc_temp_reg(isel, -1, 1);
+        scratch_reg = alloc_indirect_scratch_reg(isel);
         scratch = (scratch_reg >= 0) ? isel_reg_name(scratch_reg) : "R0";
     }
 
