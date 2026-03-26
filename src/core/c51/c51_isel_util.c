@@ -122,12 +122,30 @@ void emit_store_spilled_result(ISelContext* isel, ValueName val, int reg, int si
 void emit_copy_value(ISelContext* isel, Instr* ins, ValueName src, int dst_reg, int size) {
     const char* src_lo = isel_get_lo_reg(isel, src);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
-    emit_mov(isel, dst_lo, src_lo, ins);
     if (size == 2) {
         const char* src_hi = isel_get_hi_reg(isel, src);
         const char* dst_hi = isel_reg_name(dst_reg);
-        emit_mov(isel, dst_hi, src_hi, ins);
+        int src_hi_tmp = -1;
+        const char* src_hi_safe = src_hi;
+
+        if (src_hi && dst_lo && strcmp(dst_lo, src_hi) == 0 && strcmp(dst_hi, src_hi) != 0) {
+            src_hi_tmp = alloc_temp_reg(isel, -1, 1);
+            if (src_hi_tmp >= 0) {
+                src_hi_safe = isel_reg_name(src_hi_tmp);
+                emit_mov(isel, src_hi_safe, src_hi, NULL);
+            }
+        }
+
+        emit_mov(isel, dst_lo, src_lo, ins);
+        emit_mov(isel, dst_hi, src_hi_safe, ins);
+
+        if (src_hi_tmp >= 0) {
+            free_temp_reg(isel, src_hi_tmp, 1);
+        }
+        return;
     }
+
+    emit_mov(isel, dst_lo, src_lo, ins);
 }
 
 void emit_add16_regs(ISelContext* isel,

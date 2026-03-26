@@ -128,7 +128,8 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
 
     if (size == 2) {
         if (src1_size == 2) {
-            const char* src1_hi = isel_get_hi_reg(isel, src1);
+            int src1_base_reg = isel_get_value_reg(isel, src1);
+            const char* src1_hi = (src1_base_reg >= 0) ? isel_reg_name(src1_base_reg) : NULL;
             if (dst_lo && src1_hi && strcmp(dst_lo, src1_hi) == 0) {
                 src1_hi_tmp = alloc_temp_reg(isel, -1, 1);
                 src1_hi_preserved = (src1_hi_tmp >= 0) ? isel_reg_name(src1_hi_tmp) : "B";
@@ -136,7 +137,8 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
             }
         }
         if (!src2_is_imm && !src2_spilled_mem && src2_size == 2) {
-            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            int src2_base_reg = isel_get_value_reg(isel, src2);
+            const char* src2_hi = (src2_base_reg >= 0) ? isel_reg_name(src2_base_reg) : NULL;
             if (dst_lo && src2_hi && strcmp(dst_lo, src2_hi) == 0) {
                 src2_hi_tmp = alloc_temp_reg(isel, -1, 1);
                 src2_hi_preserved = (src2_hi_tmp >= 0) ? isel_reg_name(src2_hi_tmp) : "B";
@@ -180,7 +182,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         const char* dst_hi = isel_reg_name(dst_reg);
 
         if (src1_size == 2) {
-            const char* src1_hi = isel_get_hi_reg(isel, src1);
+            const char* src1_hi = src1_hi_preserved ? src1_hi_preserved : isel_get_hi_reg(isel, src1);
             emit_mov(isel, "A", src1_hi, NULL);
         } else {
             emit_mov(isel, "A", "#0", NULL);
@@ -1047,7 +1049,8 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
 
     if (size == 2) {
         if (src1_size == 2) {
-            const char* src1_hi = isel_get_hi_reg(isel, src1);
+            int src1_base_reg = isel_get_value_reg(isel, src1);
+            const char* src1_hi = (src1_base_reg >= 0) ? isel_reg_name(src1_base_reg) : NULL;
             if (dst_lo && src1_hi && strcmp(dst_lo, src1_hi) == 0) {
                 src1_hi_tmp = alloc_temp_reg(isel, -1, 1);
                 src1_hi_preserved = (src1_hi_tmp >= 0) ? isel_reg_name(src1_hi_tmp) : "B";
@@ -1055,7 +1058,8 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             }
         }
         if (!src2_is_imm && !src2_spilled_mem && src2_size == 2) {
-            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            int src2_base_reg = isel_get_value_reg(isel, src2);
+            const char* src2_hi = (src2_base_reg >= 0) ? isel_reg_name(src2_base_reg) : NULL;
             if (dst_lo && src2_hi && strcmp(dst_lo, src2_hi) == 0) {
                 src2_hi_tmp = alloc_temp_reg(isel, -1, 1);
                 src2_hi_preserved = (src2_hi_tmp >= 0) ? isel_reg_name(src2_hi_tmp) : "B";
@@ -1106,7 +1110,7 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         const char* dst_hi = isel_reg_name(phys_dst_reg);
 
         if (src1_size == 2) {
-            const char* src1_hi = isel_get_hi_reg(isel, src1);
+            const char* src1_hi = src1_hi_preserved ? src1_hi_preserved : isel_get_hi_reg(isel, src1);
             emit_mov(isel, "A", src1_hi, ins);
         } else {
             emit_mov(isel, "A", "#0", ins);
