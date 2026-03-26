@@ -80,8 +80,31 @@ static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueNam
     if (phys_dst_reg < 0) {
         phys_dst_reg = alloc_temp_reg(isel, ins->dest, load_size);
     }
+    if (ptr_reg >= 0 && phys_dst_reg >= 0) {
+        int ptr_begin = ptr_reg;
+        int ptr_end = ptr_reg + ptr_abi_size - 1;
+        int dst_begin = phys_dst_reg;
+        int dst_end = phys_dst_reg + load_size - 1;
+        bool overlaps = !(dst_end < ptr_begin || dst_begin > ptr_end);
+        if (overlaps) {
+            int alt_reg = alloc_temp_reg(isel, ins->dest, load_size);
+            if (alt_reg >= 0) {
+                phys_dst_reg = alt_reg;
+                dst_reg = alt_reg;
+            }
+        }
+    }
     if (phys_dst_reg < 0) {
         phys_dst_reg = 0;
+    }
+    if (isel && isel->ctx && isel->ctx->value_to_reg && ins && ins->dest > 0 && phys_dst_reg >= 0) {
+        int* reg_num = malloc(sizeof(int));
+        if (reg_num) {
+            *reg_num = phys_dst_reg;
+            char* key = int_to_key(ins->dest);
+            dict_put(isel->ctx->value_to_reg, key, reg_num);
+        }
+        dst_reg = phys_dst_reg;
     }
     if (dst_reg < 0 && dst_reg != -3 && isel && isel->ctx && isel->ctx->value_to_reg) {
         int* reg_num = malloc(sizeof(int));

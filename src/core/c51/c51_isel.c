@@ -513,6 +513,31 @@ static void isel_record_dest_type(ISelContext* isel, Instr* ins) {
     }
 }
 
+static bool const_used_only_as_add_rhs(ISelContext* isel, Instr* ins) {
+    if (!isel || !ins || ins->op != IROP_CONST || ins->dest <= 0 || !isel->ctx || !isel->ctx->current_func) {
+        return false;
+    }
+    bool has_use = false;
+    Func *func = isel->ctx->current_func;
+    for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
+        Block *block = iter_next(&bit);
+        if (!block || !block->instrs) continue;
+        for (Iter iit = list_iter(block->instrs); !iter_end(iit);) {
+            Instr *user = iter_next(&iit);
+            if (!user || user == ins || !user->args || user->args->len < 1) continue;
+            for (int i = 0; i < user->args->len; i++) {
+                ValueName *arg = list_get(user->args, i);
+                if (!arg || *arg != ins->dest) continue;
+                has_use = true;
+                if (user->op != IROP_ADD || i != 1) {
+                    return false;
+                }
+            }
+        }
+    }
+    return has_use;
+}
+
 void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins) return;
     isel_record_dest_type(isel, ins);
@@ -522,6 +547,9 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         case IROP_NOP:
             break;
         case IROP_CONST:
+            if (const_used_only_as_add_rhs(isel, ins)) {
+                break;
+            }
             emit_const(isel, ins);
             break;
         case IROP_PARAM:

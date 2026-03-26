@@ -495,14 +495,6 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
 
     }
 
-    /* 打印分配统计（便于调试） */
-    if (genctx) {
-        const char* fname = "<unknown>";
-        if (genctx->current_func && genctx->current_func->name) fname = genctx->current_func->name;
-        fprintf(stderr, "[linscan] func %s: intervals=%d peak_live=%d spills=%d spill_slots=%d\n",
-            fname, lsc->interval_count, peak_live, spill_count, spill_slot_count);
-    }
-
     /* 将分配结果存储到value_to_reg字典中 */
     if (genctx->value_to_reg) {
         for (int i = 0; i < lsc->interval_count; i++) {

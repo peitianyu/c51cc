@@ -60,11 +60,37 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     int src1_size = get_value_size(isel, src1);
     int64_t imm_val;
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
-    ValueName src2 = src2_is_imm ? -1 : get_src2_value(ins);
+    ValueName src2 = get_src2_value(ins);
+    if (!src2_is_imm && src2 > 0 && try_get_value_const(isel, src2, &imm_val)) {
+        src2_is_imm = true;
+    }
+    if (src2_is_imm) src2 = -1;
     const char* src2_sym = (!src2_is_imm) ? lookup_value_addr_symbol(isel, src2) : NULL;
     bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == -3;
 
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
+    int src1_base_reg = isel_get_value_reg(isel, src1);
+    if (dst_reg >= 0 && src1_base_reg >= 0 && src1 != ins->dest) {
+        int src1_begin = src1_base_reg;
+        int src1_end = src1_base_reg + src1_size - 1;
+        int dst_begin = dst_reg;
+        int dst_end = dst_reg + size - 1;
+        bool overlaps = !(dst_end < src1_begin || dst_begin > src1_end);
+        if (overlaps) {
+            int alt_reg = alloc_temp_reg(isel, ins->dest, size);
+            if (alt_reg >= 0) {
+                dst_reg = alt_reg;
+                if (isel && isel->ctx && isel->ctx->value_to_reg) {
+                    int* reg_num = malloc(sizeof(int));
+                    if (reg_num) {
+                        *reg_num = dst_reg;
+                        char* key = int_to_key(ins->dest);
+                        dict_put(isel->ctx->value_to_reg, key, reg_num);
+                    }
+                }
+            }
+        }
+    }
 
     if (isel && isel->ctx && isel->ctx->value_to_addr) {
         char* k = int_to_key(src1);

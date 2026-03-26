@@ -45,6 +45,7 @@ static Ast *read_decl_or_stmt(void);
 static Ctype *result_type(int op, Ctype *a, Ctype *b);
 static Ctype *convert_array(Ctype *ctype);
 static Ast *read_stmt(void);
+static Ast *read_postfix_expr_tail(Ast *ast);
 static void expect(char punct);
 static Ctype *read_decl_int(Token *name);
 static int read_decl_ctype_attr(Token tok, int *attr_out);
@@ -1092,7 +1093,7 @@ static Ast *read_unary_expr(void)
         return ast_uop(PUNCT_DEC, operand->ctype, operand);
     }
     unget_token(tok);
-    return read_prim();
+    return read_postfix_expr_tail(read_prim());
 }
 
 static Ast *read_cond_expr(Ast *cond)
@@ -1121,6 +1122,68 @@ static Ast *read_struct_field(Ast *struc)
     char *ident = get_ident(name);
     Ctype *field = dict_get(struc->ctype->fields, ident);
     return ast_struct_ref(field, struc, ident);
+}
+static Ast *read_postfix_expr_tail(Ast *ast)
+{
+    if (!ast)
+        return NULL;
+    while (1) {
+        Token tok = read_token();
+        if (get_ttype(tok) != TTYPE_PUNCT) {
+            unget_token(tok);
+            return ast;
+        }
+        if (is_punct(tok, '.')) {
+            Token next = peek_token();
+            if (get_ttype(next) == TTYPE_NUMBER) {
+                Token numtok = read_token();
+                char *num = get_number(numtok);
+                if (!is_int_token(num)) error("Invalid bit index: %s", token_to_string(numtok));
+                int idx = atoi(num);
+                Ast *r = malloc(sizeof(Ast));
+                r->type = AST_BIT_REF;
+                r->ctype = ctype_bool;
+                r->struc = ast;
+                r->bit_index = idx;
+                ast = r;
+                continue;
+            }
+            ast = read_struct_field(ast);
+            continue;
+        }
+        if (is_punct(tok, PUNCT_ARROW)) {
+            if (ast->ctype->type != CTYPE_PTR)
+                error("pointer type expected, but got %s %s",
+                      ctype_to_string(ast->ctype), ast_to_string(ast));
+            ast = ast_uop(AST_DEREF, ast->ctype->ptr, ast);
+            ast = read_struct_field(ast);
+            continue;
+        }
+        if (is_punct(tok, '[')) {
+            ast = read_subscript_expr(ast);
+            continue;
+        }
+        if (is_punct(tok, '(')) {
+            if (ast->type == AST_DEREF && ast->operand &&
+                ast->operand->ctype && ast->operand->ctype->type == CTYPE_PTR) {
+                Ast *func_ptr = ast->operand;
+                if (func_ptr->type == AST_LVAR || func_ptr->type == AST_GVAR) {
+                    ast = read_func_args(func_ptr->varname, func_ptr);
+                    continue;
+                }
+            }
+            unget_token(tok);
+            return ast;
+        }
+        if (is_punct(tok, PUNCT_INC) || is_punct(tok, PUNCT_DEC)) {
+            ensure_lvalue(ast);
+            int post_type = is_punct(tok, PUNCT_INC) ? AST_POST_INC : AST_POST_DEC;
+            ast = ast_uop(post_type, ast->ctype, ast);
+            continue;
+        }
+        unget_token(tok);
+        return ast;
+    }
 }
 
 static Ast *read_expr_int(int prec)
