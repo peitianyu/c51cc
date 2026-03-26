@@ -22,6 +22,23 @@ static char *obj_strdup(const char *s)
     return d;
 }
 
+static AsmInstr *clone_asminstr(const AsmInstr *src)
+{
+    if (!src) return NULL;
+
+    AsmInstr *dst = obj_alloc(sizeof(AsmInstr));
+    dst->op = obj_strdup(src->op);
+    dst->ssa = obj_strdup(src->ssa);
+    dst->args = make_list();
+    if (src->args) {
+        for (Iter it = list_iter(src->args); !iter_end(it);) {
+            char *arg = iter_next(&it);
+            list_push(dst->args, obj_strdup(arg));
+        }
+    }
+    return dst;
+}
+
 ObjFile *obj_new(void)
 {
     ObjFile *obj = obj_alloc(sizeof(ObjFile));
@@ -307,6 +324,14 @@ ObjFile *obj_link(List *objs)
                 section_append_bytes(out_sec, in->bytes, in->bytes_len);
             else if (in->size > 0)
                 section_append_zeros(out_sec, in->size);
+
+            if (in->asminstrs) {
+                for (Iter ait = list_iter(in->asminstrs); !iter_end(ait);) {
+                    AsmInstr *ins = iter_next(&ait);
+                    AsmInstr *copy = clone_asminstr(ins);
+                    if (copy) list_push(out_sec->asminstrs, copy);
+                }
+            }
             
             // 记录映射关系
             SectionMap *m = obj_alloc(sizeof(SectionMap));

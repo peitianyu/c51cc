@@ -680,12 +680,8 @@ void emit_store(ISelContext* isel, Instr* ins) {
             }
         } else {
             int store_size = (ins->mem_type && ins->mem_type->size > 1) ? ins->mem_type->size : 1;
-            char imm_str[16];
-            snprintf(imm_str, sizeof(imm_str), "#%d", (int)(ins->imm.ival & 0xFF));
-            isel_emit(isel, "MOV", var_name, imm_str, instr_to_ssa_str(ins));
+            emit_store_symbol_imm_byte(isel, var_name, 0, (int)(ins->imm.ival & 0xFF), ins);
             if (store_size >= 2) {
-                char imm_hi[16];
-                snprintf(imm_hi, sizeof(imm_hi), "#%d", (int)((ins->imm.ival >> 8) & 0xFF));
                 emit_store_symbol_imm_byte(isel, var_name, 1, (int)((ins->imm.ival >> 8) & 0xFF), NULL);
             }
         }
