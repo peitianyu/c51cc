@@ -1,0 +1,10 @@
+﻿
+[36m===== Tests =====[0m
+[33m 1[0m : test.lexer
+[33m 2[0m : test.pp
+[33m 3[0m : test.ssa
+[33m 4[0m : test.ssa_opt
+[33m 5[0m : test.ast
+[33m 6[0m : test.c51_gen
+[33m 7[0m : test.c51_link
+[35m# (0=all, ENTER=quit): [0m[32m[ RUN ][0m test.c51_gen

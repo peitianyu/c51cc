@@ -272,9 +272,17 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     ValueName src = get_src1_value(ins);
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int dst_reg = alloc_dest_reg(isel, ins, NULL, size, true);
-    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
-    const char* dst_hi = isel_reg_name(dst_reg);
-    emit_copy_value(isel, ins, src, dst_reg, size);
+    int phys_dst_reg = dst_reg;
+    bool temp_result = false;
+    if (phys_dst_reg < 0 || phys_dst_reg + size - 1 > 7) {
+        phys_dst_reg = alloc_temp_reg(isel, ins->dest, size);
+        temp_result = phys_dst_reg >= 0;
+    }
+    if (phys_dst_reg < 0) phys_dst_reg = 0;
+
+    const char* dst_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
+    const char* dst_hi = isel_reg_name(phys_dst_reg);
+    emit_copy_value(isel, ins, src, phys_dst_reg, size);
 
     int64_t imm = 0;
     if (size == 1) {
@@ -345,7 +353,8 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
         free(l_loop); free(l_end);
 
         if (tcnt_tmp >= 0) free_temp_reg(isel, tcnt_tmp, 1);
-        store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+        store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+        if (temp_result) free_temp_reg(isel, phys_dst_reg, size);
         return;
     } else if (size == 2) {
         /* 16-bit shift: handle immediate and variable counts */
@@ -385,7 +394,8 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
                     emit_mov(isel, dst_hi, "A", NULL);
                 }
             }
-            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+            store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+            if (temp_result) free_temp_reg(isel, phys_dst_reg, size);
             return;
         }
 
@@ -442,7 +452,8 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
 
         free(l_loop); free(l_end);
         if (tcnt_tmp >= 0) free_temp_reg(isel, tcnt_tmp, 1);
-        store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+        store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+        if (temp_result) free_temp_reg(isel, phys_dst_reg, size);
         return;
     }
 
