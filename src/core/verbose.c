@@ -107,9 +107,15 @@ static void ast_to_string_int(String *buf, Ast *ast)
             break;
         case CTYPE_CHAR:
             if (ast->ival == '\n')
-                string_appendf(buf, "'\n'");
+                string_appendf(buf, "'\\n'");
+            else if (ast->ival == '\r')
+                string_appendf(buf, "'\\r'");
+            else if (ast->ival == '\t')
+                string_appendf(buf, "'\\t'");
             else if (ast->ival == '\\')
                 string_appendf(buf, "'\\\\'");
+            else if (ast->ival == '\'')
+                string_appendf(buf, "'\\\''");
             else {
                 unsigned char uc = (unsigned char)ast->ival;
                 if (isprint(uc))

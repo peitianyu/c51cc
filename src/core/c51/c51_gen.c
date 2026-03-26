@@ -3,6 +3,7 @@
 #include "c51_gen_global_var.h"
 #include "c51_optimize.h"
 #include "c51_encode.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -164,6 +165,31 @@ static ObjFile *compile_one(const char *path) {
     list_free(strings);
     list_free(ctypes);
     return o;
+}
+
+static char *compile_one_to_asm_text(const char *path)
+{
+    ObjFile *obj = compile_one(path);
+    FILE *fp;
+    long len;
+    char *buf;
+
+    ASSERT(obj != NULL);
+    fp = tmpfile();
+    ASSERT(fp != NULL);
+    ASSERT(c51_write_asm(fp, obj) == 0);
+    ASSERT(fseek(fp, 0, SEEK_END) == 0);
+    len = ftell(fp);
+    ASSERT(len >= 0);
+    ASSERT(fseek(fp, 0, SEEK_SET) == 0);
+
+    buf = calloc((size_t)len + 1, 1);
+    ASSERT(buf != NULL);
+    ASSERT((long)fread(buf, 1, (size_t)len, fp) == len);
+
+    fclose(fp);
+    obj_free(obj);
+    return buf;
 }
 
 TEST(test, c51_gen) {

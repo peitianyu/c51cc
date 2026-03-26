@@ -38,9 +38,17 @@ void uart_puts(const char* str) {
     uart_putc('\n');
 }
 
+void uart_emit_specials(void) {
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_putc('\t');
+    uart_putc('\\');
+}
+
 int main(void) {
     uart_init();
     uart_puts("Hello, UART!");
+    uart_emit_specials();
     return 0;
 }
 

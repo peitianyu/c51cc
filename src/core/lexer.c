@@ -16,6 +16,9 @@
 static bool ungotten = false;
 static Token ungotten_buf = {0};
 
+static int getc_with_pos(void);
+static int ungetc_with_pos(int c);
+
 // 位置跟踪变量
 static int curr_line = 1;
 static int curr_col = 1;
@@ -32,6 +35,36 @@ static Token make_token(enum TokenType type, uintptr_t data)
         .type = type,
         .priv = data,
     };
+}
+
+static int read_escaped_char(void)
+{
+    int c = getc_with_pos();
+    if (c == EOF)
+        return EOF;
+    if (c != '\\')
+        return c;
+
+    c = getc_with_pos();
+    if (c == EOF)
+        return EOF;
+
+    switch (c) {
+    case '\'' : return '\'';
+    case '"' : return '"';
+    case 'n' : return '\n';
+    case 'r' : return '\r';
+    case 't' : return '\t';
+    case '0' : return '\0';
+    case '\\': return '\\';
+    case 'a' : return '\a';
+    case 'b' : return '\b';
+    case 'f' : return '\f';
+    case 'v' : return '\v';
+    default:
+        error("Unknown quote: %c", c);
+    }
+    return EOF;
 }
 
 static void update_pos(int c) {
@@ -162,15 +195,10 @@ static Token read_number(char first)
 
 static Token read_char(void)
 {
-    char c = getc_with_pos();
+    int c = read_escaped_char();
     if (c == EOF)
         goto err;
-    if (c == '\\') {
-        c = getc_with_pos();
-        if (c == EOF)
-            goto err;
-    }
-    char c2 = getc_with_pos();
+    int c2 = getc_with_pos();
     if (c2 == EOF)
         goto err;
     if (c2 != '\'')
@@ -191,27 +219,10 @@ static Token read_string(void)
         if (c == '"')
             break;
         if (c == '\\') {
-            c = getc_with_pos();
-            switch (c) {
-            case EOF:
+            ungetc_with_pos(c);
+            c = read_escaped_char();
+            if (c == EOF)
                 error("Unterminated \\");
-            case '\"':
-                break;
-            case 'n':
-                c = '\n';
-                break;
-            case 'r':
-                c = '\r';
-                break;
-            case 't':
-                c = '\t';
-                break;
-            case '\\':
-                c = '\\';
-                break;
-            default:
-                error("Unknown quote: %c", c);
-            }
         }
         string_append(&s, c);
     }
