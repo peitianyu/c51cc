@@ -9,6 +9,7 @@
 /* C51代码生成上下文 */
 typedef struct C51GenContext {
     ObjFile* obj;
+    SSAUnit* unit;
     Func* current_func;
     Block* current_block;
 

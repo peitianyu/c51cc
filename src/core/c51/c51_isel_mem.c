@@ -24,6 +24,33 @@ static void store_spilled_mem_result(ISelContext* isel, Instr* ins, int reg, int
     emit_store_spilled_result(isel, ins->dest, reg, size, ins);
 }
 
+static bool addr_value_needs_materialization(ISelContext* isel, ValueName value) {
+    if (!isel || !isel->ctx || !isel->ctx->current_func || value <= 0) return true;
+    bool has_use = false;
+    Func *func = isel->ctx->current_func;
+    for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
+        Block *block = iter_next(&bit);
+        if (!block || !block->instrs) continue;
+        for (Iter iit = list_iter(block->instrs); !iter_end(iit);) {
+            Instr *user = iter_next(&iit);
+            if (!user || !user->args) continue;
+            bool uses_value = false;
+            for (int index = 0; index < user->args->len; index++) {
+                ValueName *arg = list_get(user->args, index);
+                if (arg && *arg == value) {
+                    uses_value = true;
+                    has_use = true;
+                    if (!((user->op == IROP_LOAD || user->op == IROP_STORE) && index == 0)) {
+                        return true;
+                    }
+                }
+            }
+            if (uses_value) continue;
+        }
+    }
+    return !has_use;
+}
+
 static const char* preserve_offset_operand(ISelContext* isel, const char* src) {
     if (src && strcmp(src, "A") == 0) {
         isel_emit(isel, "MOV", "B", "A", NULL);
@@ -688,8 +715,17 @@ void emit_store(ISelContext* isel, Instr* ins) {
         }
     }
 
-    if ((!ins->labels || ins->labels->len == 0) && ptr > 0 && emit_store_to_pointer_value(isel, ins, ptr, val)) {
-        return;
+    if ((!ins->labels || ins->labels->len == 0) && ptr > 0) {
+        bool allow_pointer_store = true;
+        if (isel->ctx && isel->ctx->current_func) {
+            Instr *def = find_def_instr_in_func(isel->ctx->current_func, ptr);
+            if (def && def->op == IROP_ADDR) {
+                allow_pointer_store = false;
+            }
+        }
+        if (allow_pointer_store && emit_store_to_pointer_value(isel, ins, ptr, val)) {
+            return;
+        }
     }
 
     if (!var_name) return;
@@ -752,6 +788,17 @@ void emit_addr(ISelContext* isel, Instr* ins) {
     if (isel->ctx && isel->ctx->value_to_addr) {
         char* key = int_to_key(ins->dest);
         dict_put(isel->ctx->value_to_addr, key, strdup(var_name));
+    }
+
+    if (ins->mem_type) {
+        CtypeAttr attr = get_attr(ins->mem_type->attr);
+        if (attr.ctype_register) {
+            return;
+        }
+    }
+
+    if (!addr_value_needs_materialization(isel, ins->dest)) {
+        return;
     }
 
     int ptr_size = ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);

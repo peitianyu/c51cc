@@ -77,7 +77,7 @@ static const char* get_cmp_hi_reg(ISelContext* isel, ValueName val, int width) {
 void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mnem) {
     ValueName src1 = get_src1_value(ins);
     int size = ins && ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
-    if (size < 2) size = 2;
+    if (size < 1) size = 1;
     int64_t imm_val;
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
     ValueName src2 = get_src2_value(ins);

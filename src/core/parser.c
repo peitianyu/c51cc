@@ -46,6 +46,7 @@ static Ctype *result_type(int op, Ctype *a, Ctype *b);
 static Ctype *convert_array(Ctype *ctype);
 static Ast *read_stmt(void);
 static Ast *read_postfix_expr_tail(Ast *ast);
+static Ctype *clone_ctype_with_attr(Ctype *ctype, int attr);
 static void expect(char punct);
 static Ctype *read_decl_int(Token *name);
 static int read_decl_ctype_attr(Token tok, int *attr_out);
@@ -157,8 +158,10 @@ static Ast *ast_gvar(Ctype *ctype, char *name, bool filelocal)
 static Ast *ast_string(char *str)
 {
     Ast *r = malloc(sizeof(Ast));
+    int code_attr = (6 << 7) | 1;
+    Ctype *code_char = clone_ctype_with_attr(ctype_char, code_attr);
     r->type = AST_STRING;
-    r->ctype = make_array_type(ctype_char, strlen(str) + 1);
+    r->ctype = make_array_type(code_char, strlen(str) + 1);
     r->sval = str;
     r->slabel = make_label();
     return r;

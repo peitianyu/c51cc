@@ -513,6 +513,88 @@ static void isel_record_dest_type(ISelContext* isel, Instr* ins) {
     }
 }
 
+static Ctype* clone_type_with_attr_for_isel(Ctype* type, int attr) {
+    if (!type) return NULL;
+    Ctype* copy = malloc(sizeof(Ctype));
+    if (!copy) return type;
+    memcpy(copy, type, sizeof(Ctype));
+    copy->attr = attr;
+    return copy;
+}
+
+static Ctype* find_call_arg_type(Func* caller, ValueName value) {
+    if (!caller || value <= 0) return NULL;
+    Instr* def = find_def_instr_in_func(caller, value);
+    if (def && def->type) return def->type;
+    return NULL;
+}
+
+static void refine_param_pointer_spaces(C51GenContext* ctx, Func* func) {
+    if (!ctx || !ctx->unit || !func || !func->params || !func->param_types) return;
+
+    for (int param_index = 0; param_index < func->param_types->len; param_index++) {
+        Ctype* declared = list_get(func->param_types, param_index);
+        if (!declared || declared->type != CTYPE_PTR) continue;
+
+        int inferred_attr = -1;
+        bool found_call = false;
+        bool conflict = false;
+
+        for (Iter fit = list_iter(ctx->unit->funcs); !iter_end(fit) && !conflict;) {
+            Func* caller = iter_next(&fit);
+            if (!caller || !caller->blocks) continue;
+            for (Iter bit = list_iter(caller->blocks); !iter_end(bit) && !conflict;) {
+                Block* block = iter_next(&bit);
+                if (!block || !block->instrs) continue;
+                for (Iter iit = list_iter(block->instrs); !iter_end(iit) && !conflict;) {
+                    Instr* ins = iter_next(&iit);
+                    if (!ins || ins->op != IROP_CALL || !ins->labels || ins->labels->len < 1) continue;
+                    const char* callee = list_get(ins->labels, 0);
+                    bool indirect = ins->labels->len > 1 && strcmp((const char*)list_get(ins->labels, 1), "indirect") == 0;
+                    if (indirect || !callee || strcmp(callee, func->name) != 0) continue;
+
+                    int arg_index = param_index;
+                    if (!ins->args || arg_index >= ins->args->len) continue;
+                    ValueName actual = *(ValueName*)list_get(ins->args, arg_index);
+                    Ctype* actual_type = find_call_arg_type(caller, actual);
+                    if (!actual_type || actual_type->type != CTYPE_PTR) {
+                        conflict = true;
+                        break;
+                    }
+
+                    int actual_attr = actual_type->attr;
+                    if (!found_call) {
+                        inferred_attr = actual_attr;
+                        found_call = true;
+                    } else if (inferred_attr != actual_attr) {
+                        conflict = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!found_call || conflict || inferred_attr < 0 || inferred_attr == declared->attr) {
+            continue;
+        }
+
+        Ctype* refined = clone_type_with_attr_for_isel(declared, inferred_attr);
+        list_set(func->param_types, param_index, refined);
+        if (func->entry && func->entry->instrs) {
+            int seen = 0;
+            for (Iter iit = list_iter(func->entry->instrs); !iter_end(iit);) {
+                Instr* ins = iter_next(&iit);
+                if (!ins || ins->op != IROP_PARAM) continue;
+                if (seen == param_index) {
+                    ins->type = refined;
+                    break;
+                }
+                seen++;
+            }
+        }
+    }
+}
+
 static bool const_used_only_as_add_rhs(ISelContext* isel, Instr* ins) {
     if (!isel || !ins || ins->op != IROP_CONST || ins->dest <= 0 || !isel->ctx || !isel->ctx->current_func) {
         return false;
@@ -736,6 +818,8 @@ void isel_function(C51GenContext* ctx, Func* func) {
             isel_emit(&isel, "MOV", "PSW", bank_imm, NULL);
         }
     }
+
+    refine_param_pointer_spaces(ctx, func);
 
     alloc_param_regs(&isel, func);
 

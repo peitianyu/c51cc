@@ -12,6 +12,7 @@ C51GenContext* c51_ctx_new(void) {
     if (!ctx) return NULL;
     
     ctx->obj = obj_new();
+    ctx->unit = NULL;
     ctx->value_to_reg = make_dict(NULL);
     ctx->value_to_addr = make_dict(NULL);
     ctx->value_type = make_dict(NULL);
@@ -108,6 +109,7 @@ ObjFile *c51_gen(SSAUnit *unit) {
 
     C51GenContext *ctx = c51_ctx_new();
     if (!ctx) return NULL;
+    ctx->unit = unit;
 
     for (Iter git = list_iter(unit->globals); !iter_end(git);) {
         GlobalVar *g = iter_next(&git);
