@@ -88,6 +88,20 @@ static void process_function(C51GenContext *ctx, Func *f)
     isel_function(ctx, f);
 }
 
+static void process_top_level_asm(C51GenContext *ctx, SSAUnit *unit)
+{
+    if (!ctx || !ctx->obj || !unit || !unit->asm_blocks || unit->asm_blocks->len == 0) return;
+
+    int sec_idx = obj_add_section(ctx->obj, "?ASM?", SEC_CODE, 0, 1);
+    Section *sec = obj_get_section(ctx->obj, sec_idx);
+    if (!sec) return;
+
+    for (Iter ait = list_iter(unit->asm_blocks); !iter_end(ait);) {
+        char *asm_text = iter_next(&ait);
+        if (asm_text) c51_emit_asm_text(sec, asm_text);
+    }
+}
+
 /* 代码生成主入口 */
 ObjFile *c51_gen(SSAUnit *unit) {
     if(!unit) return NULL;
@@ -99,6 +113,8 @@ ObjFile *c51_gen(SSAUnit *unit) {
         GlobalVar *g = iter_next(&git);
         if (g) process_global_var(ctx, g);
     }
+
+    process_top_level_asm(ctx, unit);
 
     for (Iter fit = list_iter(unit->funcs); !iter_end(fit);) {
         Func *f = iter_next(&fit);
@@ -118,6 +134,27 @@ ObjFile *c51_gen(SSAUnit *unit) {
 
 #ifdef MINITEST_IMPLEMENTATION
 #include "../minitest.h"
+
+static ObjFile *compile_one(const char *path);
+
+static char *obj_to_asm_text(ObjFile *obj) {
+    if (!obj) return NULL;
+
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *fp = open_memstream(&buf, &len);
+    if (!fp) return NULL;
+    c51_write_asm(fp, obj);
+    fclose(fp);
+    return buf;
+}
+
+static char *compile_one_to_asm(const char *path) {
+    ObjFile *obj = compile_one(path);
+    char *asm_text = obj_to_asm_text(obj);
+    obj_free(obj);
+    return asm_text;
+}
 
 static ObjFile *compile_one(const char *path) {
     freopen(path, "r", stdin);
@@ -164,6 +201,38 @@ TEST(test, c51_link) {
     ObjFile *out = obj_link(o);
     c51_write_asm(stdout, out);
     c51_write_hex(stdout, out);
+}
+
+TEST(test, c51_inline_asm_output) {
+    char *asm_text = compile_one_to_asm("test/test_asm.c");
+    ASSERT_TRUE(asm_text != NULL);
+    ASSERT_TRUE(strstr(asm_text, "_foo:") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "PUSH r7") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "MOV A, #0") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "POP r7") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "        RET") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "        NOP") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "LCALL _foo") != NULL);
+    free(asm_text);
+}
+
+TEST(test, c51_special_output) {
+    char *asm_text = compile_one_to_asm("test/test_more_functions.c");
+    ASSERT_TRUE(asm_text != NULL);
+    ASSERT_TRUE(strstr(asm_text, "BOOT_LABEL:") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "_read_flag:") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "_add1:") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "LCALL _read_flag") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "LCALL _add1") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "ISR_1:") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "PUSH PSW") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "PUSH ACC") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "MOV PSW, #8") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "POP PSW") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "RETI") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "JB EA") != NULL || strstr(asm_text, "JNB EA") != NULL);
+    ASSERT_TRUE(strstr(asm_text, "INC R7") != NULL);
+    free(asm_text);
 }
 
 #endif

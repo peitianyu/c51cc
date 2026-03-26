@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "c51_isel_regalloc.h"
 
@@ -165,27 +166,23 @@ char* isel_new_label(ISelContext* isel, const char* prefix) {
     return strdup(buf);
 }
 
-void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* arg2, const char* ssa) {
-    if (!isel || !isel->sec) return;
+static void append_asm_instr(Section* sec, const char* op, const char* arg1, const char* arg2, const char* ssa,
+                             bool infer_label) {
+    if (!sec || !op) return;
 
     AsmInstr* ins = calloc(1, sizeof(AsmInstr));
-    /* If this emission is a bare label/op with no args or ssa and
-       it doesn't already end with ':' then treat it as a label and
-       append ':' so the output printer will print it at column 0. */
-    bool is_label_candidate = (op && arg1 == NULL && arg2 == NULL && ssa == NULL);
+    bool is_label_candidate = infer_label && (arg1 == NULL && arg2 == NULL && ssa == NULL);
     if (is_label_candidate) {
         size_t oplen = strlen(op);
-        if (oplen == 0) {
-            ins->op = strdup(op);
-        } else if (op[oplen - 1] == ':') {
+        if (oplen == 0 || op[0] == ';' || op[oplen - 1] == ':') {
             ins->op = strdup(op);
         } else {
             char *lbl = malloc(oplen + 2);
             if (lbl) {
                 strcpy(lbl, op);
                 lbl[oplen] = ':';
-                lbl[oplen+1] = '\0';
-                ins->op = lbl; /* will be freed later */
+                lbl[oplen + 1] = '\0';
+                ins->op = lbl;
             } else {
                 ins->op = strdup(op);
             }
@@ -197,7 +194,99 @@ void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* 
     if (arg1) list_push(ins->args, strdup(arg1));
     if (arg2) list_push(ins->args, strdup(arg2));
     if (ssa) ins->ssa = strdup(ssa);
-    list_push(isel->sec->asminstrs, ins);
+    list_push(sec->asminstrs, ins);
+}
+
+static void emit_raw_asm_line(Section* sec, const char* line) {
+    if (!sec || !line) return;
+
+    char* copy = strdup(line);
+    if (!copy) return;
+
+    char* start = copy;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') start++;
+    if (*start == '\0') {
+        free(copy);
+        return;
+    }
+
+    char* end = start + strlen(start);
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) {
+        *--end = '\0';
+    }
+    if (*start == '\0') {
+        free(copy);
+        return;
+    }
+
+    if (*start == ';' || end[-1] == ':') {
+        append_asm_instr(sec, start, NULL, NULL, NULL, true);
+        free(copy);
+        return;
+    }
+
+    char* op = start;
+    char* rest = NULL;
+    while (*start && !isspace((unsigned char)*start)) start++;
+    if (*start) {
+        *start++ = '\0';
+        while (*start == ' ' || *start == '\t') start++;
+        if (*start) rest = start;
+    }
+
+    if (op[0] != '.') {
+        for (char* p = op; *p; p++) *p = (char)toupper((unsigned char)*p);
+    }
+
+    if (!rest) {
+        append_asm_instr(sec, op, NULL, NULL, NULL, false);
+        free(copy);
+        return;
+    }
+
+    char* arg1 = rest;
+    char* arg2 = NULL;
+    char* comma = strchr(rest, ',');
+    if (comma) {
+        *comma = '\0';
+        arg2 = comma + 1;
+        while (*arg2 == ' ' || *arg2 == '\t') arg2++;
+        char* tail2 = arg2 + strlen(arg2);
+        while (tail2 > arg2 && (tail2[-1] == ' ' || tail2[-1] == '\t')) *--tail2 = '\0';
+    }
+    while (*arg1 == ' ' || *arg1 == '\t') arg1++;
+    char* tail1 = arg1 + strlen(arg1);
+    while (tail1 > arg1 && (tail1[-1] == ' ' || tail1[-1] == '\t')) *--tail1 = '\0';
+
+    append_asm_instr(sec, op, arg1, arg2, NULL, false);
+    free(copy);
+}
+
+void c51_emit_asm_text(Section* sec, const char* asm_text) {
+    if (!sec || !asm_text) return;
+
+    const char* cur = asm_text;
+    while (*cur) {
+        const char* next = cur;
+        while (*next && *next != '\n' && *next != '\r') next++;
+
+        size_t len = (size_t)(next - cur);
+        char* line = malloc(len + 1);
+        if (!line) return;
+        memcpy(line, cur, len);
+        line[len] = '\0';
+        emit_raw_asm_line(sec, line);
+        free(line);
+
+        if (*next == '\r' && next[1] == '\n') next += 2;
+        else if (*next == '\r' || *next == '\n') next++;
+        cur = next;
+    }
+}
+
+void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* arg2, const char* ssa) {
+    if (!isel || !isel->sec) return;
+    append_asm_instr(isel->sec, op, arg1, arg2, ssa, true);
 }
 
 void isel_emit_label(ISelContext* isel, const char* label) {
@@ -604,8 +693,21 @@ void isel_function(C51GenContext* ctx, Func* func) {
     }
 
     char label[256];
-    snprintf(label, sizeof(label), "%s:", func->name);
+    snprintf(label, sizeof(label), "_%s:", func->name);
     isel_emit(&isel, label, NULL, NULL, NULL);
+
+    if (func->is_interrupt) {
+        isel_emit(&isel, "PUSH", "PSW", NULL, NULL);
+        isel_emit(&isel, "PUSH", "ACC", NULL, NULL);
+        isel_emit(&isel, "PUSH", "B", NULL, NULL);
+        isel_emit(&isel, "PUSH", "DPL", NULL, NULL);
+        isel_emit(&isel, "PUSH", "DPH", NULL, NULL);
+        if (func->bank_id >= 0) {
+            char bank_imm[16];
+            snprintf(bank_imm, sizeof(bank_imm), "#%d", (func->bank_id & 0x3) << 3);
+            isel_emit(&isel, "MOV", "PSW", bank_imm, NULL);
+        }
+    }
 
     alloc_param_regs(&isel, func);
 

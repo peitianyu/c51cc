@@ -531,63 +531,7 @@ void emit_inline_asm_instr(ISelContext* isel, Instr* ins) {
 
     char* asm_text = list_get(ins->labels, 0);
     if (!asm_text) return;
-
-    char *s = strdup(asm_text);
-    char *p = s;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-    if (*p == '\0') {
-        isel_emit(isel, "; ASM", NULL, NULL, asm_text);
-        free(s);
-        return;
-    }
-
-    size_t len = strlen(p);
-    char *end = p + len - 1;
-    while (end > p && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) *end-- = '\0';
-    if (*end == ':') {
-        char *lbl = strdup(p);
-        isel_emit(isel, lbl, NULL, NULL, NULL);
-        free(lbl);
-        free(s);
-        return;
-    }
-
-    char *op = p;
-    char *rest = NULL;
-    while (*p && *p != ' ' && *p != '\t') p++;
-    if (*p) {
-        *p++ = '\0';
-        rest = p;
-        while (*rest == ' ' || *rest == '\t') rest++;
-        if (*rest == '\0') rest = NULL;
-    }
-
-    for (char *q = op; *q; q++) *q = toupper((unsigned char)*q);
-
-    if (!rest) {
-        isel_emit(isel, op, NULL, NULL, NULL);
-    } else {
-        char *arg1 = NULL, *arg2 = NULL;
-        char *comma = strchr(rest, ',');
-        if (comma) {
-            *comma = '\0';
-            arg1 = rest;
-            arg2 = comma + 1;
-            while (*arg1 == ' ' || *arg1 == '\t') arg1++;
-            while (*arg2 == ' ' || *arg2 == '\t') arg2++;
-            char *t1 = arg1 + strlen(arg1) - 1;
-            while (t1 > arg1 && (*t1 == ' ' || *t1 == '\t')) *t1-- = '\0';
-            char *t2 = arg2 + strlen(arg2) - 1;
-            while (t2 > arg2 && (*t2 == ' ' || *t2 == '\t')) *t2-- = '\0';
-        } else {
-            arg1 = rest;
-            char *t1 = arg1 + strlen(arg1) - 1;
-            while (t1 > arg1 && (*t1 == ' ' || *t1 == '\t')) *t1-- = '\0';
-        }
-        isel_emit(isel, op, arg1, arg2, NULL);
-    }
-
-    free(s);
+    c51_emit_asm_text(isel->sec, asm_text);
 }
 
 static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* callee_name, int param_pos, int class_index, ValueName v, RegMove* moves, int* move_count) {
@@ -958,6 +902,16 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
 }
 
 void emit_ret(ISelContext* isel, Instr* ins) {
+    if (isel && isel->ctx && isel->ctx->current_func && isel->ctx->current_func->is_interrupt) {
+        isel_emit(isel, "POP", "DPH", NULL, NULL);
+        isel_emit(isel, "POP", "DPL", NULL, NULL);
+        isel_emit(isel, "POP", "B", NULL, NULL);
+        isel_emit(isel, "POP", "ACC", NULL, NULL);
+        isel_emit(isel, "POP", "PSW", NULL, NULL);
+        isel_emit(isel, "RETI", NULL, NULL, instr_to_ssa_str(ins));
+        return;
+    }
+
     int64_t imm_val = 0;
     if (is_imm_operand(ins, &imm_val)) {
         int ret_size = ins->type ? c51_abi_type_size(ins->type) : 1;

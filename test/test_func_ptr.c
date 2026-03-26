@@ -76,25 +76,25 @@ int test_typedef_func_ptr() {
 //=============================
 // 4. 函数指针数组 (暂不支持)
 //=============================
-// void test_func_ptr_array() {
-//     int (*fp_arr[3])(int, int);
-//     fp_arr[0] = add;
-// }
+void test_func_ptr_array() {
+    int (*fp_arr[3])(int, int);
+    fp_arr[0] = add;
+}
 
 //=============================
 // 5. 结构体中的函数指针 (暂不支持)
 //=============================
-// struct Ops {
-//     int (*add)(int, int);
-//     int (*mul)(int, int);
-// };
-// 
-// int test_struct_func_ptr() {
-//     struct Ops ops;
-//     ops.add = add;  // 这里会报错: Invalid var init
-//     ops.mul = mul;
-//     return ops.add(3, 4) + ops.mul(2, 5);
-// }
+struct Ops {
+    int (*add)(int, int);
+    int (*mul)(int, int);
+};
+
+int test_struct_func_ptr() {
+    struct Ops ops;
+    ops.add = add;  // 这里会报错: Invalid var init
+    ops.mul = mul;
+    return ops.add(3, 4) + ops.mul(2, 5);
+}
 
 //=============================
 // 综合测试
