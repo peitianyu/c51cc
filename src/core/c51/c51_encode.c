@@ -13,6 +13,8 @@ typedef struct {
 	int sec_idx;
 	int start_offset;
 	Dict *labels;
+	int current_pc;
+	int current_scope;
 	int failed;
 } EncodeState;
 
@@ -24,9 +26,85 @@ typedef struct {
 } ExprValue;
 
 typedef struct {
+	const AsmInstr *ins;
+	const char *op;
+	const char *arg1;
+	const char *arg2;
+	int pc;
+	int size;
+	int next_pc;
+} InstrView;
+
+typedef struct {
+	int value;
+	int scope;
+} LabelLocation;
+
+typedef struct {
 	const char *name;
 	int value;
 } BuiltinDirect;
+
+typedef struct {
+	const char *op;
+	const char *arg1;
+	const char *arg2;
+	unsigned char opcode;
+	int size;
+} FixedEncoding;
+
+typedef struct {
+	const char *op;
+	unsigned char opcode;
+	int size;
+} OperandEncoding;
+
+typedef struct {
+	const char *op;
+	unsigned char acc_opcode;
+	unsigned char carry_opcode;
+	unsigned char bit_opcode;
+} BitUnaryEncoding;
+
+typedef struct {
+	const char *op;
+	unsigned char acc_opcode;
+	unsigned char direct_opcode;
+	unsigned char reg_base;
+	unsigned char dptr_opcode;
+	int supports_dptr;
+} IncDecEncoding;
+
+typedef enum {
+	OPERAND_KIND_NONE = 0,
+	OPERAND_KIND_IMMEDIATE,
+	OPERAND_KIND_ACC,
+	OPERAND_KIND_CARRY,
+	OPERAND_KIND_DPTR,
+	OPERAND_KIND_REGISTER,
+	OPERAND_KIND_INDIRECT_REG,
+	OPERAND_KIND_OTHER
+} OperandKind;
+
+typedef struct {
+	const char *op;
+	unsigned char imm_opcode;
+	unsigned char direct_opcode;
+	unsigned char reg_base;
+	unsigned char indir_r0_opcode;
+	unsigned char indir_r1_opcode;
+	unsigned char carry_bit_opcode;
+	unsigned char direct_acc_opcode;
+	int supports_carry_bit;
+	int supports_direct_acc;
+} AluEncoding;
+
+typedef struct {
+	unsigned char reg_base;
+	unsigned char direct_opcode;
+} DjnzEncoding;
+
+#define OPERAND_ANY ((const char *)1)
 
 static const BuiltinDirect builtin_directs[] = {
 	{"P0", 0x80}, {"SP", 0x81}, {"DPL", 0x82}, {"DPH", 0x83},
@@ -36,6 +114,78 @@ static const BuiltinDirect builtin_directs[] = {
 	{"P3", 0xB0}, {"IP", 0xB8}, {"PSW", 0xD0}, {"ACC", 0xE0},
 	{"B", 0xF0}, {NULL, 0}
 };
+
+static const FixedEncoding fixed_simple_encodings[] = {
+	{"NOP", NULL, NULL, 0x00, 1},
+	{"RET", NULL, NULL, 0x22, 1},
+	{"RETI", NULL, NULL, 0x32, 1},
+	{"MUL", "AB", NULL, 0xA4, 1},
+	{"DIV", "AB", NULL, 0x84, 1},
+	{"RLC", "A", NULL, 0x33, 1},
+	{"RRC", "A", NULL, 0x13, 1},
+	{"JMP", "@A+DPTR", NULL, 0x73, 1},
+	{NULL, NULL, NULL, 0, 0}
+};
+
+static const FixedEncoding fixed_rel_jump_encodings[] = {
+	{"SJMP", OPERAND_ANY, NULL, 0x80, 2},
+	{"JNZ", OPERAND_ANY, NULL, 0x70, 2},
+	{"JZ", OPERAND_ANY, NULL, 0x60, 2},
+	{"JC", OPERAND_ANY, NULL, 0x40, 2},
+	{"JNC", OPERAND_ANY, NULL, 0x50, 2},
+	{NULL, NULL, NULL, 0, 0}
+};
+
+static const FixedEncoding fixed_abs16_encodings[] = {
+	{"LCALL", OPERAND_ANY, NULL, 0x12, 3},
+	{"LJMP", OPERAND_ANY, NULL, 0x02, 3},
+	{NULL, NULL, NULL, 0, 0}
+};
+
+static const FixedEncoding fixed_bit_branch_encodings[] = {
+	{"JB", OPERAND_ANY, OPERAND_ANY, 0x20, 3},
+	{"JNB", OPERAND_ANY, OPERAND_ANY, 0x30, 3},
+	{"JBC", OPERAND_ANY, OPERAND_ANY, 0x10, 3},
+	{NULL, NULL, NULL, 0, 0}
+};
+
+static const FixedEncoding fixed_mem_acc_encodings[] = {
+	{"MOVX", "@DPTR", "A", 0xF0, 1},
+	{"MOVX", "A", "@DPTR", 0xE0, 1},
+	{"MOVC", "A", "@A+DPTR", 0x93, 1},
+	{NULL, NULL, NULL, 0, 0}
+};
+
+static const OperandEncoding direct_operand_encodings[] = {
+	{"PUSH", 0xC0, 2},
+	{"POP", 0xD0, 2},
+	{NULL, 0, 0}
+};
+
+static const BitUnaryEncoding bit_unary_encodings[] = {
+	{"SETB", 0x00, 0xD3, 0xD2},
+	{"CLR", 0xE4, 0xC3, 0xC2},
+	{"CPL", 0xF4, 0xB3, 0xB2},
+	{NULL, 0, 0, 0}
+};
+
+static const IncDecEncoding inc_dec_encodings[] = {
+	{"INC", 0x04, 0x05, 0x08, 0xA3, 1},
+	{"DEC", 0x14, 0x15, 0x18, 0x00, 0},
+	{NULL, 0, 0, 0, 0, 0}
+};
+
+static const AluEncoding alu_encodings[] = {
+	{"ADD", 0x24, 0x25, 0x28, 0x26, 0x27, 0x00, 0x00, 0, 0},
+	{"ADDC", 0x34, 0x35, 0x38, 0x36, 0x37, 0x00, 0x00, 0, 0},
+	{"SUBB", 0x94, 0x95, 0x98, 0x96, 0x97, 0x00, 0x00, 0, 0},
+	{"ANL", 0x54, 0x55, 0x58, 0x56, 0x57, 0x82, 0x52, 1, 1},
+	{"ORL", 0x44, 0x45, 0x48, 0x46, 0x47, 0x72, 0x42, 1, 1},
+	{"XRL", 0x64, 0x65, 0x68, 0x66, 0x67, 0x00, 0x62, 0, 1},
+	{NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+};
+
+static const DjnzEncoding djnz_encoding = {0xD8, 0xD5};
 
 static char *dup_trim(const char *text)
 {
@@ -68,6 +218,11 @@ static int is_comment_instr(const AsmInstr *ins)
 	return ins && ins->op && ins->op[0] == ';';
 }
 
+static int is_function_local_label_name(const char *name)
+{
+	return name && name[0] == 'L';
+}
+
 static int reg_index(const char *name)
 {
 	if (!name || name[0] != 'R' || name[1] < '0' || name[1] > '7' || name[2] != '\0') {
@@ -94,6 +249,20 @@ static int is_carry(const char *operand)
 static int is_dptr(const char *operand)
 {
 	return operand && strcmp(operand, "DPTR") == 0;
+}
+
+static int is_indirect_reg(const char *operand);
+
+static OperandKind operand_kind(const char *operand)
+{
+	if (!operand) return OPERAND_KIND_NONE;
+	if (is_immediate(operand)) return OPERAND_KIND_IMMEDIATE;
+	if (is_acc(operand)) return OPERAND_KIND_ACC;
+	if (is_carry(operand)) return OPERAND_KIND_CARRY;
+	if (is_dptr(operand)) return OPERAND_KIND_DPTR;
+	if (reg_index(operand) >= 0) return OPERAND_KIND_REGISTER;
+	if (is_indirect_reg(operand)) return OPERAND_KIND_INDIRECT_REG;
+	return OPERAND_KIND_OTHER;
 }
 
 static int is_indirect_reg(const char *operand)
@@ -210,16 +379,44 @@ static int strip_outer_parens_inplace(char *text)
 
 static int lookup_local_label(EncodeState *state, const char *name, int *value)
 {
-	int *found;
+	List *found;
+	Iter it;
+	int best_value = 0;
+	int best_distance = 0x7fffffff;
+	int require_scope;
 	char *key;
 	if (!state || !state->labels || !name) return 0;
 	key = dup_trim(name);
 	if (!key) return 0;
 	found = dict_get(state->labels, key);
+	require_scope = is_function_local_label_name(key);
 	free(key);
 	if (!found) return 0;
-	if (value) *value = *found;
+	for (it = list_iter(found); !iter_end(it);) {
+		LabelLocation *candidate = iter_next(&it);
+		int distance;
+		if (!candidate) continue;
+		if (require_scope && candidate->scope != state->current_scope) continue;
+		distance = candidate->value - state->current_pc;
+		if (distance < 0) distance = -distance;
+		if (distance < best_distance) {
+			best_distance = distance;
+			best_value = candidate->value;
+		}
+	}
+	if (best_distance == 0x7fffffff) return 0;
+	if (value) *value = best_value;
 	return 1;
+}
+
+static void free_label_positions(void *value)
+{
+	List *positions = value;
+	if (!positions) return;
+	while (!list_empty(positions)) {
+		free(list_shift(positions));
+	}
+	free(positions);
 }
 
 static int eval_expr_internal(EncodeState *state, const char *text, ExprValue *out)
@@ -388,94 +585,251 @@ static int split_cjne_arg2(const char *arg2, char **cmp_operand, char **label)
 	return *cmp_operand && *label;
 }
 
-static int instruction_size(const AsmInstr *ins)
+static InstrView make_instr_view(const AsmInstr *ins, int pc)
 {
-	const char *op;
-	const char *arg1;
-	const char *arg2;
+	InstrView view;
+	memset(&view, 0, sizeof(view));
+	view.ins = ins;
+	view.op = ins ? ins->op : NULL;
+	view.arg1 = (ins && ins->args && ins->args->len > 0) ? list_get(ins->args, 0) : NULL;
+	view.arg2 = (ins && ins->args && ins->args->len > 1) ? list_get(ins->args, 1) : NULL;
+	view.pc = pc;
+	return view;
+}
+
+static int operand_matches(const char *actual, const char *expected)
+{
+	if (expected == OPERAND_ANY) return actual != NULL;
+	if (!expected) return !actual;
+	return actual && strcmp(actual, expected) == 0;
+}
+
+static const FixedEncoding *find_fixed_encoding(const FixedEncoding *table, const InstrView *view)
+{
+	const FixedEncoding *entry;
+	if (!table || !view || !view->op) return NULL;
+	for (entry = table; entry->op; entry++) {
+		if (strcmp(view->op, entry->op) != 0) continue;
+		if (!operand_matches(view->arg1, entry->arg1)) continue;
+		if (!operand_matches(view->arg2, entry->arg2)) continue;
+		return entry;
+	}
+	return NULL;
+}
+
+static const OperandEncoding *find_operand_encoding(const OperandEncoding *table, const char *op)
+{
+	const OperandEncoding *entry;
+	if (!table || !op) return NULL;
+	for (entry = table; entry->op; entry++) {
+		if (strcmp(op, entry->op) == 0) return entry;
+	}
+	return NULL;
+}
+
+static const BitUnaryEncoding *find_bit_unary_encoding(const char *op)
+{
+	const BitUnaryEncoding *entry;
+	if (!op) return NULL;
+	for (entry = bit_unary_encodings; entry->op; entry++) {
+		if (strcmp(op, entry->op) == 0) return entry;
+	}
+	return NULL;
+}
+
+static const IncDecEncoding *find_inc_dec_encoding(const char *op)
+{
+	const IncDecEncoding *entry;
+	if (!op) return NULL;
+	for (entry = inc_dec_encodings; entry->op; entry++) {
+		if (strcmp(op, entry->op) == 0) return entry;
+	}
+	return NULL;
+}
+
+static const AluEncoding *find_alu_encoding(const char *op)
+{
+	const AluEncoding *entry;
+	if (!op) return NULL;
+	for (entry = alu_encodings; entry->op; entry++) {
+		if (strcmp(op, entry->op) == 0) return entry;
+	}
+	return NULL;
+}
+
+static int size_simple_op(const InstrView *view)
+{
+	const FixedEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_simple_encodings, view);
+	if (entry) return entry->size;
+	return 0;
+}
+
+static int size_cjne_view(const InstrView *view)
+{
+	char *cmp_operand = NULL;
+	char *label = NULL;
+	int size = -1;
+	if (!view || !view->op || strcmp(view->op, "CJNE") != 0) return 0;
+	if (view->arg1 && is_acc(view->arg1) && split_cjne_arg2(view->arg2, &cmp_operand, &label)) {
+		if (is_immediate(cmp_operand)) size = 3;
+		else if (reg_index(cmp_operand) >= 0 || is_indirect_reg(cmp_operand)) size = 5;
+		else size = 3;
+	}
+	free(cmp_operand);
+	free(label);
+	return size;
+}
+
+static int size_long_jump_view(const InstrView *view)
+{
+	const FixedEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_abs16_encodings, view);
+	if (entry) return entry->size;
+	return 0;
+}
+
+static int size_rel_jump_view(const InstrView *view)
+{
+	const FixedEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_rel_jump_encodings, view);
+	if (entry) return entry->size;
+	return 0;
+}
+
+static int size_bit_branch_view(const InstrView *view)
+{
+	const FixedEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_bit_branch_encodings, view);
+	if (entry) return entry->size;
+	return 0;
+}
+
+static int size_stack_view(const InstrView *view)
+{
+	const OperandEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_operand_encoding(direct_operand_encodings, view->op);
+	if (entry && view->arg1 && !view->arg2) return entry->size;
+	return 0;
+}
+
+static int size_bit_op_view(const InstrView *view)
+{
+	const BitUnaryEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_bit_unary_encoding(view->op);
+	if (!entry || !view->arg1 || view->arg2) return 0;
+	if (is_acc(view->arg1) || is_carry(view->arg1)) return 1;
+	return 2;
+	return 0;
+}
+
+static int size_inc_dec_view(const InstrView *view)
+{
+	const IncDecEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_inc_dec_encoding(view->op);
+	if (!entry || !view->arg1 || view->arg2) return 0;
+	if (is_acc(view->arg1) || reg_index(view->arg1) >= 0) return 1;
+	if (entry->supports_dptr && is_dptr(view->arg1)) return 1;
+	return 2;
+	return 0;
+}
+
+static int size_movx_movc_view(const InstrView *view)
+{
+	const FixedEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_mem_acc_encodings, view);
+	if (entry) return entry->size;
+	return 0;
+}
+
+static int size_djnz_view(const InstrView *view)
+{
+	if (!view || !view->op || strcmp(view->op, "DJNZ") != 0) return 0;
+	if (operand_kind(view->arg1) == OPERAND_KIND_REGISTER) return 2;
+	return 3;
+}
+
+static int size_mov_view(const InstrView *view)
+{
 	int reg;
-
-	if (!ins || is_comment_instr(ins) || is_label_instr(ins)) return 0;
-	op = ins->op;
-	arg1 = (ins->args && ins->args->len > 0) ? list_get(ins->args, 0) : NULL;
-	arg2 = (ins->args && ins->args->len > 1) ? list_get(ins->args, 1) : NULL;
-
-	if (!strcmp(op, "RET") || !strcmp(op, "RETI") || !strcmp(op, "NOP") || !strcmp(op, "RLC") || !strcmp(op, "RRC") ||
-		!strcmp(op, "MUL") || !strcmp(op, "DIV")) return 1;
-	if (!strcmp(op, "JMP") && arg1 && strcmp(arg1, "@A+DPTR") == 0) return 1;
-	if (!strcmp(op, "CJNE")) {
-		char *cmp_operand = NULL;
-		char *label = NULL;
-		int sz = -1;
-		if (arg1 && is_acc(arg1) && split_cjne_arg2(arg2, &cmp_operand, &label)) {
-			if (is_immediate(cmp_operand)) sz = 3;
-			else if (reg_index(cmp_operand) >= 0 || is_indirect_reg(cmp_operand)) sz = 5;
-			else sz = 3;
-		}
-		free(cmp_operand);
-		free(label);
-		return sz;
-	}
-	if (!strcmp(op, "LCALL") || !strcmp(op, "LJMP")) return 3;
-	if (!strcmp(op, "SJMP") || !strcmp(op, "JNZ") || !strcmp(op, "JZ") ||
-		!strcmp(op, "JC") || !strcmp(op, "JNC")) return 2;
-	if (!strcmp(op, "JB") || !strcmp(op, "JNB") || !strcmp(op, "JBC")) return 3;
-	if (!strcmp(op, "PUSH") || !strcmp(op, "POP")) return 2;
-	if (!strcmp(op, "SETB") || !strcmp(op, "CLR") || !strcmp(op, "CPL")) {
-		if (arg1 && (is_acc(arg1) || is_carry(arg1))) return 1;
+	if (!view || !view->op || strcmp(view->op, "MOV") != 0) return 0;
+	if (view->arg1 && view->arg2 && is_dptr(view->arg1) && is_immediate(view->arg2)) return 3;
+	if (view->arg1 && view->arg2 && (is_carry(view->arg1) || is_carry(view->arg2))) return 2;
+	if (view->arg1 && view->arg2 && is_acc(view->arg1)) {
+		if (is_immediate(view->arg2)) return 2;
+		if (reg_index(view->arg2) >= 0 || is_indirect_reg(view->arg2)) return 1;
 		return 2;
 	}
-	if (!strcmp(op, "INC") || !strcmp(op, "DEC")) {
-		if (arg1 && (is_acc(arg1) || is_dptr(arg1) || reg_index(arg1) >= 0)) return 1;
+	reg = reg_index(view->arg1);
+	if (view->arg1 && reg >= 0) {
+		if (reg_index(view->arg2) >= 0) return 2;
+		if (is_acc(view->arg2) || is_indirect_reg(view->arg2)) return 1;
+		return is_immediate(view->arg2) ? 2 : 2;
+	}
+	if (view->arg1 && view->arg2 && is_indirect_reg(view->arg1)) {
+		if (is_immediate(view->arg2)) return 2;
+		if (reg_index(view->arg2) >= 0) return 2;
+		if (is_acc(view->arg2)) return 1;
 		return 2;
 	}
-	if (!strcmp(op, "MOVX")) return 1;
-	if (!strcmp(op, "MOVC")) return 1;
-
-	if (!strcmp(op, "MOV")) {
-		if (arg1 && arg2 && is_dptr(arg1) && is_immediate(arg2)) return 3;
-		if (arg1 && arg2 && (is_carry(arg1) || is_carry(arg2))) return 2;
-		if (arg1 && arg2 && is_acc(arg1)) {
-			if (is_immediate(arg2)) return 2;
-			if (reg_index(arg2) >= 0 || is_indirect_reg(arg2)) return 1;
-			return 2;
-		}
-		reg = reg_index(arg1);
-		if (arg1 && reg >= 0) {
-			if (reg_index(arg2) >= 0) return 2;
-			if (is_acc(arg2) || is_indirect_reg(arg2)) return 1;
-			return is_immediate(arg2) ? 2 : 2;
-		}
-		if (arg1 && arg2 && is_indirect_reg(arg1)) {
-			if (is_immediate(arg2)) return 2;
-			if (reg_index(arg2) >= 0) return 2;
-			if (is_acc(arg2)) return 1;
-			return 2;
-		}
-		if (arg1 && arg2) {
-			if (is_indirect_reg(arg2)) return 2;
-			if (is_acc(arg2) || reg_index(arg2) >= 0 || is_indirect_reg(arg2)) return 2;
-			if (is_immediate(arg2)) return 3;
-			return 3;
-		}
-	}
-
-	if (!strcmp(op, "ADD") || !strcmp(op, "ADDC") || !strcmp(op, "SUBB") ||
-		!strcmp(op, "ANL") || !strcmp(op, "ORL") || !strcmp(op, "XRL")) {
-		if (arg1 && is_acc(arg1)) {
-			if (is_immediate(arg2)) return 2;
-			if (reg_index(arg2) >= 0 || is_indirect_reg(arg2)) return 1;
-			return 2;
-		}
-		if (arg1 && is_carry(arg1) && arg2) return 2;
-		if (arg1 && arg2 && is_acc(arg2)) return 2;
-	}
-
-	if (!strcmp(op, "DJNZ")) {
-		if (arg1 && reg_index(arg1) >= 0) return 2;
+	if (view->arg1 && view->arg2) {
+		if (is_indirect_reg(view->arg2)) return 2;
+		if (is_acc(view->arg2) || reg_index(view->arg2) >= 0 || is_indirect_reg(view->arg2)) return 2;
+		if (is_immediate(view->arg2)) return 3;
 		return 3;
 	}
+	return -1;
+}
 
+static int size_alu_view(const InstrView *view)
+{
+	const AluEncoding *entry;
+	entry = find_alu_encoding(view ? view->op : NULL);
+	if (!entry || !view || !view->arg1 || !view->arg2) return 0;
+	if (operand_kind(view->arg1) == OPERAND_KIND_ACC) {
+		switch (operand_kind(view->arg2)) {
+		case OPERAND_KIND_IMMEDIATE:
+		case OPERAND_KIND_OTHER:
+			return 2;
+		case OPERAND_KIND_REGISTER:
+		case OPERAND_KIND_INDIRECT_REG:
+			return 1;
+		default:
+			return 0;
+		}
+	}
+	if (entry->supports_carry_bit && operand_kind(view->arg1) == OPERAND_KIND_CARRY) return 2;
+	if (entry->supports_direct_acc && operand_kind(view->arg2) == OPERAND_KIND_ACC) return 2;
+	return 0;
+}
+
+static int instruction_size(const AsmInstr *ins)
+{
+	InstrView view;
+	int size;
+
+	if (!ins || is_comment_instr(ins) || is_label_instr(ins)) return 0;
+	view = make_instr_view(ins, 0);
+	if ((size = size_simple_op(&view)) > 0) return size;
+	if ((size = size_cjne_view(&view)) != 0) return size;
+	if ((size = size_long_jump_view(&view)) > 0) return size;
+	if ((size = size_rel_jump_view(&view)) > 0) return size;
+	if ((size = size_bit_branch_view(&view)) > 0) return size;
+	if ((size = size_stack_view(&view)) > 0) return size;
+	if ((size = size_bit_op_view(&view)) > 0) return size;
+	if ((size = size_inc_dec_view(&view)) > 0) return size;
+	if ((size = size_movx_movc_view(&view)) > 0) return size;
+	if ((size = size_djnz_view(&view)) > 0) return size;
+	if ((size = size_mov_view(&view)) != 0) return size;
+	if ((size = size_alu_view(&view)) > 0) return size;
 	return -1;
 }
 
@@ -530,15 +884,402 @@ static int emit_abs16_or_reloc(EncodeState *state, unsigned char *out, int pos,
 	return 1;
 }
 
-static int encode_instruction(EncodeState *state, const AsmInstr *ins, unsigned char *out, int pc)
+static int encode_simple_op(EncodeState *state, const InstrView *view, unsigned char *out)
 {
-	const char *op;
-	const char *arg1;
-	const char *arg2;
+	const FixedEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_simple_encodings, view);
+	if (entry) {
+		out[view->pc - state->start_offset] = entry->opcode;
+		return view->size;
+	}
+	return 0;
+}
+
+static int encode_long_jump(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	const FixedEncoding *entry;
+	ExprValue expr;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_abs16_encodings, view);
+	if (!entry) return 0;
+	out[view->pc - state->start_offset] = entry->opcode;
+	if (!eval_expr(state, view->arg1, &expr) || !emit_abs16_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+	return view->size;
+}
+
+static int encode_cjne(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	ExprValue expr;
+	char *cmp_operand = NULL;
+	char *label = NULL;
+	int reg;
+	int target;
+	if (!view || !view->op || strcmp(view->op, "CJNE") != 0) return 0;
+	if (!(view->arg1 && is_acc(view->arg1) && split_cjne_arg2(view->arg2, &cmp_operand, &label))) {
+		report_encode_error(state, view->ins, "unsupported CJNE form");
+		free(cmp_operand);
+		free(label);
+		return -1;
+	}
+	if (!eval_expr(state, label, &expr) || expr.is_symbolic) {
+		report_encode_error(state, view->ins, "CJNE requires local label target");
+		free(cmp_operand);
+		free(label);
+		return -1;
+	}
+	target = expr.value;
+	if (is_immediate(cmp_operand)) {
+		out[view->pc - state->start_offset] = 0xB4;
+		if (!eval_immediate(state, cmp_operand, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) {
+			free(cmp_operand);
+			free(label);
+			return -1;
+		}
+		out[view->pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
+		free(cmp_operand);
+		free(label);
+		return view->size;
+	}
+	reg = reg_index(cmp_operand);
+	if (reg >= 0) {
+		out[view->pc - state->start_offset] = 0x88 + reg;
+		out[view->pc - state->start_offset + 1] = 0xF0;
+		out[view->pc - state->start_offset + 2] = 0xB5;
+		out[view->pc - state->start_offset + 3] = 0xF0;
+		out[view->pc - state->start_offset + 4] = (unsigned char)checked_rel8(state, view->ins, view->pc + view->size, target);
+		free(cmp_operand);
+		free(label);
+		return view->size;
+	}
+	if (is_indirect_reg(cmp_operand)) {
+		out[view->pc - state->start_offset] = (strcmp(cmp_operand, "@R0") == 0) ? 0x86 : 0x87;
+		out[view->pc - state->start_offset + 1] = 0xF0;
+		out[view->pc - state->start_offset + 2] = 0xB5;
+		out[view->pc - state->start_offset + 3] = 0xF0;
+		out[view->pc - state->start_offset + 4] = (unsigned char)checked_rel8(state, view->ins, view->pc + view->size, target);
+		free(cmp_operand);
+		free(label);
+		return view->size;
+	}
+	out[view->pc - state->start_offset] = 0xB5;
+	if (!eval_direct(state, cmp_operand, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) {
+		free(cmp_operand);
+		free(label);
+		return -1;
+	}
+	out[view->pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
+	free(cmp_operand);
+	free(label);
+	return view->size;
+}
+
+static int encode_rel_jump(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	const FixedEncoding *entry;
+	ExprValue expr;
+	int target;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_rel_jump_encodings, view);
+	if (!entry) return 0;
+	out[view->pc - state->start_offset] = entry->opcode;
+	if (!eval_expr(state, view->arg1, &expr) || expr.is_symbolic) {
+		report_encode_error(state, view->ins, "relative jump requires local label");
+		return -1;
+	}
+	target = expr.value;
+	out[view->pc - state->start_offset + 1] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
+	return view->size;
+}
+
+static int encode_bit_branch(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	const FixedEncoding *entry;
+	ExprValue expr;
+	int target;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_bit_branch_encodings, view);
+	if (!entry) return 0;
+	out[view->pc - state->start_offset] = entry->opcode;
+	if (!eval_bit(state, view->arg1, &expr) || expr.is_symbolic || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+	if (!eval_expr(state, view->arg2, &expr) || expr.is_symbolic) {
+		report_encode_error(state, view->ins, "bit branch requires local label");
+		return -1;
+	}
+	target = expr.value;
+	out[view->pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
+	return view->size;
+}
+
+static int encode_stack_op(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	const OperandEncoding *entry;
+	ExprValue expr;
+	if (!view || !view->op) return 0;
+	entry = find_operand_encoding(direct_operand_encodings, view->op);
+	if (!entry || !view->arg1 || view->arg2) return 0;
+	out[view->pc - state->start_offset] = entry->opcode;
+	if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+	return view->size;
+}
+
+static int encode_bit_op(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	const BitUnaryEncoding *entry;
+	ExprValue expr;
+	if (!view || !view->op) return 0;
+	entry = find_bit_unary_encoding(view->op);
+	if (!entry || !view->arg1 || view->arg2) return 0;
+	if (view->arg1 && is_acc(view->arg1)) {
+		out[view->pc - state->start_offset] = entry->acc_opcode;
+		return view->size;
+	}
+	if (view->arg1 && is_carry(view->arg1)) {
+		out[view->pc - state->start_offset] = entry->carry_opcode;
+		return view->size;
+	}
+	out[view->pc - state->start_offset] = entry->bit_opcode;
+	if (!eval_bit(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+	return view->size;
+}
+
+static int encode_inc_dec(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	const IncDecEncoding *entry;
 	ExprValue expr;
 	int reg;
+	if (!view || !view->op) return 0;
+	entry = find_inc_dec_encoding(view->op);
+	if (!entry || !view->arg1 || view->arg2) return 0;
+	if (view->arg1 && is_acc(view->arg1)) {
+		out[view->pc - state->start_offset] = entry->acc_opcode;
+		return view->size;
+	}
+	if (entry->supports_dptr && view->arg1 && is_dptr(view->arg1)) {
+		out[view->pc - state->start_offset] = entry->dptr_opcode;
+		return view->size;
+	}
+	reg = reg_index(view->arg1);
+	if (reg >= 0) {
+		out[view->pc - state->start_offset] = entry->reg_base + reg;
+		return view->size;
+	}
+	out[view->pc - state->start_offset] = entry->direct_opcode;
+	if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+	return view->size;
+}
+
+static int encode_movx_movc(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	const FixedEncoding *entry;
+	if (!view || !view->op) return 0;
+	entry = find_fixed_encoding(fixed_mem_acc_encodings, view);
+	if (entry) {
+		out[view->pc - state->start_offset] = entry->opcode;
+		return view->size;
+	}
+	if (!strcmp(view->op, "MOVX")) {
+		report_encode_error(state, view->ins, "unsupported MOVX form");
+		return -1;
+	}
+	if (!strcmp(view->op, "MOVC")) {
+		report_encode_error(state, view->ins, "unsupported MOVC form");
+		return -1;
+	}
+	return 0;
+}
+
+static int encode_djnz(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	ExprValue expr;
+	int reg;
+	int target;
+	if (!view || !view->op || strcmp(view->op, "DJNZ") != 0) return 0;
+	reg = reg_index(view->arg1);
+	if (reg >= 0) {
+		out[view->pc - state->start_offset] = djnz_encoding.reg_base + reg;
+		if (!eval_expr(state, view->arg2, &expr) || expr.is_symbolic) {
+			report_encode_error(state, view->ins, "DJNZ requires local label");
+			return -1;
+		}
+		target = expr.value;
+		out[view->pc - state->start_offset + 1] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
+		return view->size;
+	}
+	out[view->pc - state->start_offset] = djnz_encoding.direct_opcode;
+	if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+	if (!eval_expr(state, view->arg2, &expr) || expr.is_symbolic) {
+		report_encode_error(state, view->ins, "DJNZ requires local label");
+		return -1;
+	}
+	target = expr.value;
+	out[view->pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
+	return view->size;
+}
+
+static int encode_mov(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	ExprValue expr;
+	int reg;
+	if (!view || !view->op || strcmp(view->op, "MOV") != 0) return 0;
+	reg = reg_index(view->arg1);
+	if (view->arg1 && view->arg2 && is_dptr(view->arg1) && is_immediate(view->arg2)) {
+		out[view->pc - state->start_offset] = 0x90;
+		if (!eval_immediate(state, view->arg2, &expr) || !emit_abs16_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	if (view->arg1 && view->arg2 && is_carry(view->arg1)) {
+		out[view->pc - state->start_offset] = 0xA2;
+		if (!eval_bit(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	if (view->arg1 && view->arg2 && is_carry(view->arg2)) {
+		out[view->pc - state->start_offset] = 0x92;
+		if (!eval_bit(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	if (view->arg1 && view->arg2 && is_acc(view->arg1)) {
+		if (is_immediate(view->arg2)) {
+			out[view->pc - state->start_offset] = 0x74;
+			if (!eval_immediate(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
+		}
+		reg = reg_index(view->arg2);
+		if (reg >= 0) {
+			out[view->pc - state->start_offset] = 0xE8 + reg;
+			return view->size;
+		}
+		if (is_indirect_reg(view->arg2)) {
+			out[view->pc - state->start_offset] = (strcmp(view->arg2, "@R0") == 0) ? 0xE6 : 0xE7;
+			return view->size;
+		}
+		out[view->pc - state->start_offset] = 0xE5;
+		if (!eval_direct(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	reg = reg_index(view->arg1);
+	if (view->arg1 && reg >= 0) {
+		int src_reg = reg_index(view->arg2);
+		if (is_acc(view->arg2)) {
+			out[view->pc - state->start_offset] = 0xF8 + reg;
+			return view->size;
+		}
+		if (src_reg >= 0) {
+			out[view->pc - state->start_offset] = 0xE8 + src_reg;
+			out[view->pc - state->start_offset + 1] = 0xF8 + reg;
+			return view->size;
+		}
+		if (is_immediate(view->arg2)) {
+			out[view->pc - state->start_offset] = 0x78 + reg;
+			if (!eval_immediate(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
+		}
+		if (is_indirect_reg(view->arg2)) {
+			out[view->pc - state->start_offset] = (strcmp(view->arg2, "@R0") == 0) ? 0xE6 : 0xE7;
+			out[view->pc - state->start_offset + 1] = 0xF8 + reg;
+			return view->size;
+		}
+		out[view->pc - state->start_offset] = 0xA8 + reg;
+		if (!eval_direct(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	if (view->arg1 && view->arg2 && is_indirect_reg(view->arg1)) {
+		if (is_immediate(view->arg2)) {
+			out[view->pc - state->start_offset] = (strcmp(view->arg1, "@R0") == 0) ? 0x76 : 0x77;
+			if (!eval_immediate(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
+		}
+		if (is_acc(view->arg2)) {
+			out[view->pc - state->start_offset] = (strcmp(view->arg1, "@R0") == 0) ? 0xF6 : 0xF7;
+			return view->size;
+		}
+		reg = reg_index(view->arg2);
+		if (reg >= 0) {
+			out[view->pc - state->start_offset] = 0xE8 + reg;
+			out[view->pc - state->start_offset + 1] = (strcmp(view->arg1, "@R0") == 0) ? 0xF6 : 0xF7;
+			return view->size;
+		}
+		out[view->pc - state->start_offset] = (strcmp(view->arg1, "@R0") == 0) ? 0xA6 : 0xA7;
+		if (!eval_direct(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	if (view->arg1 && view->arg2) {
+		reg = reg_index(view->arg2);
+		if (is_acc(view->arg2)) {
+			out[view->pc - state->start_offset] = 0xF5;
+			if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
+		}
+		if (reg >= 0) {
+			out[view->pc - state->start_offset] = 0x88 + reg;
+			if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
+		}
+		if (is_indirect_reg(view->arg2)) {
+			out[view->pc - state->start_offset] = (strcmp(view->arg2, "@R0") == 0) ? 0x86 : 0x87;
+			if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
+		}
+		if (is_immediate(view->arg2)) {
+			out[view->pc - state->start_offset] = 0x75;
+			if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			if (!eval_immediate(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 2, view->ins, &expr)) return -1;
+			return view->size;
+		}
+		out[view->pc - state->start_offset] = 0x85;
+		if (!eval_direct(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 2, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	return -1;
+}
+
+static int encode_alu(EncodeState *state, const InstrView *view, unsigned char *out)
+{
+	const AluEncoding *entry;
+	ExprValue expr;
+	int reg;
+	entry = find_alu_encoding(view ? view->op : NULL);
+	if (!entry || !view || !view->arg1 || !view->arg2) return 0;
+	if (operand_kind(view->arg1) == OPERAND_KIND_ACC) {
+		switch (operand_kind(view->arg2)) {
+		case OPERAND_KIND_IMMEDIATE:
+			out[view->pc - state->start_offset] = entry->imm_opcode;
+			if (!eval_immediate(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
+		case OPERAND_KIND_REGISTER:
+			reg = reg_index(view->arg2);
+			out[view->pc - state->start_offset] = entry->reg_base + reg;
+			return view->size;
+		case OPERAND_KIND_INDIRECT_REG:
+			out[view->pc - state->start_offset] = (strcmp(view->arg2, "@R0") == 0) ? entry->indir_r0_opcode : entry->indir_r1_opcode;
+			return view->size;
+		case OPERAND_KIND_OTHER:
+			out[view->pc - state->start_offset] = entry->direct_opcode;
+		if (!eval_direct(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+		default:
+			return -1;
+		}
+	}
+	if (entry->supports_carry_bit && operand_kind(view->arg1) == OPERAND_KIND_CARRY) {
+		out[view->pc - state->start_offset] = entry->carry_bit_opcode;
+		if (!eval_bit(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	if (entry->supports_direct_acc && operand_kind(view->arg2) == OPERAND_KIND_ACC) {
+		out[view->pc - state->start_offset] = entry->direct_acc_opcode;
+		if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	return -1;
+}
+
+static int encode_instruction(EncodeState *state, const AsmInstr *ins, unsigned char *out, int pc)
+{
+	InstrView view;
 	int size;
-	int next_pc;
+	int written;
 
 	if (!ins || is_comment_instr(ins) || is_label_instr(ins)) return 0;
 	size = instruction_size(ins);
@@ -546,357 +1287,22 @@ static int encode_instruction(EncodeState *state, const AsmInstr *ins, unsigned 
 		report_encode_error(state, ins, "unsupported instruction");
 		return -1;
 	}
-
-	op = ins->op;
-	arg1 = (ins->args && ins->args->len > 0) ? list_get(ins->args, 0) : NULL;
-	arg2 = (ins->args && ins->args->len > 1) ? list_get(ins->args, 1) : NULL;
-	next_pc = pc + size;
-
-	if (!strcmp(op, "NOP")) { out[pc - state->start_offset] = 0x00; return size; }
-	if (!strcmp(op, "JMP") && arg1 && strcmp(arg1, "@A+DPTR") == 0) { out[pc - state->start_offset] = 0x73; return size; }
-	if (!strcmp(op, "RLC") && arg1 && is_acc(arg1)) { out[pc - state->start_offset] = 0x33; return size; }
-	if (!strcmp(op, "RRC") && arg1 && is_acc(arg1)) { out[pc - state->start_offset] = 0x13; return size; }
-	if (!strcmp(op, "RET")) { out[pc - state->start_offset] = 0x22; return size; }
-	if (!strcmp(op, "RETI")) { out[pc - state->start_offset] = 0x32; return size; }
-	if (!strcmp(op, "MUL") && arg1 && strcmp(arg1, "AB") == 0) { out[pc - state->start_offset] = 0xA4; return size; }
-	if (!strcmp(op, "DIV") && arg1 && strcmp(arg1, "AB") == 0) { out[pc - state->start_offset] = 0x84; return size; }
-
-	if (!strcmp(op, "LCALL") || !strcmp(op, "LJMP")) {
-		out[pc - state->start_offset] = !strcmp(op, "LCALL") ? 0x12 : 0x02;
-		if (!eval_expr(state, arg1, &expr) || !emit_abs16_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-		return size;
-	}
-
-	if (!strcmp(op, "CJNE")) {
-		char *cmp_operand = NULL;
-		char *label = NULL;
-		int target;
-		if (!(arg1 && is_acc(arg1) && split_cjne_arg2(arg2, &cmp_operand, &label))) {
-			report_encode_error(state, ins, "unsupported CJNE form");
-			free(cmp_operand);
-			free(label);
-			return -1;
-		}
-		if (!eval_expr(state, label, &expr) || expr.is_symbolic) {
-			report_encode_error(state, ins, "CJNE requires local label target");
-			free(cmp_operand);
-			free(label);
-			return -1;
-		}
-		target = expr.value;
-		if (is_immediate(cmp_operand)) {
-			out[pc - state->start_offset] = 0xB4;
-			if (!eval_immediate(state, cmp_operand, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) {
-				free(cmp_operand);
-				free(label);
-				return -1;
-			}
-			out[pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, ins, next_pc, target);
-			free(cmp_operand);
-			free(label);
-			return size;
-		}
-		reg = reg_index(cmp_operand);
-		if (reg >= 0) {
-			out[pc - state->start_offset] = 0x88 + reg;
-			out[pc - state->start_offset + 1] = 0xF0;
-			out[pc - state->start_offset + 2] = 0xB5;
-			out[pc - state->start_offset + 3] = 0xF0;
-			out[pc - state->start_offset + 4] = (unsigned char)checked_rel8(state, ins, pc + size, target);
-			free(cmp_operand);
-			free(label);
-			return size;
-		}
-		if (is_indirect_reg(cmp_operand)) {
-			out[pc - state->start_offset] = (strcmp(cmp_operand, "@R0") == 0) ? 0x86 : 0x87;
-			out[pc - state->start_offset + 1] = 0xF0;
-			out[pc - state->start_offset + 2] = 0xB5;
-			out[pc - state->start_offset + 3] = 0xF0;
-			out[pc - state->start_offset + 4] = (unsigned char)checked_rel8(state, ins, pc + size, target);
-			free(cmp_operand);
-			free(label);
-			return size;
-		}
-		out[pc - state->start_offset] = 0xB5;
-		if (!eval_direct(state, cmp_operand, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) {
-			free(cmp_operand);
-			free(label);
-			return -1;
-		}
-		out[pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, ins, next_pc, target);
-		free(cmp_operand);
-		free(label);
-		return size;
-	}
-
-	if (!strcmp(op, "SJMP") || !strcmp(op, "JNZ") || !strcmp(op, "JZ") || !strcmp(op, "JC") || !strcmp(op, "JNC")) {
-		int target;
-		out[pc - state->start_offset] = !strcmp(op, "SJMP") ? 0x80 :
-										!strcmp(op, "JNZ") ? 0x70 :
-										!strcmp(op, "JZ") ? 0x60 :
-										!strcmp(op, "JC") ? 0x40 : 0x50;
-		if (!eval_expr(state, arg1, &expr) || expr.is_symbolic) {
-			report_encode_error(state, ins, "relative jump requires local label");
-			return -1;
-		}
-		target = expr.value;
-		out[pc - state->start_offset + 1] = (unsigned char)checked_rel8(state, ins, next_pc, target);
-		return size;
-	}
-
-	if (!strcmp(op, "JB") || !strcmp(op, "JNB") || !strcmp(op, "JBC")) {
-		int target;
-		out[pc - state->start_offset] = !strcmp(op, "JB") ? 0x20 : !strcmp(op, "JNB") ? 0x30 : 0x10;
-		if (!eval_bit(state, arg1, &expr) || expr.is_symbolic || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-		if (!eval_expr(state, arg2, &expr) || expr.is_symbolic) {
-			report_encode_error(state, ins, "bit branch requires local label");
-			return -1;
-		}
-		target = expr.value;
-		out[pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, ins, next_pc, target);
-		return size;
-	}
-
-	if (!strcmp(op, "PUSH") || !strcmp(op, "POP")) {
-		out[pc - state->start_offset] = !strcmp(op, "PUSH") ? 0xC0 : 0xD0;
-		if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-		return size;
-	}
-
-	if (!strcmp(op, "SETB") || !strcmp(op, "CLR") || !strcmp(op, "CPL")) {
-		if (arg1 && is_acc(arg1)) {
-			out[pc - state->start_offset] = !strcmp(op, "CLR") ? 0xE4 : !strcmp(op, "CPL") ? 0xF4 : 0x00;
-			return size;
-		}
-		if (arg1 && is_carry(arg1)) {
-			out[pc - state->start_offset] = !strcmp(op, "CLR") ? 0xC3 : !strcmp(op, "CPL") ? 0xB3 : 0xD3;
-			return size;
-		}
-		out[pc - state->start_offset] = !strcmp(op, "SETB") ? 0xD2 : !strcmp(op, "CLR") ? 0xC2 : 0xB2;
-		if (!eval_bit(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-		return size;
-	}
-
-	if (!strcmp(op, "INC") || !strcmp(op, "DEC")) {
-		if (arg1 && is_acc(arg1)) {
-			out[pc - state->start_offset] = !strcmp(op, "INC") ? 0x04 : 0x14;
-			return size;
-		}
-		if (arg1 && is_dptr(arg1)) {
-			out[pc - state->start_offset] = 0xA3;
-			return size;
-		}
-		reg = reg_index(arg1);
-		if (reg >= 0) {
-			out[pc - state->start_offset] = (!strcmp(op, "INC") ? 0x08 : 0x18) + reg;
-			return size;
-		}
-		out[pc - state->start_offset] = !strcmp(op, "INC") ? 0x05 : 0x15;
-		if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-		return size;
-	}
-
-	if (!strcmp(op, "MOVX")) {
-		if (arg1 && arg2 && is_movx_at_dptr(arg1) && is_acc(arg2)) {
-			out[pc - state->start_offset] = 0xF0;
-			return size;
-		}
-		if (arg1 && arg2 && is_acc(arg1) && is_movx_at_dptr(arg2)) {
-			out[pc - state->start_offset] = 0xE0;
-			return size;
-		}
-		report_encode_error(state, ins, "unsupported MOVX form");
-		return -1;
-	}
-
-	if (!strcmp(op, "MOVC")) {
-		if (arg1 && arg2 && is_acc(arg1) && is_movc_at_a_dptr(arg2)) {
-			out[pc - state->start_offset] = 0x93;
-			return size;
-		}
-		report_encode_error(state, ins, "unsupported MOVC form");
-		return -1;
-	}
-
-	if (!strcmp(op, "DJNZ")) {
-		int target;
-		reg = reg_index(arg1);
-		if (reg >= 0) {
-			out[pc - state->start_offset] = 0xD8 + reg;
-			if (!eval_expr(state, arg2, &expr) || expr.is_symbolic) {
-				report_encode_error(state, ins, "DJNZ requires local label");
-				return -1;
-			}
-			target = expr.value;
-			out[pc - state->start_offset + 1] = (unsigned char)checked_rel8(state, ins, next_pc, target);
-			return size;
-		}
-		out[pc - state->start_offset] = 0xD5;
-		if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-		if (!eval_expr(state, arg2, &expr) || expr.is_symbolic) {
-			report_encode_error(state, ins, "DJNZ requires local label");
-			return -1;
-		}
-		target = expr.value;
-		out[pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, ins, next_pc, target);
-		return size;
-	}
-
-	if (!strcmp(op, "MOV")) {
-		reg = reg_index(arg1);
-		if (arg1 && arg2 && is_dptr(arg1) && is_immediate(arg2)) {
-			out[pc - state->start_offset] = 0x90;
-			if (!eval_immediate(state, arg2, &expr) || !emit_abs16_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		if (arg1 && arg2 && is_carry(arg1)) {
-			out[pc - state->start_offset] = 0xA2;
-			if (!eval_bit(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		if (arg1 && arg2 && is_carry(arg2)) {
-			out[pc - state->start_offset] = 0x92;
-			if (!eval_bit(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		if (arg1 && arg2 && is_acc(arg1)) {
-			if (is_immediate(arg2)) {
-				out[pc - state->start_offset] = 0x74;
-				if (!eval_immediate(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-				return size;
-			}
-			reg = reg_index(arg2);
-			if (reg >= 0) {
-				out[pc - state->start_offset] = 0xE8 + reg;
-				return size;
-			}
-			if (is_indirect_reg(arg2)) {
-				out[pc - state->start_offset] = (strcmp(arg2, "@R0") == 0) ? 0xE6 : 0xE7;
-				return size;
-			}
-			out[pc - state->start_offset] = 0xE5;
-			if (!eval_direct(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		reg = reg_index(arg1);
-		if (reg >= 0) {
-			int src_reg = reg_index(arg2);
-			if (is_acc(arg2)) {
-				out[pc - state->start_offset] = 0xF8 + reg;
-				return size;
-			}
-			if (src_reg >= 0) {
-				out[pc - state->start_offset] = 0xE8 + src_reg;
-				out[pc - state->start_offset + 1] = 0xF8 + reg;
-				return size;
-			}
-			if (is_immediate(arg2)) {
-				out[pc - state->start_offset] = 0x78 + reg;
-				if (!eval_immediate(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-				return size;
-			}
-			if (is_indirect_reg(arg2)) {
-				out[pc - state->start_offset] = (strcmp(arg2, "@R0") == 0) ? 0xE6 : 0xE7;
-				out[pc - state->start_offset + 1] = 0xF8 + reg;
-				return size;
-			}
-			out[pc - state->start_offset] = 0xA8 + reg;
-			if (!eval_direct(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		if (arg1 && arg2 && is_indirect_reg(arg1)) {
-			if (is_immediate(arg2)) {
-				out[pc - state->start_offset] = (strcmp(arg1, "@R0") == 0) ? 0x76 : 0x77;
-				if (!eval_immediate(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-				return size;
-			}
-			if (is_acc(arg2)) {
-				out[pc - state->start_offset] = (strcmp(arg1, "@R0") == 0) ? 0xF6 : 0xF7;
-				return size;
-			}
-			reg = reg_index(arg2);
-			if (reg >= 0) {
-				out[pc - state->start_offset] = 0xE8 + reg;
-				out[pc - state->start_offset + 1] = (strcmp(arg1, "@R0") == 0) ? 0xF6 : 0xF7;
-				return size;
-			}
-			out[pc - state->start_offset] = (strcmp(arg1, "@R0") == 0) ? 0xA6 : 0xA7;
-			if (!eval_direct(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		if (arg1 && arg2) {
-			reg = reg_index(arg2);
-			if (is_acc(arg2)) {
-				out[pc - state->start_offset] = 0xF5;
-				if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-				return size;
-			}
-			if (reg >= 0) {
-				out[pc - state->start_offset] = 0x88 + reg;
-				if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-				return size;
-			}
-			if (is_indirect_reg(arg2)) {
-				out[pc - state->start_offset] = (strcmp(arg2, "@R0") == 0) ? 0x86 : 0x87;
-				if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-				return size;
-			}
-			if (is_immediate(arg2)) {
-				out[pc - state->start_offset] = 0x75;
-				if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-				if (!eval_immediate(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 2, ins, &expr)) return -1;
-				return size;
-			}
-			out[pc - state->start_offset] = 0x85;
-			if (!eval_direct(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 2, ins, &expr)) return -1;
-			return size;
-		}
-	}
-
-	if (!strcmp(op, "ADD") || !strcmp(op, "ADDC") || !strcmp(op, "SUBB") ||
-		!strcmp(op, "ANL") || !strcmp(op, "ORL") || !strcmp(op, "XRL")) {
-		int base_imm = !strcmp(op, "ADD") ? 0x24 : !strcmp(op, "ADDC") ? 0x34 :
-					   !strcmp(op, "SUBB") ? 0x94 : !strcmp(op, "ANL") ? 0x54 :
-					   !strcmp(op, "ORL") ? 0x44 : 0x64;
-		int base_dir = !strcmp(op, "ADD") ? 0x25 : !strcmp(op, "ADDC") ? 0x35 :
-					   !strcmp(op, "SUBB") ? 0x95 : !strcmp(op, "ANL") ? 0x55 :
-					   !strcmp(op, "ORL") ? 0x45 : 0x65;
-		int base_reg = !strcmp(op, "ADD") ? 0x28 : !strcmp(op, "ADDC") ? 0x38 :
-					   !strcmp(op, "SUBB") ? 0x98 : !strcmp(op, "ANL") ? 0x58 :
-					   !strcmp(op, "ORL") ? 0x48 : 0x68;
-		if (arg1 && is_acc(arg1)) {
-			if (is_immediate(arg2)) {
-				out[pc - state->start_offset] = base_imm;
-				if (!eval_immediate(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-				return size;
-			}
-			reg = reg_index(arg2);
-			if (reg >= 0) {
-				out[pc - state->start_offset] = base_reg + reg;
-				return size;
-			}
-			out[pc - state->start_offset] = base_dir;
-			if (!eval_direct(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		if (!strcmp(op, "ORL") && arg1 && arg2 && is_carry(arg1)) {
-			out[pc - state->start_offset] = 0x72;
-			if (!eval_bit(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		if (!strcmp(op, "ANL") && arg1 && arg2 && is_carry(arg1)) {
-			out[pc - state->start_offset] = 0x82;
-			if (!eval_bit(state, arg2, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-		if (arg1 && arg2 && is_acc(arg2)) {
-			out[pc - state->start_offset] = !strcmp(op, "ANL") ? 0x52 : !strcmp(op, "ORL") ? 0x42 : 0x62;
-			if (!eval_direct(state, arg1, &expr) || !emit_abs8_or_reloc(state, out, pc + 1, ins, &expr)) return -1;
-			return size;
-		}
-	}
-
+	state->current_pc = pc;
+	view = make_instr_view(ins, pc);
+	view.size = size;
+	view.next_pc = pc + size;
+	if ((written = encode_simple_op(state, &view, out)) != 0) return written;
+	if ((written = encode_long_jump(state, &view, out)) != 0) return written;
+	if ((written = encode_cjne(state, &view, out)) != 0) return written;
+	if ((written = encode_rel_jump(state, &view, out)) != 0) return written;
+	if ((written = encode_bit_branch(state, &view, out)) != 0) return written;
+	if ((written = encode_stack_op(state, &view, out)) != 0) return written;
+	if ((written = encode_bit_op(state, &view, out)) != 0) return written;
+	if ((written = encode_inc_dec(state, &view, out)) != 0) return written;
+	if ((written = encode_movx_movc(state, &view, out)) != 0) return written;
+	if ((written = encode_djnz(state, &view, out)) != 0) return written;
+	if ((written = encode_mov(state, &view, out)) != 0) return written;
+	if ((written = encode_alu(state, &view, out)) != 0) return written;
 	report_encode_error(state, ins, "unsupported instruction form");
 	return -1;
 }
@@ -905,6 +1311,7 @@ static void record_labels(EncodeState *state)
 {
 	Iter it;
 	int offset;
+	int scope = 0;
 	if (!state || !state->sec || !state->sec->asminstrs) return;
 	offset = state->start_offset;
 	for (it = list_iter(state->sec->asminstrs); !iter_end(it);) {
@@ -912,17 +1319,33 @@ static void record_labels(EncodeState *state)
 		if (is_label_instr(ins)) {
 			size_t len = strlen(ins->op);
 			char *name = malloc(len);
-			int *value = malloc(sizeof(int));
-			if (!name || !value) {
+			List *positions;
+			LabelLocation *location = malloc(sizeof(LabelLocation));
+			if (!name || !location) {
 				free(name);
-				free(value);
+				free(location);
 				state->failed = 1;
 				return;
 			}
 			memcpy(name, ins->op, len - 1);
 			name[len - 1] = '\0';
-			*value = offset;
-			dict_put(state->labels, name, value);
+			if (!is_function_local_label_name(name)) scope++;
+			location->value = offset;
+			location->scope = scope;
+			positions = dict_get(state->labels, name);
+			if (!positions) {
+				positions = make_list();
+				if (!positions) {
+					free(name);
+					free(location);
+					state->failed = 1;
+					return;
+				}
+				dict_put(state->labels, name, positions);
+			} else {
+				free(name);
+			}
+			list_push(positions, location);
 			continue;
 		}
 		if (!is_comment_instr(ins)) {
@@ -955,7 +1378,7 @@ static void encode_section(ObjFile *obj, int sec_idx, Section *sec)
 
 	record_labels(&state);
 	if (state.failed) {
-		dict_free(state.labels, free);
+		dict_free(state.labels, free_label_positions);
 		return;
 	}
 
@@ -968,19 +1391,31 @@ static void encode_section(ObjFile *obj, int sec_idx, Section *sec)
 	}
 
 	if (end_offset <= state.start_offset) {
-		dict_free(state.labels, free);
+		dict_free(state.labels, free_label_positions);
 		return;
 	}
 
 	code = calloc((size_t)(end_offset - state.start_offset), 1);
 	if (!code) {
-		dict_free(state.labels, free);
+		dict_free(state.labels, free_label_positions);
 		return;
 	}
 
 	pc = state.start_offset;
 	for (it = list_iter(sec->asminstrs); !iter_end(it);) {
 		AsmInstr *ins = iter_next(&it);
+		if (is_label_instr(ins)) {
+			size_t len = strlen(ins->op);
+			char *name = malloc(len);
+			if (!name) {
+				state.failed = 1;
+				break;
+			}
+			memcpy(name, ins->op, len - 1);
+			name[len - 1] = '\0';
+			if (!is_function_local_label_name(name)) state.current_scope++;
+			free(name);
+		}
 		int written = encode_instruction(&state, ins, code, pc);
 		if (written < 0) break;
 		pc += written;
@@ -991,7 +1426,7 @@ static void encode_section(ObjFile *obj, int sec_idx, Section *sec)
 	}
 
 	free(code);
-	dict_free(state.labels, free);
+	dict_free(state.labels, free_label_positions);
 }
 
 void c51_encode(C51GenContext* ctx, ObjFile* obj)
