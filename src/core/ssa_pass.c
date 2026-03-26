@@ -511,7 +511,7 @@ static bool is_unsigned_type(Ctype *t) {
 static bool is_const_global(GlobalVar *g) {
     if (!g || !g->type) return false;
     CtypeAttr a = get_attr(g->type->attr);
-    return a.ctype_const && !a.ctype_volatile && !a.ctype_register && g->has_init;
+    return a.ctype_const && !a.ctype_volatile && !a.ctype_register && g->has_init && g->is_static;
 }
 
 static bool value_used(Func *f, ValueName v) {
@@ -1485,6 +1485,11 @@ static bool pass_load_load_forwarding(Func *f, Stats *s) {
                 Instr *bdef = find_def_instr(f, base);
                 if (bdef && bdef->op == IROP_ADDR && bdef->labels && bdef->labels->len > 0)
                     name = (const char *)list_get(bdef->labels, 0);
+            }
+
+            if (name && !is_local_var(f, name)) {
+                load_count = 0;
+                continue;
             }
 
             for (int k = 0; k < load_count; k++) {

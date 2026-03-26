@@ -126,6 +126,20 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
         }
         if (dst_base < 0) continue;
 
+        Instr* src_def = find_def_instr_in_func(f, src);
+        if (src_def && src_def->op == IROP_CONST) {
+            int imm = (int)(src_def->imm.ival & 0xFFFF);
+            char imm_lo[32];
+            snprintf(imm_lo, sizeof(imm_lo), "#%d", imm & 0xFF);
+            emit_mov(isel, isel_reg_name(dst_base + (size == 2 ? 1 : 0)), imm_lo, ins);
+            if (size == 2) {
+                char imm_hi[32];
+                snprintf(imm_hi, sizeof(imm_hi), "#%d", (imm >> 8) & 0xFF);
+                emit_mov(isel, isel_reg_name(dst_base), imm_hi, NULL);
+            }
+            continue;
+        }
+
         const char* dst_lo = isel_reg_name(dst_base + (size == 2 ? 1 : 0));
         const char* src_lo = isel_get_lo_reg(isel, src);
         int src_lo_reg = reg_index_from_name(src_lo);

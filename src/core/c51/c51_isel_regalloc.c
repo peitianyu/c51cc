@@ -22,13 +22,12 @@ int c51_abi_type_size(const Ctype* type) {
         case 1: /* data */
         case 2: /* idata */
         case 3: /* pdata */
-            return 1;
         case 4: /* xdata */
         case 5: /* edata */
         case 6: /* code */
             return 2;
         default:
-            return 3; /* generic ptr */
+            return (type->size > 0) ? type->size : 2;
     }
 }
 

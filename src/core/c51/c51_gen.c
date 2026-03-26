@@ -165,4 +165,5 @@ TEST(test, c51_link) {
     c51_write_asm(stdout, out);
     c51_write_hex(stdout, out);
 }
+
 #endif

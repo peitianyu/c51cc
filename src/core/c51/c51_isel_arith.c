@@ -116,9 +116,35 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     if (dst_reg < 0) dst_reg = 0;
 
     const char* src1_lo = isel_get_lo_reg(isel, src1);
+    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
+    const char* src1_hi_preserved = NULL;
+    const char* src2_hi_preserved = NULL;
+    int src1_hi_tmp = -1;
+    int src2_hi_tmp = -1;
+    int src2_size = (!src2_is_imm) ? get_value_size(isel, src2) : 0;
     if (src2_spilled_mem) {
         emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
     }
+
+    if (size == 2) {
+        if (src1_size == 2) {
+            const char* src1_hi = isel_get_hi_reg(isel, src1);
+            if (dst_lo && src1_hi && strcmp(dst_lo, src1_hi) == 0) {
+                src1_hi_tmp = alloc_temp_reg(isel, -1, 1);
+                src1_hi_preserved = (src1_hi_tmp >= 0) ? isel_reg_name(src1_hi_tmp) : "B";
+                emit_mov(isel, src1_hi_preserved, src1_hi, NULL);
+            }
+        }
+        if (!src2_is_imm && !src2_spilled_mem && src2_size == 2) {
+            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            if (dst_lo && src2_hi && strcmp(dst_lo, src2_hi) == 0) {
+                src2_hi_tmp = alloc_temp_reg(isel, -1, 1);
+                src2_hi_preserved = (src2_hi_tmp >= 0) ? isel_reg_name(src2_hi_tmp) : "B";
+                emit_mov(isel, src2_hi_preserved, src2_hi, NULL);
+            }
+        }
+    }
+
     emit_mov(isel, "A", src1_lo, ins);
 
     if (src2_is_imm) {
@@ -148,7 +174,6 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         }
     }
 
-    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     emit_mov(isel, dst_lo, "A", NULL);
 
     if (size == 2) {
@@ -166,7 +191,6 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
             snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
             isel_emit(isel, "ADDC", "A", imm_str, NULL);
         } else {
-            int src2_size = get_value_size(isel, src2);
             if (src2_size == 2) {
                 if (src2_spilled_mem) {
                     emit_mov(isel, dst_hi, "A", NULL);
@@ -174,7 +198,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
                     emit_mov(isel, "A", dst_hi, NULL);
                     isel_emit(isel, "ADDC", "A", "B", NULL);
                 } else {
-                    const char* src2_hi = isel_get_hi_reg(isel, src2);
+                    const char* src2_hi = src2_hi_preserved ? src2_hi_preserved : isel_get_hi_reg(isel, src2);
                     isel_emit(isel, "ADDC", "A", src2_hi, NULL);
                 }
             } else {
@@ -186,6 +210,9 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     }
 
     store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+
+    if (src1_hi_tmp >= 0) free_temp_reg(isel, src1_hi_tmp, 1);
+    if (src2_hi_tmp >= 0) free_temp_reg(isel, src2_hi_tmp, 1);
 
     if (next && next->op == IROP_RET) {
         const char* ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
@@ -207,7 +234,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
 
         if (isel->ctx && isel->ctx->value_to_reg) {
             int* reg_num = malloc(sizeof(int));
-            *reg_num = (ret_size == 2) ? 6 : 7;
+            *reg_num = (size == 2) ? 6 : 7;
             char* key = int_to_key(ins->dest);
             dict_put(isel->ctx->value_to_reg, key, reg_num);
         }
@@ -1001,6 +1028,30 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     if (phys_dst_reg < 0) phys_dst_reg = 0;
 
     const char* dst_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
+    const char* src1_hi_preserved = NULL;
+    const char* src2_hi_preserved = NULL;
+    int src1_hi_tmp = -1;
+    int src2_hi_tmp = -1;
+    int src2_size = (!src2_is_imm) ? get_value_size(isel, src2) : 0;
+
+    if (size == 2) {
+        if (src1_size == 2) {
+            const char* src1_hi = isel_get_hi_reg(isel, src1);
+            if (dst_lo && src1_hi && strcmp(dst_lo, src1_hi) == 0) {
+                src1_hi_tmp = alloc_temp_reg(isel, -1, 1);
+                src1_hi_preserved = (src1_hi_tmp >= 0) ? isel_reg_name(src1_hi_tmp) : "B";
+                emit_mov(isel, src1_hi_preserved, src1_hi, NULL);
+            }
+        }
+        if (!src2_is_imm && !src2_spilled_mem && src2_size == 2) {
+            const char* src2_hi = isel_get_hi_reg(isel, src2);
+            if (dst_lo && src2_hi && strcmp(dst_lo, src2_hi) == 0) {
+                src2_hi_tmp = alloc_temp_reg(isel, -1, 1);
+                src2_hi_preserved = (src2_hi_tmp >= 0) ? isel_reg_name(src2_hi_tmp) : "B";
+                emit_mov(isel, src2_hi_preserved, src2_hi, NULL);
+            }
+        }
+    }
 
     if (src2_spilled_mem) {
         emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
@@ -1055,7 +1106,6 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
             isel_emit(isel, "SUBB", "A", imm_str, NULL);
         } else {
-            int src2_size = get_value_size(isel, src2);
             if (src2_size == 2) {
                 if (src2_spilled_mem) {
                     emit_mov(isel, dst_hi, "A", NULL);
@@ -1063,7 +1113,7 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
                     emit_mov(isel, "A", dst_hi, NULL);
                     isel_emit(isel, "SUBB", "A", "B", NULL);
                 } else {
-                    const char* src2_hi = isel_get_hi_reg(isel, src2);
+                    const char* src2_hi = src2_hi_preserved ? src2_hi_preserved : isel_get_hi_reg(isel, src2);
                     isel_emit(isel, "SUBB", "A", src2_hi, NULL);
                 }
             } else {
@@ -1075,6 +1125,9 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     }
 
     store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+
+    if (src1_hi_tmp >= 0) free_temp_reg(isel, src1_hi_tmp, 1);
+    if (src2_hi_tmp >= 0) free_temp_reg(isel, src2_hi_tmp, 1);
 
     if (next && next->op == IROP_RET) {
         const char* ret_lo = NULL;
@@ -1102,7 +1155,7 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
 
         if (isel->ctx && isel->ctx->value_to_reg) {
             int* reg_num = malloc(sizeof(int));
-            *reg_num = (ret_size == 2) ? 6 : 7;
+            *reg_num = (size == 2) ? 6 : 7;
             char* key = int_to_key(ins->dest);
             dict_put(isel->ctx->value_to_reg, key, reg_num);
         }

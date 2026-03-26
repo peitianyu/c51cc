@@ -782,8 +782,32 @@ static ValueName ssa_build_addr_typed(SSABuild *b, const char *var, Ctype *resul
     return i->dest;
 }
 
+static Ctype *make_pointer_type_for_mem(Ctype *mem_type) {
+    Ctype *ptr_type = ssa_alloc(sizeof(Ctype));
+    ptr_type->type = CTYPE_PTR;
+    ptr_type->size = 2;
+    ptr_type->ptr = mem_type;
+    ptr_type->len = 0;
+    ptr_type->fields = NULL;
+    ptr_type->offset = 0;
+    ptr_type->is_union = false;
+    ptr_type->bit_offset = 0;
+    ptr_type->bit_size = 0;
+    if (mem_type) {
+        CtypeAttr mem_attr = get_attr(mem_type->attr);
+        CtypeAttr ptr_attr = {0};
+        ptr_attr.ctype_const = mem_attr.ctype_const;
+        ptr_attr.ctype_volatile = mem_attr.ctype_volatile;
+        ptr_attr.ctype_restrict = mem_attr.ctype_restrict;
+        ptr_attr.ctype_data = mem_attr.ctype_data ? mem_attr.ctype_data : 1;
+        ptr_type->attr = *(int *)&ptr_attr;
+    }
+    return ptr_type;
+}
+
 static ValueName ssa_build_addr(SSABuild *b, const char *var, Ctype *mem_type) {
-    return ssa_build_addr_typed(b, var, ctype_ptr, mem_type);
+    Ctype *result_type = make_pointer_type_for_mem(mem_type);
+    return ssa_build_addr_typed(b, var, result_type, mem_type);
 }
 
 static Ctype* expr_value_type(Ast* ast) {
