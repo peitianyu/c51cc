@@ -400,8 +400,9 @@ static int instruction_size(const AsmInstr *ins)
 	arg1 = (ins->args && ins->args->len > 0) ? list_get(ins->args, 0) : NULL;
 	arg2 = (ins->args && ins->args->len > 1) ? list_get(ins->args, 1) : NULL;
 
-	if (!strcmp(op, "RET") || !strcmp(op, "RETI") || !strcmp(op, "NOP") || !strcmp(op, "RLC") ||
+	if (!strcmp(op, "RET") || !strcmp(op, "RETI") || !strcmp(op, "NOP") || !strcmp(op, "RLC") || !strcmp(op, "RRC") ||
 		!strcmp(op, "MUL") || !strcmp(op, "DIV")) return 1;
+	if (!strcmp(op, "JMP") && arg1 && strcmp(arg1, "@A+DPTR") == 0) return 1;
 	if (!strcmp(op, "CJNE")) {
 		char *cmp_operand = NULL;
 		char *label = NULL;
@@ -552,7 +553,9 @@ static int encode_instruction(EncodeState *state, const AsmInstr *ins, unsigned 
 	next_pc = pc + size;
 
 	if (!strcmp(op, "NOP")) { out[pc - state->start_offset] = 0x00; return size; }
+	if (!strcmp(op, "JMP") && arg1 && strcmp(arg1, "@A+DPTR") == 0) { out[pc - state->start_offset] = 0x73; return size; }
 	if (!strcmp(op, "RLC") && arg1 && is_acc(arg1)) { out[pc - state->start_offset] = 0x33; return size; }
+	if (!strcmp(op, "RRC") && arg1 && is_acc(arg1)) { out[pc - state->start_offset] = 0x13; return size; }
 	if (!strcmp(op, "RET")) { out[pc - state->start_offset] = 0x22; return size; }
 	if (!strcmp(op, "RETI")) { out[pc - state->start_offset] = 0x32; return size; }
 	if (!strcmp(op, "MUL") && arg1 && strcmp(arg1, "AB") == 0) { out[pc - state->start_offset] = 0xA4; return size; }
