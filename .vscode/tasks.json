@@ -2,15 +2,24 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "build",          // 必须和 launch.json 里 preLaunchTask 的值一致
+            "label": "build",
             "type": "shell",
-            "command": "${workspaceFolder}/build.sh",        // 如果你的 Makefile 叫别的名字，可写 make -f xxx
-            "args": [],               // 需要传参数就加，比如 ["-j8"]
+            "command": "${workspaceFolder}/build.sh",
+            "args": [],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
             "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "build-win",
+            "type": "shell",
+            "command": "cmd",
+            "args": ["/c", "${workspaceFolder}\\build.bat"],
+            "group": "build",
+            "problemMatcher": ["$gcc"],
+            "detail": "Windows TCC 构建"
         }
     ]
 }

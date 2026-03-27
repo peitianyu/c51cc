@@ -2,10 +2,52 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <time.h>
+
+#ifdef _WIN32
+  #include <io.h>
+  #include <process.h>
+  #include <windows.h>
+  #define PP_PATH_SEP '\\'
+  #define PP_PATH_SEP_STR "\\"
+#else
+  #include <unistd.h>
+  #include <fcntl.h>
+  #define PP_PATH_SEP '/'
+  #define PP_PATH_SEP_STR "/"
+#endif
+
 #include "cc.h"
+
+/* 跨平台临时文件辅助 */
+static FILE *pp_mkstemp(char *path, size_t path_size)
+{
+#ifdef _WIN32
+    char tmp_dir[MAX_PATH];
+    if (!GetTempPathA(MAX_PATH, tmp_dir)) return NULL;
+    char tmp_file[MAX_PATH];
+    if (!GetTempFileNameA(tmp_dir, "mzpp", 0, tmp_file)) return NULL;
+    strncpy(path, tmp_file, path_size);
+    path[path_size - 1] = '\0';
+    return fopen(path, "w");
+#else
+    snprintf(path, path_size, "/tmp/mazucc_pp_XXXXXX");
+    int fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    FILE *fp = fdopen(fd, "w");
+    if (!fp) { close(fd); return NULL; }
+    return fp;
+#endif
+}
+
+static void pp_unlink(const char *path)
+{
+#ifdef _WIN32
+    _unlink(path);
+#else
+    unlink(path);
+#endif
+}
 
 #define PP_LINE_SIZE 4096
 
@@ -185,7 +227,11 @@ PPContext *pp_init(void)
     pp_init_date_time(ctx);
     
     list_push(ctx->include_paths, strdup("."));
+#ifdef _WIN32
+    /* Windows: TCC 自带头文件，无需添加 /usr/include */
+#else
     list_push(ctx->include_paths, strdup("/usr/include"));
+#endif
     
     return ctx;
 }
@@ -1455,6 +1501,11 @@ static char *expand_macro_simple(PPContext *ctx, const char *line)
 static void get_dirname(const char *path, char *dir, size_t dir_size)
 {
     const char *last_slash = strrchr(path, '/');
+#ifdef _WIN32
+    const char *last_bslash = strrchr(path, '\\');
+    if (!last_slash || (last_bslash && last_bslash > last_slash))
+        last_slash = last_bslash;
+#endif
     if (!last_slash) {
         strncpy(dir, ".", dir_size);
         dir[dir_size - 1] = '\0';
@@ -1938,18 +1989,15 @@ int pp_global_current_line(void)
 /* 高级接口：预处理文件并重定向到stdin */
 bool pp_preprocess_to_stdin(const char *filename)
 {
-    char tmpfile[] = "/tmp/mazucc_pp_XXXXXX";
-    int fd = mkstemp(tmpfile);
-    if (fd < 0) return false;
-    
-    FILE *tmp = fdopen(fd, "w");
-    if (!tmp) { close(fd); return false; }
+    char tmpfile[512];
+    FILE *tmp = pp_mkstemp(tmpfile, sizeof(tmpfile));
+    if (!tmp) return false;
     
     pp_global_init();
     if (!pp_global_push_file(filename)) {
         fclose(tmp);
         pp_global_free();
-        unlink(tmpfile);
+        pp_unlink(tmpfile);
         return false;
     }
     
@@ -1975,7 +2023,7 @@ bool pp_preprocess_to_stdin(const char *filename)
     pp_global_free();
     
     bool ok = freopen(tmpfile, "r", stdin) != NULL;
-    unlink(tmpfile);
+    pp_unlink(tmpfile);
     return ok;
 }
 

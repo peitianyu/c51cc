@@ -1,4 +1,5 @@
 #ifdef MINITEST_IMPLEMENTATION
+#define MINITEST_MAIN  /* Windows: 在此定义 __t_begin 和全局存储 */
 #include "core/minitest.h"
 
 int g_argc;

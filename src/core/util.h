@@ -56,7 +56,7 @@ static inline void string_appendf(String *s, char *fmt, ...)
         va_start(args, fmt);
         int written = vsnprintf(s->body + s->len, avail, fmt, args);
         va_end(args);
-        if (avail <= written) {
+        if (written < 0 || avail <= written) {
             realloc_body(s);
             continue;
         }

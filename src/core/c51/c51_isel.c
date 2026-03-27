@@ -7,6 +7,11 @@
 
 #include "c51_isel_regalloc.h"
 
+/* open_memstream 兼容层：Windows 上使用 tmpfile 模拟 */
+#ifdef _WIN32
+#include <io.h>
+#endif
+
 char* int_to_key(int n) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%02XH", n);
@@ -18,10 +23,24 @@ char* instr_to_ssa_str(Instr *ins) {
 
     char *buf = NULL;
     size_t len = 0;
+#ifdef _WIN32
+    /* Windows: 用 tmpfile() 模拟 open_memstream */
+    FILE *f = tmpfile();
+#else
     FILE *f = open_memstream(&buf, &len);
+#endif
     if (!f) return strdup("");
     ssa_print_instr(f, ins, NULL);
+#ifdef _WIN32
+    fflush(f);
+    len = (size_t)ftell(f);
+    rewind(f);
+    buf = malloc(len + 1);
+    if (buf) { fread(buf, 1, len, f); buf[len] = '\0'; }
     fclose(f);
+#else
+    fclose(f);
+#endif
     if (!buf) return strdup("");
     char *p = buf;
     while (*p == ' ' || *p == '\t') p++;
