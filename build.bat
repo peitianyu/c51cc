@@ -2,6 +2,9 @@
 REM ======================================
 REM  C51CC Windows 构建脚本 (TCC)
 REM  用法: build.bat
+REM
+REM  测试模式 (默认): 运行交互式 minitest
+REM  正式编译器:      build_compiler.bat
 REM ======================================
 setlocal enabledelayedexpansion
 
