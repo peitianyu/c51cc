@@ -158,8 +158,13 @@ static void print_section_with_symbols(FILE *fp, Section *sec, const ObjFile *ob
         int off = s->value;
         int sz = s->size;
         if (!s->name) continue;
-        fprintf(fp, "%s:\n", s->name);
+        /* Only print a standalone symbol label if it has a non-zero size.
+         * Labels for functions and other symbols without a size are emitted
+         * by the assembly instruction list; printing them twice creates
+         * redundant empty labels in the listing. */
         if (sz <= 0) continue;
+
+        fprintf(fp, "%s:\n", s->name);
         for (int ioff = off; ioff < off + sz; ioff += 16) {
             fprintf(fp, "        DB      ");
             for (int j = 0; j < 16 && (ioff + j) < off + sz; j++) {
@@ -284,7 +289,6 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
 int c51_write_hex(FILE *fp, const ObjFile *obj)
 {
     int code_base = 0;
-    unsigned upper = 0xFFFFFFFFu;
     int sec_idx = 0;
 
     if (!fp || !obj) return -1;
@@ -300,19 +304,12 @@ int c51_write_hex(FILE *fp, const ObjFile *obj)
         for (int offset = 0; offset < sec->bytes_len; offset += 16) {
             unsigned address = (unsigned)(code_base + offset);
             unsigned chunk = (unsigned)((sec->bytes_len - offset) > 16 ? 16 : (sec->bytes_len - offset));
-            unsigned need_upper = address >> 16;
             unsigned sum;
 
-            if (need_upper != upper) {
-                unsigned char ext[2];
-                unsigned char checksum;
-                ext[0] = (unsigned char)((need_upper >> 8) & 0xFF);
-                ext[1] = (unsigned char)(need_upper & 0xFF);
-                sum = 2 + 0 + 0 + 4 + ext[0] + ext[1];
-                checksum = (unsigned char)((-((int)sum)) & 0xFF);
-                fprintf(fp, ":02000004%02X%02X%02X\n", ext[0], ext[1], checksum);
-                upper = need_upper;
-            }
+            /* 8051 addresses fit in 16 bits — no Extended Linear Address
+               (type 04) record is needed.  Many simple loaders / emulators
+               only accept type 00 (data) and type 01 (EOF) records and
+               reject type 04, so we intentionally omit it. */
 
             sum = chunk + ((address >> 8) & 0xFF) + (address & 0xFF);
             fprintf(fp, ":%02X%04X00", chunk, address & 0xFFFF);

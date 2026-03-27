@@ -1,7 +1,7 @@
 register unsigned char P1 = 0x90;
 
 void delay_short(void) {
-    int count = 200;
+    int count = 300;
     while (count > 0) {
         count = count - 1;
     }
