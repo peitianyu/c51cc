@@ -215,9 +215,19 @@ static SectionMap *find_map(List *maps, ObjFile *obj, int in_sec)
 
 static Symbol *find_symbol_by_name(ObjFile *obj, const char *name)
 {
+    /* 精确匹配 */
     for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
         Symbol *sym = iter_next(&it);
         if (sym && sym->name && name && !strcmp(sym->name, name)) return sym;
+    }
+    /* C51 约定：asm 中的 _func 对应符号表中的 func (SYM_FUNC)
+     * 如果带 _ 前缀未找到，则尝试去掉前缀匹配函数符号 */
+    if (name && name[0] == '_') {
+        for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
+            Symbol *sym = iter_next(&it);
+            if (sym && sym->name && sym->kind == SYM_FUNC && !strcmp(sym->name, name + 1))
+                return sym;
+        }
     }
     return NULL;
 }
@@ -351,6 +361,27 @@ ObjFile *obj_link(List *objs)
             if (sec >= 0) { // 正常符号
                 SectionMap *m = find_map(maps, obj, sec);
                 if (m) { sec = m->out_sec; val = m->base + sym->value; }
+            }
+
+            /* 链接时符号合并：
+             *  - 如果已存在同名已定义符号且新符号未定义(extern) → 跳过
+             *  - 如果已存在同名未定义符号且新符号有定义 → 覆盖旧的
+             *  - 否则正常添加 */
+            Symbol *existing = find_symbol_by_name(out, sym->name);
+            if (existing) {
+                if (sec < 0 && existing->section >= 0) {
+                    /* 新符号是 extern，已有定义 → 跳过 */
+                    continue;
+                }
+                if (sec >= 0 && existing->section < 0) {
+                    /* 新符号有定义，已有的是 extern → 覆盖 */
+                    existing->kind = sym->kind;
+                    existing->section = sec;
+                    existing->value = val;
+                    existing->size = sym->size;
+                    existing->flags = sym->flags;
+                    continue;
+                }
             }
             
             obj_add_symbol(out, sym->name, sym->kind, sec, val, sym->size, sym->flags);
