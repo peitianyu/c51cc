@@ -134,10 +134,6 @@ ObjFile *c51_gen(SSAUnit *unit) {
     return obj;
 }
 
-
-#ifdef MINITEST_IMPLEMENTATION
-#include "../minitest.h"
-
 static char *dup_dirname(const char *path)
 {
     const char *slash;
@@ -175,6 +171,17 @@ static char *join_path2(const char *dir, const char *name)
     if (needs_sep) path[dir_len++] = '/';
     memcpy(path + dir_len, name, name_len);
     return path;
+}
+
+static int file_exists(const char *path)
+{
+    FILE *fp;
+
+    if (!path) return 0;
+    fp = fopen(path, "rb");
+    if (!fp) return 0;
+    fclose(fp);
+    return 1;
 }
 
 static char *read_text_file(const char *path)
@@ -349,7 +356,7 @@ static char *find_startup_path(const char *source_path)
 {
     char *dir;
     char *path;
-    FILE *fp;
+    char *fallback;
 
     dir = dup_dirname(source_path);
     if (!dir) return NULL;
@@ -357,13 +364,13 @@ static char *find_startup_path(const char *source_path)
     free(dir);
     if (!path) return NULL;
 
-    fp = fopen(path, "rb");
-    if (!fp) {
-        free(path);
-        return NULL;
-    }
-    fclose(fp);
-    return path;
+    if (file_exists(path)) return path;
+    free(path);
+    
+    fallback = join_path2(".", "STARTUP.A51");
+    if (file_exists(fallback)) return fallback;
+    free(fallback);
+    return NULL;
 }
 
 static ObjFile *compile_startup_file(const char *startup_path)
@@ -398,6 +405,36 @@ static ObjFile *compile_startup_file(const char *startup_path)
     free(normalized);
     return obj;
 }
+
+ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj)
+{
+    char *startup_path;
+    ObjFile *startup_obj;
+    ObjFile *linked;
+    List objs = EMPTY_LIST;
+
+    if (!main_obj || !source_path) return main_obj;
+
+    startup_path = find_startup_path(source_path);
+    if (!startup_path) return main_obj;
+
+    startup_obj = compile_startup_file(startup_path);
+    free(startup_path);
+    if (!startup_obj) return main_obj;
+
+    list_push(&objs, startup_obj);
+    list_push(&objs, main_obj);
+    linked = obj_link(&objs);
+
+    while (!list_empty(&objs)) list_shift(&objs);
+    obj_free(startup_obj);
+
+    return linked ? linked : main_obj;
+}
+
+
+#ifdef MINITEST_IMPLEMENTATION
+#include "../minitest.h"
 
 static ObjFile *compile_one(const char *path) {
     parser_reset();

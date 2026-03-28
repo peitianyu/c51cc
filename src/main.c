@@ -195,6 +195,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    ObjFile *linked_obj = c51_link_startup(input_file, obj);
+    if (linked_obj && linked_obj != obj) {
+        obj_free(obj);
+        obj = linked_obj;
+    }
+
     /* ---- 9. 输出汇编 ---- */
     if (opt_asm) {
         c51_write_asm(out_fp, obj);

@@ -40,6 +40,7 @@ typedef struct C51GenContext {
 
 /* 主入口 */
 ObjFile *c51_gen(SSAUnit *unit);
+ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj);
 
 /* 上下文管理 */
 C51GenContext* c51_ctx_new(void);

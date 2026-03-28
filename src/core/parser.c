@@ -760,7 +760,8 @@ static bool have_redefine_var(char* var_name)
 
 static bool have_redefine_func(char* func_name) 
 {
-    return dict_get(functionenv, func_name);
+    Ast *func = dict_get(functionenv, func_name);
+    return func && func->type == AST_FUNC_DEF;
 }
 
 static Ast *read_func_args(char *fname, Ast *func_ptr)
