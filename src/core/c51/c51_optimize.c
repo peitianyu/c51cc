@@ -546,6 +546,78 @@ static int peephole_sjmp_to_next_label(List* instrs, int start) {
     return 0;
 }
 
+static bool get_next_label_name(AsmInstr* ins, char* label, size_t label_size) {
+    size_t len;
+
+    if (!ins || !ins->op || !label || label_size == 0) return false;
+    len = strlen(ins->op);
+    if (len == 0 || ins->op[len - 1] != ':') return false;
+    if (len >= label_size) return false;
+    strncpy(label, ins->op, len - 1);
+    label[len - 1] = '\0';
+    return true;
+}
+
+static int peephole_jump_to_next_label(List* instrs, int start) {
+    AsmInstr* ins;
+    AsmInstr* next;
+    const char* target;
+    char label[64];
+
+    if (start + 1 >= instrs->len) return 0;
+
+    ins = (AsmInstr*)list_get(instrs, start);
+    next = (AsmInstr*)list_get(instrs, start + 1);
+    if (!ins || !next || !ins->op || !next->op) return 0;
+    if (!(strcmp(ins->op, "SJMP") == 0 || strcmp(ins->op, "LJMP") == 0 || strcmp(ins->op, "AJMP") == 0)) return 0;
+    if (!ins->args || ins->args->len < 1) return 0;
+    target = (const char*)list_get(ins->args, 0);
+    if (!target) return 0;
+    if (!get_next_label_name(next, label, sizeof(label))) return 0;
+
+    if (strcmp(target, label) == 0) {
+        remove_instr(instrs, start);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int peephole_thread_jump_chain(List* instrs, int start) {
+    AsmInstr* ins;
+    const char* target;
+
+    if (start + 2 >= instrs->len) return 0;
+
+    ins = (AsmInstr*)list_get(instrs, start);
+    if (!ins || !ins->op) return 0;
+    if (!(strcmp(ins->op, "SJMP") == 0 || strcmp(ins->op, "LJMP") == 0 || strcmp(ins->op, "AJMP") == 0)) return 0;
+    if (!ins->args || ins->args->len < 1) return 0;
+    target = (const char*)list_get(ins->args, 0);
+    if (!target) return 0;
+
+    for (int i = start + 1; i + 1 < instrs->len; i++) {
+        AsmInstr* label_ins = (AsmInstr*)list_get(instrs, i);
+        AsmInstr* jump_ins = (AsmInstr*)list_get(instrs, i + 1);
+        char label[64];
+        const char* chained_target;
+
+        if (!get_next_label_name(label_ins, label, sizeof(label))) continue;
+        if (strcmp(label, target) != 0) continue;
+        if (!jump_ins || !jump_ins->op) return 0;
+        if (!(strcmp(jump_ins->op, "SJMP") == 0 || strcmp(jump_ins->op, "LJMP") == 0 || strcmp(jump_ins->op, "AJMP") == 0)) return 0;
+        if (!jump_ins->args || jump_ins->args->len < 1) return 0;
+        chained_target = (const char*)list_get(jump_ins->args, 0);
+        if (!chained_target || strcmp(chained_target, target) == 0) return 0;
+
+        free(ins->args->head->elem);
+        ins->args->head->elem = strdup(chained_target);
+        return 1;
+    }
+
+    return 0;
+}
+
 /* 对单个section执行窥孔优化 */
 static void optimize_section(Section* sec) {
     if (!sec || !sec->asminstrs) return;
@@ -594,6 +666,12 @@ static void optimize_section(Section* sec) {
             // FIXME: 该规则在当前寄存器分配/调用约定下仍可能误删关键MOV
             // 启用死代码删除（仅寄存器目标，且未被后续读取）
             removed = peephole_dead_code(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_thread_jump_chain(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_jump_to_next_label(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_sjmp_to_next_label(sec->asminstrs, i);

@@ -2739,8 +2739,9 @@ extern char *ast_to_string(Ast *ast);
 TEST(test, ssa_opt) {
     char infile[256];
     printf("file path for SSA optimization test: ");
-    if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
-        puts("open fail"), exit(1);
+    if (!fgets(infile, sizeof infile, stdin) || !pp_preprocess_to_stdin(strtok(infile, "\n")))
+        puts("preprocess fail"), exit(1);
+        
     set_current_filename(infile);
     SSABuild *b = ssa_build_create();
     List *toplevels = read_toplevels();

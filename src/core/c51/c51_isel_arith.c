@@ -13,6 +13,41 @@ static void store_spilled_dest_if_needed(ISelContext* isel, ValueName val, int r
     }
 }
 
+static bool value_is_zero_extended_byte_in_func(Func* func, ValueName value, ValueName* seen, int seen_count) {
+    Instr* def;
+
+    if (!func || value <= 0) return false;
+    for (int i = 0; i < seen_count; i++) {
+        if (seen[i] == value) return true;
+    }
+
+    def = find_def_instr_in_func(func, value);
+    if (!def) return false;
+    if (def->op == IROP_CONST) {
+        return (def->imm.ival & ~0xFFLL) == 0;
+    }
+    if (def->op == IROP_TRUNC) {
+        return true;
+    }
+    if (def->op == IROP_PHI && def->args) {
+        ValueName next_seen[16];
+        int next_count = seen_count;
+
+        if (next_count >= 16) return false;
+        memcpy(next_seen, seen, sizeof(ValueName) * seen_count);
+        next_seen[next_count++] = value;
+
+        for (int i = 0; i < def->args->len; i++) {
+            ValueName arg = *(ValueName*)list_get(def->args, i);
+            if (!value_is_zero_extended_byte_in_func(func, arg, next_seen, next_count)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
 void emit_const(ISelContext* isel, Instr* ins) {
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int val = (int)(ins->imm.ival & 0xFFFF);
@@ -316,13 +351,104 @@ void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
     if (size == 1) {
         if (is_imm_operand(ins, &imm)) {
             int cnt = (int)(imm & 0x1F);
+            if (cnt == 0) return;
+            /* ---- 8-bit shift 特殊情况优化 ---- */
+            bool is_unsigned = false;
+            if (ins && ins->type) {
+                is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
+            }
+            if (cnt >= 8) {
+                /* 移位量 >= 8: 结果为 0 (无符号 / 左移) 或符号扩展 (有符号右移) */
+                emit_mov(isel, "A", dst_lo, ins);
+                if (is_shr && !is_unsigned) {
+                    /* 算术右移 >=8: 结果为 0x00 或 0xFF */
+                    isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+                    isel_emit(isel, "MOV", "A", "#0", NULL);
+                    isel_emit(isel, "SUBB", "A", "#0", NULL); /* A = 0 or 0xFF */
+                } else {
+                    isel_emit(isel, "MOV", "A", "#0", NULL);
+                }
+                emit_mov(isel, dst_lo, "A", NULL);
+                return;
+            }
+            if (is_shr && cnt == 7) {
+                /* shr x, 7: 取最高位 */
+                emit_mov(isel, "A", dst_lo, ins);
+                if (is_unsigned) {
+                    /* 逻辑右移7: A = (old_A >> 7) = bit7 → RL A; ANL A, #1 */
+                    isel_emit(isel, "RL", "A", NULL, NULL);
+                    isel_emit(isel, "ANL", "A", "#1", NULL);
+                } else {
+                    /* 算术右移7: 结果 0x00 或 0xFF */
+                    isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+                    isel_emit(isel, "MOV", "A", "#0", NULL);
+                    isel_emit(isel, "SUBB", "A", "#0", NULL);
+                }
+                emit_mov(isel, dst_lo, "A", NULL);
+                return;
+            }
+            if (!is_shr && cnt == 7) {
+                /* shl x, 7: 取最低位放到 bit7 → RR A; ANL A, #0x80 */
+                emit_mov(isel, "A", dst_lo, ins);
+                isel_emit(isel, "RR", "A", NULL, NULL);
+                isel_emit(isel, "ANL", "A", "#128", NULL);
+                emit_mov(isel, dst_lo, "A", NULL);
+                return;
+            }
+            if (cnt == 4) {
+                /* 移位4: 用 SWAP + 掩码 */
+                emit_mov(isel, "A", dst_lo, ins);
+                isel_emit(isel, "SWAP", "A", NULL, NULL);
+                if (is_shr) {
+                    if (is_unsigned) {
+                        isel_emit(isel, "ANL", "A", "#0FH", NULL);
+                    } else {
+                        /* 算术右移4: SWAP 后高4位是符号扩展 */
+                        char* l_pos = isel_new_label(isel, "Lshr4_pos");
+                        char lb_pos[64];
+                        snprintf(lb_pos, sizeof(lb_pos), "%s:", l_pos);
+                        isel_emit(isel, "ANL", "A", "#0FH", NULL);
+                        isel_emit(isel, "JNB", "ACC.3", l_pos, NULL);
+                        isel_emit(isel, "ORL", "A", "#0F0H", NULL);
+                        isel_emit(isel, lb_pos, NULL, NULL, NULL);
+                        free(l_pos);
+                    }
+                } else {
+                    isel_emit(isel, "ANL", "A", "#0F0H", NULL);
+                }
+                emit_mov(isel, dst_lo, "A", NULL);
+                return;
+            }
+            if (is_shr && is_unsigned && cnt >= 5) {
+                /* 无符号右移5-6: 用左旋转 (8-cnt) 次 + 掩码更高效 */
+                int rot = 8 - cnt;
+                emit_mov(isel, "A", dst_lo, ins);
+                for (int i = 0; i < rot; i++) {
+                    isel_emit(isel, "RL", "A", NULL, NULL);
+                }
+                char mask_str[16];
+                snprintf(mask_str, sizeof(mask_str), "#%d", (1 << (8 - cnt)) - 1);
+                isel_emit(isel, "ANL", "A", mask_str, NULL);
+                emit_mov(isel, dst_lo, "A", NULL);
+                return;
+            }
+            if (!is_shr && cnt >= 5) {
+                /* 左移5-6: 用右旋转 (8-cnt) 次 + 掩码更高效 */
+                int rot = 8 - cnt;
+                emit_mov(isel, "A", dst_lo, ins);
+                for (int i = 0; i < rot; i++) {
+                    isel_emit(isel, "RR", "A", NULL, NULL);
+                }
+                char mask_str[16];
+                snprintf(mask_str, sizeof(mask_str), "#%d", (0xFF << cnt) & 0xFF);
+                isel_emit(isel, "ANL", "A", mask_str, NULL);
+                emit_mov(isel, dst_lo, "A", NULL);
+                return;
+            }
+            /* 一般情况: 1-3 次移位，逐次生成 */
             for (int i = 0; i < cnt; i++) {
                 emit_mov(isel, "A", dst_lo, ins);
                 if (is_shr) {
-                    bool is_unsigned = false;
-                    if (ins && ins->type) {
-                        is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
-                    }
                     if (is_unsigned) {
                         isel_emit(isel, "CLR", "C", NULL, NULL);
                     } else {
@@ -1211,6 +1337,55 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
 void emit_trunc(ISelContext* isel, Instr* ins) {
     ValueName src = get_src1_value(ins);
     int src_size = get_value_size(isel, src);
+
+    {
+        Func* func = (isel && isel->ctx) ? isel->ctx->current_func : NULL;
+        ValueName seen_values[16];
+        Instr* src_def = func ? find_def_instr_in_func(func, src) : NULL;
+        if (src_def && src_def->op == IROP_OR) {
+            ValueName lhs = get_src1_value(src_def);
+            ValueName rhs = get_src2_value(src_def);
+            Instr* lhs_def = find_def_instr_in_func(func, lhs);
+            Instr* rhs_def = find_def_instr_in_func(func, rhs);
+            if (lhs_def && rhs_def &&
+                ((lhs_def->op == IROP_SHL && rhs_def->op == IROP_SHR) ||
+                 (lhs_def->op == IROP_SHR && rhs_def->op == IROP_SHL))) {
+                ValueName rot_src_l = get_src1_value(lhs_def);
+                ValueName rot_src_r = get_src1_value(rhs_def);
+                int64_t lhs_cnt = 0;
+                int64_t rhs_cnt = 0;
+
+                if (rot_src_l == rot_src_r && rot_src_l > 0 &&
+                    (is_imm_operand(lhs_def, &lhs_cnt) || try_get_value_const(isel, get_src2_value(lhs_def), &lhs_cnt)) &&
+                    (is_imm_operand(rhs_def, &rhs_cnt) || try_get_value_const(isel, get_src2_value(rhs_def), &rhs_cnt))) {
+                    lhs_cnt &= 7;
+                    rhs_cnt &= 7;
+                    if (((lhs_cnt + rhs_cnt) & 7) == 0 && lhs_cnt != 0 && rhs_cnt != 0) {
+                        if (value_is_zero_extended_byte_in_func(func, rot_src_l, seen_values, 0)) {
+                            int dst_reg = safe_alloc_reg_for_value(isel, ins->dest, 1);
+                            int rot_count = (lhs_def->op == IROP_SHL) ? (int)lhs_cnt : (int)rhs_cnt;
+                            bool rot_left = lhs_def->op == IROP_SHL;
+                            const char* src_lo = isel_get_lo_reg(isel, rot_src_l);
+
+                            if (dst_reg >= 0) {
+                                emit_mov(isel, "A", src_lo, ins);
+                                if (rot_count > 4) {
+                                    rot_count = 8 - rot_count;
+                                    rot_left = !rot_left;
+                                }
+                                for (int i = 0; i < rot_count; i++) {
+                                    isel_emit(isel, rot_left ? "RL" : "RR", "A", NULL, NULL);
+                                }
+                                emit_mov(isel, isel_reg_name(dst_reg), "A", NULL);
+                                store_spilled_dest_if_needed(isel, ins->dest, dst_reg, 1, ins);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if (src_size == 2) {
         int src_base = isel_get_value_reg(isel, src);

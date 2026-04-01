@@ -8,6 +8,11 @@ extern const int param_regs_char[];
 extern const int param_regs_int_h[];
 extern const int param_regs_int_l[];
 
+enum {
+    C51_ALLOCATABLE_REG_MIN = 0,
+    C51_ALLOCATABLE_REG_MAX = 5,
+};
+
 /* ============================================================
  * 线性扫描寄存器分配数据结构
  * ============================================================ */

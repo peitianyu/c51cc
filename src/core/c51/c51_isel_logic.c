@@ -72,6 +72,169 @@ static void emit_far_cond_jump2_same(ISelContext* isel, const char* op1, const c
     free(l_taken);
 }
 
+static void emit_block_jump(ISelContext* isel, Instr* ins, int block_id) {
+    char target[32];
+    block_label_name(target, sizeof(target), block_id);
+    emit_phi_copies_for_edge(isel, isel->current_block_id, block_id, ins);
+    isel_emit(isel, "LJMP", target, NULL, NULL);
+}
+
+static void emit_cond_branch_to_blocks(ISelContext* isel, const char* op,
+                                       int true_id, int false_id,
+                                       Instr* ins, const char* ssa) {
+    char* l_true = isel_new_label(isel, "Lcmp_true");
+    isel_emit(isel, op, l_true, NULL, ssa);
+    emit_block_jump(isel, ins, false_id);
+    isel_emit_label(isel, l_true);
+    emit_block_jump(isel, ins, true_id);
+    free(l_true);
+}
+
+static void emit_bit_branch_to_blocks(ISelContext* isel, const char* op, const char* bit,
+                                      int true_id, int false_id,
+                                      Instr* ins, const char* ssa) {
+    char* l_true = isel_new_label(isel, "Lcmp_true");
+    isel_emit(isel, op, bit, l_true, ssa);
+    emit_block_jump(isel, ins, false_id);
+    isel_emit_label(isel, l_true);
+    emit_block_jump(isel, ins, true_id);
+    free(l_true);
+}
+
+static bool emit_cmp_zero_branch(ISelContext* isel, Instr* ins, ValueName value,
+                                 bool want_positive, bool want_negative,
+                                 bool unsigned_cmp, int true_id, int false_id) {
+    int width = get_value_size(isel, value) >= 2 ? 2 : 1;
+    const char* lo = width == 2 ? get_cmp_lo_reg(isel, value, 2) : isel_get_lo_reg(isel, value);
+    const char* hi = width == 2 ? get_cmp_hi_reg(isel, value, 2) : NULL;
+
+    if (unsigned_cmp) {
+        if (want_negative) {
+            emit_block_jump(isel, ins, false_id);
+            return true;
+        }
+
+        char* ssa = instr_to_ssa_str(ins);
+        emit_mov(isel, "A", width == 2 ? hi : lo, ins);
+        if (width == 2) {
+            isel_emit(isel, "ORL", "A", lo, NULL);
+        }
+        emit_cond_branch_to_blocks(isel, "JNZ", true_id, false_id, ins, ssa);
+        free(ssa);
+        return true;
+    }
+
+    if (want_negative) {
+        char* ssa = instr_to_ssa_str(ins);
+        emit_mov(isel, "A", width == 2 ? hi : lo, ins);
+        emit_bit_branch_to_blocks(isel, "JB", "ACC.7", true_id, false_id, ins, ssa);
+        free(ssa);
+        return true;
+    }
+
+    if (want_positive) {
+        if (width == 1) {
+            char* l_zero = isel_new_label(isel, "Lcmp_zero_zero");
+            char* ssa = instr_to_ssa_str(ins);
+            emit_mov(isel, "A", lo, ins);
+            isel_emit(isel, "JZ", l_zero, NULL, ssa);
+            free(ssa);
+            emit_bit_branch_to_blocks(isel, "JB", "ACC.7", false_id, true_id, ins, NULL);
+            isel_emit_label(isel, l_zero);
+            emit_block_jump(isel, ins, false_id);
+            free(l_zero);
+            return true;
+        }
+
+        char* l_hi_zero = isel_new_label(isel, "Lcmp_zero_hi_zero");
+        char* ssa = instr_to_ssa_str(ins);
+        emit_mov(isel, "A", hi, ins);
+        isel_emit(isel, "JZ", l_hi_zero, NULL, ssa);
+        free(ssa);
+        emit_bit_branch_to_blocks(isel, "JB", "ACC.7", false_id, true_id, ins, NULL);
+        isel_emit_label(isel, l_hi_zero);
+        emit_mov(isel, "A", lo, NULL);
+        emit_cond_branch_to_blocks(isel, "JNZ", true_id, false_id, ins, NULL);
+        free(l_hi_zero);
+        return true;
+    }
+
+    return false;
+}
+
+static bool match_rotate8_idiom(ISelContext* isel, ValueName lhs, ValueName rhs,
+                                ValueName* out_src, int* out_count, bool* out_left) {
+    Func* func;
+    Instr* lhs_def;
+    Instr* rhs_def;
+    int64_t lhs_cnt = 0;
+    int64_t rhs_cnt = 0;
+    ValueName lhs_src;
+    ValueName rhs_src;
+
+    if (!isel || !isel->ctx || !isel->ctx->current_func) return false;
+    func = isel->ctx->current_func;
+    lhs_def = find_def_instr_in_func(func, lhs);
+    rhs_def = find_def_instr_in_func(func, rhs);
+    if (!lhs_def || !rhs_def) return false;
+    if (!((lhs_def->op == IROP_SHL && rhs_def->op == IROP_SHR) ||
+          (lhs_def->op == IROP_SHR && rhs_def->op == IROP_SHL))) {
+        return false;
+    }
+
+    lhs_src = get_src1_value(lhs_def);
+    rhs_src = get_src1_value(rhs_def);
+    if (lhs_src <= 0 || rhs_src <= 0 || lhs_src != rhs_src) return false;
+    if (get_value_size(isel, lhs_src) != 1) return false;
+
+    if (!(is_imm_operand(lhs_def, &lhs_cnt) || try_get_value_const(isel, get_src2_value(lhs_def), &lhs_cnt))) return false;
+    if (!(is_imm_operand(rhs_def, &rhs_cnt) || try_get_value_const(isel, get_src2_value(rhs_def), &rhs_cnt))) return false;
+
+    lhs_cnt &= 7;
+    rhs_cnt &= 7;
+    if (((lhs_cnt + rhs_cnt) & 7) != 0) return false;
+    if (lhs_cnt == 0 || rhs_cnt == 0) return false;
+
+    if (lhs_def->op == IROP_SHL) {
+        if (out_left) *out_left = true;
+        if (out_count) *out_count = (int)lhs_cnt;
+    } else {
+        if (out_left) *out_left = false;
+        if (out_count) *out_count = (int)lhs_cnt;
+    }
+    if (out_src) *out_src = lhs_src;
+    return true;
+}
+
+static bool value_is_zero_extended_byte_logic(Func* func, ValueName value, ValueName* seen, int seen_count) {
+    Instr* def;
+
+    if (!func || value <= 0) return false;
+    for (int i = 0; i < seen_count; i++) {
+        if (seen[i] == value) return true;
+    }
+
+    def = find_def_instr_in_func(func, value);
+    if (!def) return false;
+    if (def->op == IROP_CONST) return (def->imm.ival & ~0xFFLL) == 0;
+    if (def->op == IROP_TRUNC) return true;
+    if (def->op == IROP_PHI && def->args) {
+        ValueName next_seen[16];
+        int next_count = seen_count;
+        if (next_count >= 16) return false;
+        memcpy(next_seen, seen, sizeof(ValueName) * seen_count);
+        next_seen[next_count++] = value;
+        for (int i = 0; i < def->args->len; i++) {
+            ValueName arg = *(ValueName*)list_get(def->args, i);
+            if (!value_is_zero_extended_byte_logic(func, arg, next_seen, next_count)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
 void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mnem) {
     ValueName src1 = get_src1_value(ins);
     int size = ins && ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
@@ -88,6 +251,65 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
         temp_result = phys_reg >= 0;
     }
     if (phys_reg < 0) phys_reg = 0;
+
+    if (strcmp(op_mnem, "ORL") == 0 && size == 2 && next && next->op == IROP_TRUNC && get_src1_value(next) == ins->dest) {
+        Func* func = (isel && isel->ctx) ? isel->ctx->current_func : NULL;
+        ValueName rot_src = -1;
+        int rot_count = 0;
+        bool rot_left = true;
+        ValueName seen_values[16];
+        if (match_rotate8_idiom(isel, src1, src2, &rot_src, &rot_count, &rot_left) &&
+            value_is_zero_extended_byte_logic(func, rot_src, seen_values, 0)) {
+            int dst_reg = safe_alloc_reg_for_value(isel, next->dest, 1);
+            const char* src_lo = isel_get_lo_reg(isel, rot_src);
+            if (dst_reg >= 0) {
+                int effective = rot_count & 7;
+                char* ssa = instr_to_ssa_str(ins);
+                emit_mov(isel, "A", src_lo, ins);
+                if (effective > 4) {
+                    effective = 8 - effective;
+                    rot_left = !rot_left;
+                }
+                for (int i = 0; i < effective; i++) {
+                    isel_emit(isel, rot_left ? "RL" : "RR", "A", NULL, (i == 0) ? ssa : NULL);
+                }
+                free(ssa);
+                emit_mov(isel, isel_reg_name(dst_reg), "A", NULL);
+                emit_store_spilled_result(isel, next->dest, dst_reg, 1, next);
+                next->op = IROP_NOP;
+                return;
+            }
+        }
+    }
+
+    if (strcmp(op_mnem, "ORL") == 0 && size == 1 && !src2_is_imm) {
+        ValueName rot_src = -1;
+        int rot_count = 0;
+        bool rot_left = true;
+        if (match_rotate8_idiom(isel, src1, src2, &rot_src, &rot_count, &rot_left)) {
+            const char* dst_lo = isel_reg_name(phys_reg);
+            int effective = rot_count & 7;
+            char* ssa = instr_to_ssa_str(ins);
+
+            emit_mov(isel, "A", isel_get_lo_reg(isel, rot_src), ins);
+            if (effective != 0) {
+                if (effective > 4) {
+                    effective = 8 - effective;
+                    rot_left = !rot_left;
+                }
+                for (int i = 0; i < effective; i++) {
+                    isel_emit(isel, rot_left ? "RL" : "RR", "A", NULL, (i == 0) ? ssa : NULL);
+                }
+            }
+            free(ssa);
+            emit_mov(isel, dst_lo, "A", ins);
+            emit_store_spilled_result(isel, ins->dest, phys_reg, size, ins);
+            if (temp_result) {
+                free_temp_reg(isel, phys_reg, size);
+            }
+            return;
+        }
+    }
 
     const char* dst_lo = isel_reg_name(phys_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(phys_reg);
@@ -731,9 +953,36 @@ static void emit_signed_cmp16_branch(ISelContext* isel, Instr* ins, ValueName lh
     free(l_check_low);
 }
 
+static Ctype* get_compare_operand_type(ISelContext* isel, ValueName value) {
+    Ctype* type = get_value_type(isel, value);
+    if (type) return type;
+    if (!isel || !isel->ctx || !isel->ctx->current_func || value <= 0) return NULL;
+
+    Instr* def = find_def_instr_in_func(isel->ctx->current_func, value);
+    if (def && def->type) return def->type;
+    return NULL;
+}
+
+static bool type_prefers_unsigned_compare(Ctype* type) {
+    if (!type) return false;
+    if (type->type == CTYPE_PTR || type->type == CTYPE_BOOL) return true;
+    return get_attr(type->attr).ctype_unsigned;
+}
+
 bool is_unsigned_compare(ISelContext* isel, ValueName a, ValueName b) {
-    /* heuristic—assume unsigned compare for now if types indicate so; fallback false */
-    (void)isel; (void)a; (void)b;
+    Ctype* ta = get_compare_operand_type(isel, a);
+    Ctype* tb = get_compare_operand_type(isel, b);
+
+    if (type_prefers_unsigned_compare(ta)) return true;
+    if (type_prefers_unsigned_compare(tb)) return true;
+
+    if (!ta && try_get_value_const(isel, a, NULL) && tb) {
+        return type_prefers_unsigned_compare(tb);
+    }
+    if (!tb && try_get_value_const(isel, b, NULL) && ta) {
+        return type_prefers_unsigned_compare(ta);
+    }
+
     return false;
 }
 
@@ -754,6 +1003,40 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
     }
     if (dst_reg < 0) dst_reg = 0;
     int w = (get_value_size(isel, lhs) == 2 || get_value_size(isel, rhs) == 2) ? 2 : 1;
+
+    if (next && next->op == IROP_BR && next->args && next->args->len > 0) {
+        ValueName cond = *(ValueName*)list_get(next->args, 0);
+        if (cond == ins->dest) {
+            int64_t lhs_const = 0;
+            int64_t rhs_const = 0;
+            bool lhs_is_zero = try_get_value_const(isel, lhs, &lhs_const) && lhs_const == 0;
+            bool rhs_is_zero = try_get_value_const(isel, rhs, &rhs_const) && rhs_const == 0;
+            if (lhs_is_zero || rhs_is_zero) {
+                int id_t = parse_block_id((const char*)list_get(next->labels, 0));
+                int id_f = parse_block_id((const char*)list_get(next->labels, 1));
+                if (id_t >= 0 && id_f >= 0) {
+                    ValueName value = lhs_is_zero ? rhs : lhs;
+                    bool want_positive = false;
+                    bool want_negative = false;
+
+                    if (rhs_is_zero) {
+                        want_positive = is_gt;
+                        want_negative = !is_gt;
+                    } else {
+                        want_positive = !is_gt;
+                        want_negative = is_gt;
+                    }
+
+                    if (emit_cmp_zero_branch(isel, ins, value, want_positive, want_negative,
+                                             unsigned_cmp, id_t, id_f)) {
+                        next->op = IROP_NOP;
+                        if (temp_result) free_temp_reg(isel, dst_reg, size);
+                        return;
+                    }
+                }
+            }
+        }
+    }
 
     if (!unsigned_cmp && next && next->op == IROP_BR && next->args && next->args->len > 0) {
         ValueName cond = *(ValueName*)list_get(next->args, 0);

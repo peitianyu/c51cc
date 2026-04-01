@@ -2611,8 +2611,8 @@ void ssa_print(FILE *fp, SSAUnit *unit) {
 TEST(test, ssa) {
     char infile[256];
     printf("file path: ");
-    if (!fgets(infile, sizeof infile, stdin) || !freopen(strtok(infile, "\n"), "r", stdin))
-        puts("open fail"), exit(1);
+    if (!fgets(infile, sizeof infile, stdin) || !pp_preprocess_to_stdin(strtok(infile, "\n")))
+        puts("preprocess fail"), exit(1);
 
     set_current_filename(infile);
     

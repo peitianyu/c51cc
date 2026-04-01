@@ -49,8 +49,8 @@ typedef struct {
 
 /* Keil约定下，R6/R7主要承担返回值与参数传递，
  * 临时值优先使用 R0-R5，避免与ABI关键寄存器冲突。 */
-static const int k_temp_reg_min = 0;
-static const int k_temp_reg_max = 7;
+static const int k_temp_reg_min = C51_ALLOCATABLE_REG_MIN;
+static const int k_temp_reg_max = C51_ALLOCATABLE_REG_MAX;
 
 /* 比较函数：按start时间排序活跃区间 */
 static int compare_intervals(const void* a, const void* b) {
@@ -143,6 +143,19 @@ static int get_value_def_idx(ValueName val, Func* func, int* idx_map) {
     return 0;
 }
 
+static int get_value_interval_size(C51GenContext* genctx, Func* func, ValueName val) {
+    if (genctx && genctx->value_type) {
+        char* type_key = int_to_key(val);
+        Ctype* recorded = (Ctype*)dict_get(genctx->value_type, type_key);
+        free(type_key);
+        if (recorded) return c51_abi_type_size(recorded);
+    }
+
+    Instr* def = find_def_instr_in_func(func, val);
+    if (def && def->type) return c51_abi_type_size(def->type);
+    return 1;
+}
+
 /* 为函数的所有指令计算活跃区间 */
 void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext* genctx) {
     if (!lsc || !func) return;
@@ -151,13 +164,23 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
     const int kMaxValue = 1000000;
     lsc->interval_count = 0;
 
+    int max_block_id = 0;
+    for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
+        Block* block = iter_next(&bit);
+        if (block && (int)block->id > max_block_id) max_block_id = (int)block->id;
+    }
+
     int* val_to_iv = malloc(sizeof(int) * kMaxValue);
     for (int i = 0; i < kMaxValue; i++) val_to_iv[i] = -1;
+
+    int* block_edge_idx = malloc(sizeof(int) * (max_block_id + 1));
+    for (int i = 0; i <= max_block_id; i++) block_edge_idx[i] = -1;
 
     int instr_idx = 0;
 
     for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
         Block* block = iter_next(&bit);
+        int block_start_idx = instr_idx;
 
         /* PHI 和普通指令按线性顺序统一处理 */
         for (int pass = 0; pass < 2; pass++) {
@@ -242,9 +265,62 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
                 instr_idx++;
             }
         }
+
+        if (block && block->id <= (uint32_t)max_block_id) {
+            block_edge_idx[block->id] = (instr_idx > block_start_idx) ? (instr_idx - 1) : block_start_idx;
+        }
+    }
+
+    for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
+        Block* block = iter_next(&bit);
+        if (!block || !block->phis) continue;
+
+        for (Iter it = list_iter(block->phis); !iter_end(it);) {
+            Instr* ins = iter_next(&it);
+            if (!ins || ins->op != IROP_PHI || !ins->args || !ins->labels) continue;
+
+            int edge_count = ins->args->len < ins->labels->len ? ins->args->len : ins->labels->len;
+            for (int i = 0; i < edge_count; i++) {
+                ValueName* pv = list_get(ins->args, i);
+                const char* pred_label = list_get(ins->labels, i);
+                if (!pv || *pv <= 0 || *pv >= kMaxValue || !pred_label) continue;
+
+                int pred_id = parse_block_id(pred_label);
+                if (pred_id < 0 || pred_id > max_block_id) continue;
+
+                int use_idx = block_edge_idx[pred_id];
+                if (use_idx < 0) continue;
+
+                int iv_idx = val_to_iv[*pv];
+                if (iv_idx < 0) {
+                    if (lsc->interval_count >= lsc->interval_capacity) {
+                        lsc->interval_capacity *= 2;
+                        lsc->intervals = realloc(lsc->intervals,
+                            sizeof(LiveInterval) * lsc->interval_capacity);
+                    }
+
+                    iv_idx = lsc->interval_count++;
+                    val_to_iv[*pv] = iv_idx;
+
+                    LiveInterval* iv = &lsc->intervals[iv_idx];
+                    iv->val = *pv;
+                    iv->start = use_idx;
+                    iv->end = use_idx;
+                    iv->size = get_value_interval_size(genctx, func, *pv);
+                    iv->reg = -1;
+                    iv->spill_slot = -1;
+                    iv->is_param = false;
+                } else {
+                    LiveInterval* iv = &lsc->intervals[iv_idx];
+                    if (use_idx < iv->start) iv->start = use_idx;
+                    if (use_idx > iv->end) iv->end = use_idx;
+                }
+            }
+        }
     }
 
     free(val_to_iv);
+    free(block_edge_idx);
 }
 
 /* 释放寄存器中过期的值 */

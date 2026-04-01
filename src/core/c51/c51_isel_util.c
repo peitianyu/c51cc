@@ -67,8 +67,8 @@ int reg_index_from_name(const char* s) {
 
 int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
     if (!isel) return -2;
-    for (int r = 0; r < 8; r++) {
-        if (r + size - 1 > 7) continue;
+    for (int r = C51_ALLOCATABLE_REG_MIN; r <= C51_ALLOCATABLE_REG_MAX; r++) {
+        if (r + size - 1 > C51_ALLOCATABLE_REG_MAX) continue;
         bool ok = true;
         for (int j = 0; j < size; j++) {
             if (isel->reg_busy[r + j]) { ok = false; break; }
