@@ -20,33 +20,9 @@
 #include "cc.h"
 
 /* 跨平台临时文件辅助 */
-static FILE *pp_mkstemp(char *path, size_t path_size)
+static FILE *pp_tmpfile(void)
 {
-#ifdef _WIN32
-    char tmp_dir[MAX_PATH];
-    if (!GetTempPathA(MAX_PATH, tmp_dir)) return NULL;
-    char tmp_file[MAX_PATH];
-    if (!GetTempFileNameA(tmp_dir, "mzpp", 0, tmp_file)) return NULL;
-    strncpy(path, tmp_file, path_size);
-    path[path_size - 1] = '\0';
-    return fopen(path, "w");
-#else
-    snprintf(path, path_size, "/tmp/mazucc_pp_XXXXXX");
-    int fd = mkstemp(path);
-    if (fd < 0) return NULL;
-    FILE *fp = fdopen(fd, "w");
-    if (!fp) { close(fd); return NULL; }
-    return fp;
-#endif
-}
-
-static void pp_unlink(const char *path)
-{
-#ifdef _WIN32
-    _unlink(path);
-#else
-    unlink(path);
-#endif
+    return tmpfile();
 }
 
 #define PP_LINE_SIZE 4096
@@ -954,10 +930,12 @@ static long pp_eval_if_expr(PPContext *ctx, const char *args)
 static FILE *open_include_file(PPContext *ctx, const char *filename, char **fullpath)
 {
     FILE *fp = NULL;
+    char *resolved = NULL;
     
-    fp = fopen(filename, "r");
+    fp = c51cc_fopen(filename, "r");
     if (fp) {
-        *fullpath = strdup(filename);
+        resolved = c51cc_resolve_path(filename);
+        *fullpath = resolved ? resolved : strdup(filename);
         return fp;
     }
     
@@ -965,9 +943,10 @@ static FILE *open_include_file(PPContext *ctx, const char *filename, char **full
         char *path = iter_next(&i);
         char buf[1024];
         snprintf(buf, sizeof(buf), "%s/%s", path, filename);
-        fp = fopen(buf, "r");
+        fp = c51cc_fopen(buf, "r");
         if (fp) {
-            *fullpath = strdup(buf);
+            resolved = c51cc_resolve_path(buf);
+            *fullpath = resolved ? resolved : strdup(buf);
             return fp;
         }
     }
@@ -1989,15 +1968,13 @@ int pp_global_current_line(void)
 /* 高级接口：预处理文件并重定向到stdin */
 bool pp_preprocess_to_stdin(const char *filename)
 {
-    char tmpfile[512];
-    FILE *tmp = pp_mkstemp(tmpfile, sizeof(tmpfile));
+    FILE *tmp = pp_tmpfile();
     if (!tmp) return false;
     
     pp_global_init();
     if (!pp_global_push_file(filename)) {
         fclose(tmp);
         pp_global_free();
-        pp_unlink(tmpfile);
         return false;
     }
     
@@ -2019,12 +1996,15 @@ bool pp_preprocess_to_stdin(const char *filename)
     }
     if (last_file) free(last_file);
     
-    fclose(tmp);
+    fflush(tmp);
+    rewind(tmp);
     pp_global_free();
-    
-    bool ok = freopen(tmpfile, "r", stdin) != NULL;
-    pp_unlink(tmpfile);
-    return ok;
+
+#ifdef _WIN32
+    return _dup2(_fileno(tmp), _fileno(stdin)) == 0;
+#else
+    return dup2(fileno(tmp), fileno(stdin)) == 0;
+#endif
 }
 
 #ifdef MINITEST_IMPLEMENTATION

@@ -493,6 +493,59 @@ int get_value_size(ISelContext* isel, ValueName val) {
     return 1;
 }
 
+const char* isel_get_extended_lo_reg(ISelContext* isel, ValueName val, int width) {
+    int actual_size = get_value_size(isel, val);
+    if (width <= 1 || actual_size <= 1) return isel_get_lo_reg(isel, val);
+
+    int base_reg = isel_get_value_reg(isel, val);
+    if (base_reg == -2) return "A";
+    if (base_reg == -3) {
+        int reg = isel_reload_spill(isel, val, width, NULL);
+        if (reg >= 0) return isel_reg_name(reg + 1);
+        {
+            const char* sym = lookup_value_addr_symbol(isel, val);
+            if (sym) {
+                emit_load_symbol_byte(isel, sym, 0, "A", NULL);
+                return "A";
+            }
+        }
+        return "A";
+    }
+    if (base_reg < 0) return "R7";
+    return isel_reg_name(base_reg + 1);
+}
+
+const char* isel_get_extended_hi_reg(ISelContext* isel, ValueName val, int width) {
+    int actual_size = get_value_size(isel, val);
+    if (width <= 1) return isel_get_hi_reg(isel, val);
+
+    if (actual_size <= 1) {
+        Ctype* type = get_value_type(isel, val);
+        if (type) {
+            CtypeAttr attr = get_attr(type->attr);
+            if (attr.ctype_unsigned || type->type == CTYPE_BOOL) return "#0";
+        }
+        return "#0";
+    }
+
+    int base_reg = isel_get_value_reg(isel, val);
+    if (base_reg == -2) return "A";
+    if (base_reg == -3) {
+        int reg = isel_reload_spill(isel, val, width, NULL);
+        if (reg >= 0) return isel_reg_name(reg);
+        {
+            const char* sym = lookup_value_addr_symbol(isel, val);
+            if (sym) {
+                emit_load_symbol_byte(isel, sym, 1, "A", NULL);
+                return "A";
+            }
+        }
+        return "A";
+    }
+    if (base_reg < 0) return "R6";
+    return isel_reg_name(base_reg);
+}
+
 Ctype* get_value_type(ISelContext* isel, ValueName val) {
     if (!isel || !isel->ctx || !isel->ctx->value_type) return NULL;
     char* key = int_to_key(val);

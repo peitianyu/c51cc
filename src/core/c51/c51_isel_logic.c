@@ -36,42 +36,40 @@ static void free_saved_cmp_operand(ISelContext* isel, int temp_reg) {
     }
 }
 
-static const char* get_cmp_lo_reg(ISelContext* isel, ValueName val, int width) {
-    if (width <= 1) return isel_get_lo_reg(isel, val);
+#define get_cmp_lo_reg isel_get_extended_lo_reg
+#define get_cmp_hi_reg isel_get_extended_hi_reg
 
-    int base_reg = isel_get_value_reg(isel, val);
-    if (base_reg == -2) return "A";
-    if (base_reg == -3) {
-        int reg = isel_reload_spill(isel, val, width, NULL);
-        if (reg >= 0) return isel_reg_name(reg + 1);
-        const char* sym = lookup_value_addr_symbol(isel, val);
-        if (sym) {
-            emit_load_symbol_byte(isel, sym, 0, "A", NULL);
-            return "A";
-        }
-        return "A";
-    }
-    if (base_reg < 0) return "R7";
-    return isel_reg_name(base_reg + 1);
+static void emit_far_cond_jump1(ISelContext* isel, const char* op, int taken_id, int other_id,
+                                Instr* ins, const char* ssa) {
+    char target_taken[32], target_other[32];
+    block_label_name(target_taken, sizeof(target_taken), taken_id);
+    block_label_name(target_other, sizeof(target_other), other_id);
+
+    char* l_taken = isel_new_label(isel, "Lcmp_far_taken");
+    isel_emit(isel, op, l_taken, NULL, ssa);
+    emit_phi_copies_for_edge(isel, isel->current_block_id, other_id, ins);
+    isel_emit(isel, "LJMP", target_other, NULL, NULL);
+    isel_emit_label(isel, l_taken);
+    emit_phi_copies_for_edge(isel, isel->current_block_id, taken_id, ins);
+    isel_emit(isel, "LJMP", target_taken, NULL, NULL);
+    free(l_taken);
 }
 
-static const char* get_cmp_hi_reg(ISelContext* isel, ValueName val, int width) {
-    if (width <= 1) return isel_get_hi_reg(isel, val);
+static void emit_far_cond_jump2_same(ISelContext* isel, const char* op1, const char* op2,
+                                     int taken_id, int other_id, Instr* ins, const char* ssa1) {
+    char target_taken[32], target_other[32];
+    block_label_name(target_taken, sizeof(target_taken), taken_id);
+    block_label_name(target_other, sizeof(target_other), other_id);
 
-    int base_reg = isel_get_value_reg(isel, val);
-    if (base_reg == -2) return "A";
-    if (base_reg == -3) {
-        int reg = isel_reload_spill(isel, val, width, NULL);
-        if (reg >= 0) return isel_reg_name(reg);
-        const char* sym = lookup_value_addr_symbol(isel, val);
-        if (sym) {
-            emit_load_symbol_byte(isel, sym, 1, "A", NULL);
-            return "A";
-        }
-        return "A";
-    }
-    if (base_reg < 0) return "R6";
-    return isel_reg_name(base_reg);
+    char* l_taken = isel_new_label(isel, "Lcmp_far_taken");
+    isel_emit(isel, op1, l_taken, NULL, ssa1);
+    isel_emit(isel, op2, l_taken, NULL, NULL);
+    emit_phi_copies_for_edge(isel, isel->current_block_id, other_id, ins);
+    isel_emit(isel, "LJMP", target_other, NULL, NULL);
+    isel_emit_label(isel, l_taken);
+    emit_phi_copies_for_edge(isel, isel->current_block_id, taken_id, ins);
+    isel_emit(isel, "LJMP", target_taken, NULL, NULL);
+    free(l_taken);
 }
 
 void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mnem) {
@@ -235,13 +233,13 @@ void emit_ne(ISelContext* isel, Instr* ins, Instr* next) {
         int src1_hi_tmp = -1;
         int src2_lo_tmp = -1;
         int src2_hi_tmp = -1;
-        const char* src1_lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, src1), &src1_lo_tmp);
-        const char* src1_hi = save_acc_operand_for_cmp(isel, isel_get_hi_reg(isel, src1), &src1_hi_tmp);
+        const char* src1_lo = save_acc_operand_for_cmp(isel, isel_get_extended_lo_reg(isel, src1, 2), &src1_lo_tmp);
+        const char* src1_hi = save_acc_operand_for_cmp(isel, isel_get_extended_hi_reg(isel, src1, 2), &src1_hi_tmp);
         const char* src2_lo = NULL;
         const char* src2_hi = NULL;
 
         if (!src2_is_imm) {
-            src2_lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, src2), &src2_lo_tmp);
+            src2_lo = save_acc_operand_for_cmp(isel, isel_get_extended_lo_reg(isel, src2, 2), &src2_lo_tmp);
         }
 
         emit_mov(isel, "A", src1_lo, ins);
@@ -256,7 +254,7 @@ void emit_ne(ISelContext* isel, Instr* ins, Instr* next) {
         }
 
         if (!src2_is_imm) {
-            src2_hi = save_acc_operand_for_cmp(isel, isel_get_hi_reg(isel, src2), &src2_hi_tmp);
+            src2_hi = save_acc_operand_for_cmp(isel, isel_get_extended_hi_reg(isel, src2, 2), &src2_hi_tmp);
         }
         emit_mov(isel, "A", src1_hi, NULL);
         if (src2_is_imm) {
@@ -385,8 +383,8 @@ void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
     snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
-    const char* s2_lo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, src2));
-    const char* s1_lo = isel_get_lo_reg(isel, src1);
+    const char* s2_lo = save_acc_operand_in_b(isel, isel_get_extended_lo_reg(isel, src2, 2));
+    const char* s1_lo = isel_get_extended_lo_reg(isel, src1, 2);
     emit_mov(isel, "A", s1_lo, ins);
     {
         char arg2[64];
@@ -395,8 +393,8 @@ void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
     }
 
     if (get_value_size(isel, src1) == 2 || get_value_size(isel, src2) == 2) {
-        const char* s2_hi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, src2));
-        const char* s1_hi = isel_get_hi_reg(isel, src1);
+        const char* s2_hi = save_acc_operand_in_b(isel, isel_get_extended_hi_reg(isel, src2, 2));
+        const char* s1_hi = isel_get_extended_hi_reg(isel, src1, 2);
         emit_mov(isel, "A", s1_hi, NULL);
         {
             char arg2[64];
@@ -613,52 +611,38 @@ static void emit_signed_cmp8_branch(ISelContext* isel, Instr* ins, ValueName lhs
     switch (cmp_type) {
         case SIGNED_CMP_LT:
         case SIGNED_CMP_LE:
-            emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-            isel_emit(isel, "JNZ", target_t, NULL, instr_to_ssa_str(ins));
-            emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+            {
+                char* ssa = instr_to_ssa_str(ins);
+                emit_far_cond_jump1(isel, "JNZ", true_id, false_id, ins, ssa);
+                free(ssa);
+            }
             break;
         case SIGNED_CMP_GT:
         case SIGNED_CMP_GE:
-            emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-            isel_emit(isel, "JZ", target_t, NULL, instr_to_ssa_str(ins));
-            emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+            {
+                char* ssa = instr_to_ssa_str(ins);
+                emit_far_cond_jump1(isel, "JZ", true_id, false_id, ins, ssa);
+                free(ssa);
+            }
             break;
     }
 
-    isel_emit(isel, lb_same, NULL, NULL, NULL);
+    isel_emit_label(isel, l_same);
     isel_emit(isel, "CLR", "C", NULL, NULL);
     emit_mov(isel, "A", llo, NULL);
     isel_emit(isel, "SUBB", "A", rlo, NULL);
     switch (cmp_type) {
         case SIGNED_CMP_LT:
-            emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-            isel_emit(isel, "JC", target_t, NULL, NULL);
-            emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+            emit_far_cond_jump1(isel, "JC", true_id, false_id, ins, NULL);
             break;
         case SIGNED_CMP_GT:
-            emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-            isel_emit(isel, "JC", target_f, NULL, NULL);
-            emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-            isel_emit(isel, "JZ", target_f, NULL, NULL);
-            emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-            isel_emit(isel, "SJMP", target_t, NULL, NULL);
+            emit_far_cond_jump2_same(isel, "JC", "JZ", false_id, true_id, ins, NULL);
             break;
         case SIGNED_CMP_LE:
-            emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-            isel_emit(isel, "JC", target_t, NULL, NULL);
-            emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-            isel_emit(isel, "JZ", target_t, NULL, NULL);
-            emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+            emit_far_cond_jump2_same(isel, "JC", "JZ", true_id, false_id, ins, NULL);
             break;
         case SIGNED_CMP_GE:
-            emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-            isel_emit(isel, "JC", target_f, NULL, NULL);
-            emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-            isel_emit(isel, "SJMP", target_t, NULL, NULL);
+            emit_far_cond_jump1(isel, "JC", false_id, true_id, ins, NULL);
             break;
     }
 
@@ -692,51 +676,53 @@ static void emit_signed_cmp16_branch(ISelContext* isel, Instr* ins, ValueName lh
     emit_mov(isel, "A", lhi, NULL);
     isel_emit(isel, "ANL", "A", "#128", NULL);
     if (is_gt) {
-        emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-        isel_emit(isel, "JZ", target_t, NULL, instr_to_ssa_str(ins));
-        emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-        isel_emit(isel, "SJMP", target_f, NULL, NULL);
+        {
+            char* ssa = instr_to_ssa_str(ins);
+            emit_far_cond_jump1(isel, "JZ", true_id, false_id, ins, ssa);
+            free(ssa);
+        }
     } else {
-        emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-        isel_emit(isel, "JZ", target_f, NULL, instr_to_ssa_str(ins));
-        emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-        isel_emit(isel, "SJMP", target_t, NULL, NULL);
+        {
+            char* ssa = instr_to_ssa_str(ins);
+            emit_far_cond_jump1(isel, "JZ", false_id, true_id, ins, ssa);
+            free(ssa);
+        }
     }
 
-    isel_emit(isel, lb_same, NULL, NULL, NULL);
+    isel_emit_label(isel, l_same);
     isel_emit(isel, "CLR", "C", NULL, NULL);
     emit_mov(isel, "A", lhi, NULL);
     isel_emit(isel, "SUBB", "A", rhi, NULL);
     if (is_gt) {
-        emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-        isel_emit(isel, "JC", target_f, NULL, NULL);
+        char* l_false = isel_new_label(isel, "Lcmp_far_false");
+        isel_emit(isel, "JC", l_false, NULL, NULL);
         isel_emit(isel, "JZ", l_check_low, NULL, NULL);
         emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-        isel_emit(isel, "SJMP", target_t, NULL, NULL);
+        isel_emit(isel, "LJMP", target_t, NULL, NULL);
+        isel_emit_label(isel, l_false);
+        emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
+        isel_emit(isel, "LJMP", target_f, NULL, NULL);
+        free(l_false);
     } else {
-        emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-        isel_emit(isel, "JC", target_t, NULL, NULL);
+        char* l_true = isel_new_label(isel, "Lcmp_far_true");
+        isel_emit(isel, "JC", l_true, NULL, NULL);
         isel_emit(isel, "JZ", l_check_low, NULL, NULL);
         emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-        isel_emit(isel, "SJMP", target_f, NULL, NULL);
+        isel_emit(isel, "LJMP", target_f, NULL, NULL);
+        isel_emit_label(isel, l_true);
+        emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
+        isel_emit(isel, "LJMP", target_t, NULL, NULL);
+        free(l_true);
     }
 
-    isel_emit(isel, lb_check_low, NULL, NULL, NULL);
+    isel_emit_label(isel, l_check_low);
     isel_emit(isel, "CLR", "C", NULL, NULL);
     emit_mov(isel, "A", llo, NULL);
     isel_emit(isel, "SUBB", "A", rlo, NULL);
     if (is_gt) {
-        emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-        isel_emit(isel, "JC", target_f, NULL, NULL);
-        emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-        isel_emit(isel, "JZ", target_f, NULL, NULL);
-        emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-        isel_emit(isel, "SJMP", target_t, NULL, NULL);
+        emit_far_cond_jump2_same(isel, "JC", "JZ", false_id, true_id, ins, NULL);
     } else {
-        emit_phi_copies_for_edge(isel, isel->current_block_id, true_id, ins);
-        isel_emit(isel, "JC", target_t, NULL, NULL);
-        emit_phi_copies_for_edge(isel, isel->current_block_id, false_id, ins);
-        isel_emit(isel, "SJMP", target_f, NULL, NULL);
+        emit_far_cond_jump1(isel, "JC", true_id, false_id, ins, NULL);
     }
 
     free_saved_cmp_operand(isel, rhi_tmp);
@@ -824,12 +810,12 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                             isel_emit(isel, "JNZ", target_t, NULL, instr_to_ssa_str(ins));
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                            isel_emit(isel, "LJMP", target_f, NULL, NULL);
                         } else {
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
                             isel_emit(isel, "JZ", target_t, NULL, instr_to_ssa_str(ins));
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                            isel_emit(isel, "LJMP", target_f, NULL, NULL);
                         }
 
                         isel_emit(isel, l_same, NULL, NULL, NULL);
@@ -841,13 +827,13 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                             isel_emit(isel, "JC", target_t, NULL, NULL);
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                            isel_emit(isel, "LJMP", target_f, NULL, NULL);
                         } else {
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
                             isel_emit(isel, "JC", target_f, NULL, NULL);
                             isel_emit(isel, "JZ", target_f, NULL, NULL);
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
-                            isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                            isel_emit(isel, "LJMP", target_t, NULL, NULL);
                         }
 
                         free(l_same);
@@ -879,7 +865,7 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
                             isel_emit(isel, "JZ", target_f, NULL, instr_to_ssa_str(ins));
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
-                            isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                            isel_emit(isel, "LJMP", target_t, NULL, NULL);
                         }
 
                         isel_emit(isel, l_same, NULL, NULL, NULL);
@@ -897,7 +883,7 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
                             isel_emit(isel, "JC", target_t, NULL, NULL);
                             isel_emit(isel, "JZ", l_check_low, NULL, NULL);
                             emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                            isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                            isel_emit(isel, "LJMP", target_f, NULL, NULL);
                         }
 
                         isel_emit(isel, l_check_low, NULL, NULL, NULL);
@@ -948,21 +934,13 @@ void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt) {
                 isel_emit(isel, "SUBB", "A", rlo, NULL);
 
                 if (!is_gt) {
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                     char* ssa = instr_to_ssa_str(ins);
-                    isel_emit(isel, "JC", target_t, NULL, ssa);
+                    emit_far_cond_jump1(isel, "JC", id_t, id_f, ins, ssa);
                     free(ssa);
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                    isel_emit(isel, "SJMP", target_f, NULL, NULL);
                 } else {
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
                     char* ssa = instr_to_ssa_str(ins);
-                    isel_emit(isel, "JC", target_f, NULL, ssa);
+                    emit_far_cond_jump2_same(isel, "JC", "JZ", id_f, id_t, ins, ssa);
                     free(ssa);
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                    isel_emit(isel, "JZ", target_f, NULL, NULL);
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
-                    isel_emit(isel, "SJMP", target_t, NULL, NULL);
                 }
 
                 next->op = IROP_NOP;
@@ -1138,38 +1116,41 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
                 emit_mov(isel, "A", llo, ins);
                 isel_emit(isel, "SUBB", "A", rlo, NULL);
 
-                emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                 char* ssa = instr_to_ssa_str(ins);
-                isel_emit(isel, "JNC", target_t, NULL, ssa);
+                emit_far_cond_jump1(isel, "JNC", id_t, id_f, ins, ssa);
                 free(ssa);
-                emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                isel_emit(isel, "SJMP", target_f, NULL, NULL);
 
                 next->op = IROP_NOP;
                 return;
             } else {
-                const char* rhi = save_acc_operand_in_b(isel, isel_get_hi_reg(isel, rhs));
-                const char* lhi = isel_get_hi_reg(isel, lhs);
+                const char* rhi = save_acc_operand_in_b(isel, isel_get_extended_hi_reg(isel, rhs, 2));
+                const char* lhi = isel_get_extended_hi_reg(isel, lhs, 2);
 
                 isel_emit(isel, "CLR", "C", NULL, NULL);
                 emit_mov(isel, "A", lhi, ins);
                 isel_emit(isel, "SUBB", "A", rhi, NULL);
 
                 if (is_ge) {
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    char* l_true = isel_new_label(isel, "Lcmp_far_true");
+                    char* l_false = isel_new_label(isel, "Lcmp_far_false");
                     char* ssa = instr_to_ssa_str(ins);
-                    isel_emit(isel, "JNC", target_t, NULL, ssa);
+                    isel_emit(isel, "JNC", l_true, NULL, ssa);
                     free(ssa);
+                    isel_emit(isel, "JZ", l_false, NULL, NULL);
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "LJMP", target_t, NULL, NULL);
+                    isel_emit_label(isel, l_false);
                     emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                    isel_emit(isel, "JZ", target_f, NULL, NULL);
-                    isel_emit(isel, "SJMP", target_t, NULL, NULL);
+                    isel_emit(isel, "LJMP", target_f, NULL, NULL);
+                    isel_emit_label(isel, l_true);
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "LJMP", target_t, NULL, NULL);
+                    free(l_true);
+                    free(l_false);
                 } else {
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                     char* ssa = instr_to_ssa_str(ins);
-                    isel_emit(isel, "JC", target_t, NULL, ssa);
+                    emit_far_cond_jump1(isel, "JC", id_t, id_f, ins, ssa);
                     free(ssa);
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                    isel_emit(isel, "SJMP", target_f, NULL, NULL);
                 }
 
                 next->op = IROP_NOP;
@@ -1213,10 +1194,10 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
     } else {
         int rlo_tmp = -1;
         int rhi_tmp = -1;
-        const char* rlo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, rhs), &rlo_tmp);
-        const char* rhi = save_acc_operand_for_cmp(isel, isel_get_hi_reg(isel, rhs), &rhi_tmp);
-        const char* llo = isel_get_lo_reg(isel, lhs);
-        const char* lhi = isel_get_hi_reg(isel, lhs);
+        const char* rlo = save_acc_operand_for_cmp(isel, isel_get_extended_lo_reg(isel, rhs, 2), &rlo_tmp);
+        const char* rhi = save_acc_operand_for_cmp(isel, isel_get_extended_hi_reg(isel, rhs, 2), &rhi_tmp);
+        const char* llo = isel_get_extended_lo_reg(isel, lhs, 2);
+        const char* lhi = isel_get_extended_hi_reg(isel, lhs, 2);
         isel_emit(isel, "CLR", "C", NULL, NULL);
         emit_mov(isel, "A", llo, ins);
         isel_emit(isel, "SUBB", "A", rlo, NULL);

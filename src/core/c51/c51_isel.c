@@ -532,6 +532,42 @@ static void isel_record_dest_type(ISelContext* isel, Instr* ins) {
     }
 }
 
+static void seed_value_types_for_func(C51GenContext* ctx, Func* func) {
+    if (!ctx || !func || !ctx->value_type) return;
+
+    ISelContext probe = {0};
+    probe.ctx = ctx;
+
+    for (int pass = 0; pass < 4; pass++) {
+        bool changed = false;
+
+        for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
+            Block* block = iter_next(&bit);
+            for (int phase = 0; phase < 2; phase++) {
+                List* lst = (phase == 0) ? block->phis : block->instrs;
+                if (!lst) continue;
+
+                for (Iter it = list_iter(lst); !iter_end(it);) {
+                    Instr* ins = iter_next(&it);
+                    if (!ins || ins->dest <= 0) continue;
+
+                    char* key = int_to_key(ins->dest);
+                    Ctype* old_type = (Ctype*)dict_get(ctx->value_type, key);
+                    Ctype* new_type = infer_dest_type(&probe, ins);
+                    if (!old_type && new_type) {
+                        dict_put(ctx->value_type, key, new_type);
+                        changed = true;
+                    } else {
+                        free(key);
+                    }
+                }
+            }
+        }
+
+        if (!changed) break;
+    }
+}
+
 static Ctype* clone_type_with_attr_for_isel(Ctype* type, int attr) {
     if (!type) return NULL;
     Ctype* copy = malloc(sizeof(Ctype));
@@ -841,6 +877,7 @@ void isel_function(C51GenContext* ctx, Func* func) {
     refine_param_pointer_spaces(ctx, func);
 
     alloc_param_regs(&isel, func);
+    seed_value_types_for_func(ctx, func);
 
     LinearScanContext* lsc = linscan_create();
     linscan_compute_intervals(lsc, func, ctx);

@@ -586,6 +586,23 @@ static ValueName ssa_build_const_t(SSABuild *b, int64_t val, Ctype *type) {
     return i->dest;
 }
 
+static Instr *ssa_find_def_instr_current_func(SSABuild *b, ValueName v) {
+    if (!b || !b->cur_func) return NULL;
+    for (Iter it = list_iter(b->cur_func->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        if (!blk) continue;
+        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
+            Instr *ins = iter_next(&jt);
+            if (ins && ins->dest == v) return ins;
+        }
+        for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
+            Instr *phi = iter_next(&jt);
+            if (phi && phi->dest == v) return phi;
+        }
+    }
+    return NULL;
+}
+
 static ValueName ssa_build_binop(SSABuild *b, IrOp op, ValueName lhs, ValueName rhs) {
     Instr *i = ssa_make_instr(b, op);
     i->dest = ssa_new_value(b);
@@ -697,10 +714,15 @@ static ValueName ssa_build_offset(SSABuild *b, ValueName ptr, ValueName idx, int
     // 实际实现先用乘法再相加，或依赖后端优化
     Instr *i = ssa_make_instr(b, IROP_OFFSET);
     i->dest = ssa_new_value(b);
-    /* 标记结果为指针类型，便于后续打印与类型相关的分析 */
-    i->type = ssa_alloc(sizeof(Ctype));
-    i->type->type = CTYPE_PTR;
-    i->type->ptr = NULL;
+    /* 尽量继承源指针类型，保留 code/xdata 等空间属性 */
+    Instr *src_def = ssa_find_def_instr_current_func(b, ptr);
+    if (src_def && src_def->type && src_def->type->type == CTYPE_PTR) {
+        i->type = src_def->type;
+    } else {
+        i->type = ssa_alloc(sizeof(Ctype));
+        i->type->type = CTYPE_PTR;
+        i->type->ptr = NULL;
+    }
     i->imm.ival = elem_size;
     ssa_add_arg(i, ptr);
     ssa_add_arg(i, idx);
@@ -1010,6 +1032,9 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
     }
 
     case AST_GVAR: {
+        if (ast->ctype && ast->ctype->type == CTYPE_ARRAY) {
+            return ssa_build_addr(b, ast->varname, ast->ctype);
+        }
         ValueName addr = ssa_build_addr(b, ast->varname, ast->ctype);
         return ssa_build_load(b, addr, ast->ctype, ast->ctype);
     }

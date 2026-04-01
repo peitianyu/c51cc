@@ -52,6 +52,8 @@ void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int si
 
 int get_value_size(ISelContext* isel, ValueName val);
 Ctype* get_value_type(ISelContext* isel, ValueName val);
+const char* isel_get_extended_lo_reg(ISelContext* isel, ValueName val, int width);
+const char* isel_get_extended_hi_reg(ISelContext* isel, ValueName val, int width);
 int get_mem_space(Ctype* mem_type);
 bool is_sbit_type(Ctype* mem_type);
 const char* get_sbit_var_name(ISelContext* isel, Instr* ins);

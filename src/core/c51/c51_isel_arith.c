@@ -852,6 +852,7 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
             isel_emit(isel, "ADDC", "A", "#0", NULL);
             emit_mov(isel, q_hi, "A", NULL);
 
+            isel_emit_label(isel, l_eq_high2);
             isel_emit(isel, "SJMP", l_check, NULL, NULL);
             isel_emit(isel, lb_done, NULL, NULL, NULL);
 
@@ -953,10 +954,10 @@ void emit_select(ISelContext* isel, Instr* ins) {
         isel_ensure_in_acc(isel, cond);
     }
 
-    const char* src_tv_lo = isel_get_lo_reg(isel, tv);
-    const char* src_tv_hi = isel_get_hi_reg(isel, tv);
-    const char* src_fv_lo = isel_get_lo_reg(isel, fv);
-    const char* src_fv_hi = isel_get_hi_reg(isel, fv);
+    const char* src_tv_lo = isel_get_extended_lo_reg(isel, tv, size);
+    const char* src_tv_hi = isel_get_extended_hi_reg(isel, tv, size);
+    const char* src_fv_lo = isel_get_extended_lo_reg(isel, fv, size);
+    const char* src_fv_hi = isel_get_extended_hi_reg(isel, fv, size);
 
     bool need_temp_tv = (strcmp(src_tv_lo, "A") == 0) || (strcmp(src_tv_lo, dst_lo) == 0);
     bool need_temp_fv = (strcmp(src_fv_lo, "A") == 0) || (strcmp(src_fv_lo, dst_lo) == 0);

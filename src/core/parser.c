@@ -129,6 +129,17 @@ char *make_label(void)
     return get_cstring(s);
 }
 
+static bool dict_has_current(Dict *dict, char *key)
+{
+    if (!dict || !dict->list) return false;
+    for (Iter i = list_iter(dict->list); !iter_end(i);) {
+        DictEntry *e = iter_next(&i);
+        if (e && e->key && !strcmp(key, e->key))
+            return true;
+    }
+    return false;
+}
+
 static Ast *ast_lvar(Ctype *ctype, char *name)
 {
     Ast *r = malloc(sizeof(Ast));
@@ -144,7 +155,7 @@ static Ast *ast_lvar(Ctype *ctype, char *name)
 static Ast *ast_gvar(Ctype *ctype, char *name, bool filelocal)
 {
     // FIXME: 应该考虑多文件的, 暂时不考虑
-    if(have_redefine_var(name))
+    if(globalenv && dict_get(globalenv, name))
         error("Redefine global var: %s", name);
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_GVAR;
@@ -753,8 +764,7 @@ static int priority(const Token tok)
 
 static bool have_redefine_var(char* var_name) 
 {
-    if(dict_get(globalenv, var_name)) return true;
-    if(dict_get(localenv, var_name)) return true;
+    if(localenv && dict_has_current(localenv, var_name)) return true;
     return false;
 }
 
@@ -1893,6 +1903,34 @@ static Ast *read_decl_init_single(Ast *var)
     return ast_decl(var, NULL);
 }
 
+static Ast *read_global_decl_multi(Ctype *ctype, char *first_ident)
+{
+    List *decls = make_list();
+    char *ident = first_ident;
+
+    while (1) {
+        Ctype *var_ctype = read_array_dimensions(ctype);
+        Ast *var = ast_gvar(var_ctype, ident, false);
+        Ast *decl = read_decl_init_single(var);
+        list_push(decls, decl);
+
+        Token tok = read_token();
+        if (is_punct(tok, ';'))
+            break;
+        if (!is_punct(tok, ','))
+            error("Comma expected, but got %s", token_to_string(tok));
+
+        Token next = read_token();
+        if (get_ttype(next) != TTYPE_IDENT)
+            error("Identifier expected, but got %s", token_to_string(next));
+        ident = get_ident(next);
+    }
+
+    if (list_len(decls) == 1)
+        return list_get(decls, 0);
+    return ast_compound_stmt(decls);
+}
+
 // 读取逗号分隔的多个变量声明
 static Ast *read_decl_multi(Ctype *ctype, Token first_name)
 {
@@ -2199,6 +2237,7 @@ static Ast *read_compound_stmt(void)
 static List *read_params(void)
 {
     List *params = make_list();
+    static int anon_param_seq = 0;
     Token tok = read_token();
     if (is_punct(tok, ')'))
         return params;
@@ -2253,6 +2292,13 @@ static List *read_params(void)
         if (get_ttype(tok) != TTYPE_IDENT) {
             if(ctype->type == CTYPE_VOID && is_punct(tok, ')') && params->len == 0) {
                 return params;
+            } else if (is_punct(tok, ',') || is_punct(tok, ')')) {
+                char anon_name[32];
+                snprintf(anon_name, sizeof(anon_name), "__anon_param_%d", anon_param_seq++);
+                list_push(params, ast_lvar(ctype, strdup(anon_name)));
+                if (is_punct(tok, ')'))
+                    return params;
+                continue;
             } else  {
                 error("Identifier expected, but got %s", token_to_string(tok));
             }
@@ -2413,6 +2459,9 @@ static Ast *read_decl_or_func_def(void)
         Ast *var = ast_gvar(ctype, ident, false);
         return read_decl_init(var);
     }
+    if (is_punct(tok, ',')) {
+        return read_global_decl_multi(ctype, ident);
+    }
     if (is_punct(tok, ';')) {
         if(get_attr(ctype->attr).ctype_typedef) {
             dict_put(typedefenv, ident, ctype);
@@ -2447,7 +2496,14 @@ List *read_toplevels(void)
         Ast *ast = read_decl_or_func_def();
         if (!ast)
             return r;
-        list_push(r, ast);
+        if (ast->type == AST_COMPOUND_STMT && ast->stmts) {
+            for (Iter it = list_iter(ast->stmts); !iter_end(it);) {
+                Ast *item = iter_next(&it);
+                if (item) list_push(r, item);
+            }
+        } else {
+            list_push(r, ast);
+        }
     }
     list_free(globalenv->list);
     return r;

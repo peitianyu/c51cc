@@ -43,9 +43,34 @@ static void usage(const char *prog) {
         "  -asm         Emit 8051 assembly (default)\n"
         "  -hex         Emit Intel HEX\n"
         "  -O0/-O1/-O2  Optimization level (default: O1)\n"
-        "  -o <file>    Output file (default: stdout)\n",
+        "  -o <file>    Output file (default: stdout)\n"
+        "               With -asm and -hex together, writes sibling .asm/.hex files\n",
         prog ? prog : "c51cc"
     );
+}
+
+static char *replace_extension(const char *path, const char *ext)
+{
+    const char *slash;
+    const char *dot;
+    size_t base_len;
+    size_t ext_len;
+    char *out;
+
+    if (!path || !ext) return NULL;
+    slash = strrchr(path, '/');
+    if (!slash) slash = strrchr(path, '\\');
+    dot = strrchr(path, '.');
+    if (!dot || (slash && dot < slash)) dot = path + strlen(path);
+
+    base_len = (size_t)(dot - path);
+    ext_len = strlen(ext);
+    out = calloc(base_len + ext_len + 1, 1);
+    if (!out) return NULL;
+    memcpy(out, path, base_len);
+    memcpy(out + base_len, ext, ext_len);
+    out[base_len + ext_len] = '\0';
+    return out;
 }
 
 int main(int argc, char **argv) {
@@ -104,20 +129,49 @@ int main(int argc, char **argv) {
         opt_asm = 1;
     }
 
-    /* 打开输出文件 */
     FILE *out_fp = stdout;
-    if (output_file) {
-        out_fp = fopen(output_file, "w");
+    FILE *asm_fp = stdout;
+    FILE *hex_fp = stdout;
+    char *asm_path = NULL;
+    char *hex_path = NULL;
+
+    if (output_file && opt_asm && opt_hex) {
+        asm_path = replace_extension(output_file, ".asm");
+        hex_path = replace_extension(output_file, ".hex");
+        if (!asm_path || !hex_path) {
+            free(asm_path);
+            free(hex_path);
+            fprintf(stderr, "error: cannot allocate output paths\n");
+            return 1;
+        }
+        asm_fp = c51cc_fopen(asm_path, "w");
+        hex_fp = c51cc_fopen(hex_path, "w");
+        if (!asm_fp || !hex_fp) {
+            if (asm_fp && asm_fp != stdout) fclose(asm_fp);
+            if (hex_fp && hex_fp != stdout) fclose(hex_fp);
+            fprintf(stderr, "error: cannot open output files: %s / %s\n", asm_path, hex_path);
+            free(asm_path);
+            free(hex_path);
+            return 1;
+        }
+        out_fp = asm_fp;
+    } else if (output_file) {
+        out_fp = c51cc_fopen(output_file, "w");
         if (!out_fp) {
             fprintf(stderr, "error: cannot open output file: %s\n", output_file);
             return 1;
         }
+        asm_fp = out_fp;
+        hex_fp = out_fp;
     }
 
     /* ---- 1. 预处理 ---- */
     if (!pp_preprocess_to_stdin(input_file)) {
         fprintf(stderr, "error: preprocess failed: %s\n", input_file);
-        if (out_fp != stdout) fclose(out_fp);
+        if (asm_fp != stdout) fclose(asm_fp);
+        if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
+        free(asm_path);
+        free(hex_path);
         return 1;
     }
     set_current_filename(input_file);
@@ -127,7 +181,10 @@ int main(int argc, char **argv) {
     List *toplevels = read_toplevels();
     if (!toplevels) {
         fprintf(stderr, "error: parse failed\n");
-        if (out_fp != stdout) fclose(out_fp);
+        if (asm_fp != stdout) fclose(asm_fp);
+        if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
+        free(asm_path);
+        free(hex_path);
         return 1;
     }
 
@@ -142,7 +199,10 @@ int main(int argc, char **argv) {
         if (!opt_ssa && !opt_asm && !opt_hex) {
             list_free(strings);
             list_free(ctypes);
-            if (out_fp != stdout) fclose(out_fp);
+            if (asm_fp != stdout) fclose(asm_fp);
+            if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
+            free(asm_path);
+            free(hex_path);
             return 0;
         }
     }
@@ -151,7 +211,10 @@ int main(int argc, char **argv) {
     SSABuild *b = ssa_build_create();
     if (!b) {
         fprintf(stderr, "error: ssa_build_create failed\n");
-        if (out_fp != stdout) fclose(out_fp);
+        if (asm_fp != stdout) fclose(asm_fp);
+        if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
+        free(asm_path);
+        free(hex_path);
         return 1;
     }
 
@@ -178,7 +241,10 @@ int main(int argc, char **argv) {
             ssa_build_destroy(b);
             list_free(strings);
             list_free(ctypes);
-            if (out_fp != stdout) fclose(out_fp);
+            if (asm_fp != stdout) fclose(asm_fp);
+            if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
+            free(asm_path);
+            free(hex_path);
             return 0;
         }
     }
@@ -191,7 +257,10 @@ int main(int argc, char **argv) {
 
     if (!obj) {
         fprintf(stderr, "error: code generation failed\n");
-        if (out_fp != stdout) fclose(out_fp);
+        if (asm_fp != stdout) fclose(asm_fp);
+        if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
+        free(asm_path);
+        free(hex_path);
         return 1;
     }
 
@@ -203,16 +272,19 @@ int main(int argc, char **argv) {
 
     /* ---- 9. 输出汇编 ---- */
     if (opt_asm) {
-        c51_write_asm(out_fp, obj);
+        c51_write_asm(asm_fp, obj);
     }
 
     /* ---- 10. 输出 HEX ---- */
     if (opt_hex) {
-        c51_write_hex(out_fp, obj);
+        c51_write_hex(hex_fp, obj);
     }
 
     obj_free(obj);
-    if (out_fp != stdout) fclose(out_fp);
+    if (asm_fp != stdout) fclose(asm_fp);
+    if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
+    free(asm_path);
+    free(hex_path);
     return 0;
 }
 

@@ -170,6 +170,13 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
 
                 if (ins->dest > 0 && ins->dest < kMaxValue) {
                     int iv_idx = val_to_iv[ins->dest];
+                    int dest_size = ins->type ? c51_abi_type_size(ins->type) : 1;
+                    if (genctx && genctx->value_type) {
+                        char* type_key = int_to_key(ins->dest);
+                        Ctype* recorded = (Ctype*)dict_get(genctx->value_type, type_key);
+                        free(type_key);
+                        if (recorded) dest_size = c51_abi_type_size(recorded);
+                    }
                     if (iv_idx < 0) {
                         if (lsc->interval_count >= lsc->interval_capacity) {
                             lsc->interval_capacity *= 2;
@@ -183,7 +190,7 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
                         iv->val = ins->dest;
                         iv->start = instr_idx;
                         iv->end = instr_idx;
-                        iv->size = ins->type ? c51_abi_type_size(ins->type) : 1;
+                        iv->size = dest_size;
                         iv->reg = -1;
                         iv->spill_slot = -1;
                         iv->is_param = (ins->op == IROP_PARAM);
@@ -191,6 +198,7 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
                         LiveInterval* iv = &lsc->intervals[iv_idx];
                         if (instr_idx < iv->start) iv->start = instr_idx;
                         if (instr_idx > iv->end) iv->end = instr_idx;
+                        if (dest_size > iv->size) iv->size = dest_size;
                     }
                 }
 
@@ -215,6 +223,12 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
                             iv->start = instr_idx;
                             iv->end = instr_idx;
                             iv->size = 1;
+                            if (genctx && genctx->value_type) {
+                                char* type_key = int_to_key(*pv);
+                                Ctype* recorded = (Ctype*)dict_get(genctx->value_type, type_key);
+                                free(type_key);
+                                if (recorded) iv->size = c51_abi_type_size(recorded);
+                            }
                             iv->reg = -1;
                             iv->spill_slot = -1;
                             iv->is_param = false;

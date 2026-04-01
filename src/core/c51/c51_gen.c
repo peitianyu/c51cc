@@ -178,7 +178,7 @@ static int file_exists(const char *path)
     FILE *fp;
 
     if (!path) return 0;
-    fp = fopen(path, "rb");
+    fp = c51cc_fopen(path, "rb");
     if (!fp) return 0;
     fclose(fp);
     return 1;
@@ -191,7 +191,7 @@ static char *read_text_file(const char *path)
     char *buf;
 
     if (!path) return NULL;
-    fp = fopen(path, "rb");
+    fp = c51cc_fopen(path, "rb");
     if (!fp) return NULL;
     if (fseek(fp, 0, SEEK_END) != 0) {
         fclose(fp);

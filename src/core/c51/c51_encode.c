@@ -218,6 +218,8 @@ static int is_comment_instr(const AsmInstr *ins)
 	return ins && ins->op && ins->op[0] == ';';
 }
 
+static int instruction_size(const AsmInstr *ins);
+
 static int is_function_local_label_name(const char *name)
 {
 	return name && name[0] == 'L';
@@ -383,6 +385,8 @@ static int lookup_local_label(EncodeState *state, const char *name, int *value)
 	Iter it;
 	int best_value = 0;
 	int best_distance = 0x7fffffff;
+	int best_value_any_scope = 0;
+	int best_distance_any_scope = 0x7fffffff;
 	int require_scope;
 	char *key;
 	if (!state || !state->labels || !name) return 0;
@@ -396,12 +400,61 @@ static int lookup_local_label(EncodeState *state, const char *name, int *value)
 		LabelLocation *candidate = iter_next(&it);
 		int distance;
 		if (!candidate) continue;
-		if (require_scope && candidate->scope != state->current_scope) continue;
 		distance = candidate->value - state->current_pc;
 		if (distance < 0) distance = -distance;
+		if (distance < best_distance_any_scope) {
+			best_distance_any_scope = distance;
+			best_value_any_scope = candidate->value;
+		}
+		if (require_scope && candidate->scope != state->current_scope) continue;
 		if (distance < best_distance) {
 			best_distance = distance;
 			best_value = candidate->value;
+		}
+	}
+	if (best_distance == 0x7fffffff && require_scope && best_distance_any_scope != 0x7fffffff) {
+		best_distance = best_distance_any_scope;
+		best_value = best_value_any_scope;
+	}
+	if (best_distance == 0x7fffffff && state->sec && state->sec->asminstrs) {
+		Iter sec_it;
+		int offset = state->start_offset;
+		int scope = 0;
+		for (sec_it = list_iter(state->sec->asminstrs); !iter_end(sec_it);) {
+			AsmInstr *ins = iter_next(&sec_it);
+			if (is_label_instr(ins)) {
+				size_t len = strlen(ins->op);
+				if (len > 1) {
+					char *candidate_name = malloc(len);
+					if (!candidate_name) break;
+					memcpy(candidate_name, ins->op, len - 1);
+					candidate_name[len - 1] = '\0';
+					if (!is_function_local_label_name(candidate_name)) scope++;
+					if (strcmp(candidate_name, name) == 0) {
+						int distance = offset - state->current_pc;
+						if (distance < 0) distance = -distance;
+						if ((!require_scope || scope == state->current_scope) && distance < best_distance) {
+							best_distance = distance;
+							best_value = offset;
+						}
+						if (distance < best_distance_any_scope) {
+							best_distance_any_scope = distance;
+							best_value_any_scope = offset;
+						}
+					}
+					free(candidate_name);
+				}
+				continue;
+			}
+			if (!is_comment_instr(ins)) {
+				int size = instruction_size(ins);
+				if (size < 0) break;
+				offset += size;
+			}
+		}
+		if (best_distance == 0x7fffffff && require_scope && best_distance_any_scope != 0x7fffffff) {
+			best_distance = best_distance_any_scope;
+			best_value = best_value_any_scope;
 		}
 	}
 	if (best_distance == 0x7fffffff) return 0;
@@ -923,12 +976,15 @@ static int encode_cjne(EncodeState *state, const InstrView *view, unsigned char 
 		return -1;
 	}
 	if (!eval_expr(state, label, &expr) || expr.is_symbolic) {
-		report_encode_error(state, view->ins, "CJNE requires local label target");
-		free(cmp_operand);
-		free(label);
-		return -1;
+		if (!lookup_local_label(state, label, &target)) {
+			report_encode_error(state, view->ins, "CJNE requires local label target");
+			free(cmp_operand);
+			free(label);
+			return -1;
+		}
+	} else {
+		target = expr.value;
 	}
-	target = expr.value;
 	if (is_immediate(cmp_operand)) {
 		out[view->pc - state->start_offset] = 0xB4;
 		if (!eval_immediate(state, cmp_operand, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) {
@@ -984,10 +1040,15 @@ static int encode_rel_jump(EncodeState *state, const InstrView *view, unsigned c
 	if (!entry) return 0;
 	out[view->pc - state->start_offset] = entry->opcode;
 	if (!eval_expr(state, view->arg1, &expr) || expr.is_symbolic) {
-		report_encode_error(state, view->ins, "relative jump requires local label");
-		return -1;
+		if (!lookup_local_label(state, view->arg1, &target)) {
+			char msg[256];
+			snprintf(msg, sizeof(msg), "relative jump requires local label: %s", view->arg1 ? view->arg1 : "<null>");
+			report_encode_error(state, view->ins, msg);
+			return -1;
+		}
+	} else {
+		target = expr.value;
 	}
-	target = expr.value;
 	out[view->pc - state->start_offset + 1] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
 	return view->size;
 }
@@ -1003,10 +1064,13 @@ static int encode_bit_branch(EncodeState *state, const InstrView *view, unsigned
 	out[view->pc - state->start_offset] = entry->opcode;
 	if (!eval_bit(state, view->arg1, &expr) || expr.is_symbolic || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
 	if (!eval_expr(state, view->arg2, &expr) || expr.is_symbolic) {
-		report_encode_error(state, view->ins, "bit branch requires local label");
-		return -1;
+		if (!lookup_local_label(state, view->arg2, &target)) {
+			report_encode_error(state, view->ins, "bit branch requires local label");
+			return -1;
+		}
+	} else {
+		target = expr.value;
 	}
-	target = expr.value;
 	out[view->pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
 	return view->size;
 }
@@ -1099,20 +1163,26 @@ static int encode_djnz(EncodeState *state, const InstrView *view, unsigned char 
 	if (reg >= 0) {
 		out[view->pc - state->start_offset] = djnz_encoding.reg_base + reg;
 		if (!eval_expr(state, view->arg2, &expr) || expr.is_symbolic) {
-			report_encode_error(state, view->ins, "DJNZ requires local label");
-			return -1;
+			if (!lookup_local_label(state, view->arg2, &target)) {
+				report_encode_error(state, view->ins, "DJNZ requires local label");
+				return -1;
+			}
+		} else {
+			target = expr.value;
 		}
-		target = expr.value;
 		out[view->pc - state->start_offset + 1] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
 		return view->size;
 	}
 	out[view->pc - state->start_offset] = djnz_encoding.direct_opcode;
 	if (!eval_direct(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
 	if (!eval_expr(state, view->arg2, &expr) || expr.is_symbolic) {
-		report_encode_error(state, view->ins, "DJNZ requires local label");
-		return -1;
+		if (!lookup_local_label(state, view->arg2, &target)) {
+			report_encode_error(state, view->ins, "DJNZ requires local label");
+			return -1;
+		}
+	} else {
+		target = expr.value;
 	}
-	target = expr.value;
 	out[view->pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
 	return view->size;
 }

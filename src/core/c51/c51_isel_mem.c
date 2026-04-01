@@ -414,7 +414,8 @@ static bool emit_store_to_pointer_value(ISelContext* isel, Instr* ins, ValueName
     if (!ptr_type || ptr_type->type != CTYPE_PTR) return false;
 
     int ptr_abi_size = c51_abi_type_size(ptr_type);
-    int store_size = (ptr_type->ptr ? c51_abi_type_size(ptr_type->ptr) : get_value_size(isel, val));
+    int store_size = ins->mem_type ? c51_abi_type_size(ins->mem_type)
+                                   : (ptr_type->ptr ? c51_abi_type_size(ptr_type->ptr) : get_value_size(isel, val));
     if (store_size < 1) store_size = 1;
     if (store_size > 2) store_size = 2;
 
@@ -425,8 +426,8 @@ static bool emit_store_to_pointer_value(ISelContext* isel, Instr* ins, ValueName
     if (ptr_reg < 0) return false;
 
     int ptr_space = get_mem_space(ptr_type);
-    const char* val_lo = isel_get_lo_reg(isel, val);
-    const char* val_hi = (store_size == 2) ? isel_get_hi_reg(isel, val) : NULL;
+    const char* val_lo = isel_get_extended_lo_reg(isel, val, store_size);
+    const char* val_hi = (store_size == 2) ? isel_get_extended_hi_reg(isel, val, store_size) : NULL;
     int scratch_reg = -1;
     const char* scratch = NULL;
 
@@ -619,8 +620,8 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     const char* scaled_hi = NULL;
 
     if (!idx_is_imm) {
-        idx_lo = isel_get_lo_reg(isel, idx);
-        idx_hi = isel_get_hi_reg(isel, idx);
+        idx_lo = preserve_offset_operand(isel, isel_get_extended_lo_reg(isel, idx, 2));
+        idx_hi = preserve_offset_operand(isel, isel_get_extended_hi_reg(isel, idx, 2));
 
         bool overlap_dst = (strcmp(idx_lo, dst_lo) == 0) || (strcmp(idx_lo, dst_hi) == 0) ||
                            (strcmp(idx_hi, dst_lo) == 0) || (strcmp(idx_hi, dst_hi) == 0);
@@ -641,10 +642,10 @@ void emit_offset(ISelContext* isel, Instr* ins) {
 
         for (int i = 1; scaled_reg >= 0 && i < scale; i++) {
             emit_mov(isel, "A", scaled_lo, NULL);
-            isel_emit(isel, "ADD", "A", idx_lo, NULL);
+            isel_emit(isel, "ADD", "A", preserve_offset_operand(isel, idx_lo), NULL);
             emit_mov(isel, scaled_lo, "A", NULL);
             emit_mov(isel, "A", scaled_hi, NULL);
-            isel_emit(isel, "ADDC", "A", idx_hi, NULL);
+            isel_emit(isel, "ADDC", "A", preserve_offset_operand(isel, idx_hi), NULL);
             emit_mov(isel, scaled_hi, "A", NULL);
         }
     }
@@ -685,11 +686,11 @@ void emit_offset(ISelContext* isel, Instr* ins) {
         emit_mov(isel, dst_hi, "A", NULL);
     } else {
         emit_mov(isel, "A", dst_lo, NULL);
-        isel_emit(isel, "ADD", "A", scaled_lo, NULL);
+        isel_emit(isel, "ADD", "A", preserve_offset_operand(isel, scaled_lo), NULL);
         emit_mov(isel, dst_lo, "A", NULL);
 
         emit_mov(isel, "A", dst_hi, NULL);
-        isel_emit(isel, "ADDC", "A", scaled_hi, NULL);
+        isel_emit(isel, "ADDC", "A", preserve_offset_operand(isel, scaled_hi), NULL);
         emit_mov(isel, dst_hi, "A", NULL);
 
         if (scaled_reg >= 0) free_temp_reg(isel, scaled_reg, 2);
@@ -759,7 +760,7 @@ void emit_store(ISelContext* isel, Instr* ins) {
     }
 
     int space = get_mem_space(ins->mem_type);
-    int val_size = get_value_size(isel, val);
+    int val_size = ins->mem_type ? c51_abi_type_size(ins->mem_type) : get_value_size(isel, val);
     if (val_size < 1) val_size = 1;
     if (val_size > 2) val_size = 2;
     if (var_name && isel->ctx && isel->ctx->obj) {
@@ -780,10 +781,10 @@ void emit_store(ISelContext* isel, Instr* ins) {
         return;
     }
 
-    const char* val_lo = isel_get_lo_reg(isel, val);
+    const char* val_lo = isel_get_extended_lo_reg(isel, val, val_size);
     emit_store_symbol_byte(isel, var_name, 0, val_lo, ins);
     if (val_size == 2) {
-        const char* val_hi = isel_get_hi_reg(isel, val);
+        const char* val_hi = isel_get_extended_hi_reg(isel, val, val_size);
         emit_store_symbol_byte(isel, var_name, 1, val_hi, NULL);
     }
 }

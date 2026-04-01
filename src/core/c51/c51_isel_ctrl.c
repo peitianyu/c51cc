@@ -23,6 +23,13 @@ static bool reg_range_used_by_moves(RegMove* moves, int move_count, int reg) {
     return false;
 }
 
+static const char* phi_zero_extended_hi(ISelContext* isel, ValueName src)
+{
+    int src_size = get_value_size(isel, src);
+    if (src_size >= 2) return isel_get_hi_reg(isel, src);
+    return "#0";
+}
+
 static int rebind_phi_dest_reg(ISelContext* isel, ValueName val, int size, RegMove* moves, int move_count) {
     if (!isel || !isel->ctx || !isel->ctx->value_to_reg) return -1;
     for (int base = 7 - size + 1; base >= 0; base--) {
@@ -124,7 +131,25 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
         if (dst_base >= 0 && dst_base + size - 1 > 7) {
             dst_base = rebind_phi_dest_reg(isel, dst, size, moves, move_count);
         }
-        if (dst_base < 0) continue;
+
+        if (dst_base < 0) {
+            const char* dst_sym = lookup_value_addr_symbol(isel, dst);
+            if (!dst_sym) continue;
+
+            Instr* src_def = find_def_instr_in_func(f, src);
+            if (src_def && src_def->op == IROP_CONST) {
+                int imm = (int)(src_def->imm.ival & 0xFFFF);
+                emit_store_symbol_imm_byte(isel, dst_sym, 0, imm & 0xFF, ins);
+                if (size >= 2) emit_store_symbol_imm_byte(isel, dst_sym, 1, (imm >> 8) & 0xFF, NULL);
+                continue;
+            }
+
+            emit_store_symbol_byte(isel, dst_sym, 0, isel_get_lo_reg(isel, src), ins);
+            if (size >= 2) {
+                emit_store_symbol_byte(isel, dst_sym, 1, phi_zero_extended_hi(isel, src), NULL);
+            }
+            continue;
+        }
 
         Instr* src_def = find_def_instr_in_func(f, src);
         if (src_def && src_def->op == IROP_CONST) {
@@ -217,7 +242,7 @@ void emit_jmp(ISelContext* isel, Instr* ins) {
     block_label_name(target, sizeof(target), id);
 
     emit_phi_copies_for_edge(isel, isel->current_block_id, id, ins);
-    isel_emit(isel, "SJMP", target, NULL, instr_to_ssa_str(ins));
+    isel_emit(isel, "LJMP", target, NULL, instr_to_ssa_str(ins));
 }
 
 void emit_br(ISelContext* isel, Instr* ins) {
@@ -264,15 +289,23 @@ void emit_br(ISelContext* isel, Instr* ins) {
                 if (id_t >= 0 && id_f >= 0) {
                     char target_t[32];
                     char target_f[32];
+                    char* l_skip_true = isel_new_label(isel, "Lbr_skip_true");
+                    char lb_skip_true[64];
+                    snprintf(lb_skip_true, sizeof(lb_skip_true), "%s:", l_skip_true);
                     block_label_name(target_t, sizeof(target_t), id_t);
                     block_label_name(target_f, sizeof(target_f), id_f);
 
                     if (invert) {
-                        isel_emit(isel, "JNB", bit, target_t, instr_to_ssa_str(ins));
+                        isel_emit(isel, "JB", bit, l_skip_true, instr_to_ssa_str(ins));
                     } else {
-                        isel_emit(isel, "JB", bit, target_t, instr_to_ssa_str(ins));
+                        isel_emit(isel, "JNB", bit, l_skip_true, instr_to_ssa_str(ins));
                     }
-                    isel_emit(isel, "SJMP", target_f, NULL, NULL);
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                    isel_emit(isel, "LJMP", target_t, NULL, NULL);
+                    isel_emit_label(isel, l_skip_true);
+                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                    isel_emit(isel, "LJMP", target_f, NULL, NULL);
+                    free(l_skip_true);
                     return;
                 }
             }
@@ -289,15 +322,23 @@ void emit_br(ISelContext* isel, Instr* ins) {
 
         char target_t[32];
         char target_f[32];
+        char* l_skip_true = isel_new_label(isel, "Lbr_skip_true");
+        char lb_skip_true[64];
+        snprintf(lb_skip_true, sizeof(lb_skip_true), "%s:", l_skip_true);
         block_label_name(target_t, sizeof(target_t), id_t);
         block_label_name(target_f, sizeof(target_f), id_f);
 
         if (bitinfo->invert) {
-            isel_emit(isel, "JNB", bitinfo->bit, target_t, instr_to_ssa_str(ins));
+            isel_emit(isel, "JB", bitinfo->bit, l_skip_true, instr_to_ssa_str(ins));
         } else {
-            isel_emit(isel, "JB", bitinfo->bit, target_t, instr_to_ssa_str(ins));
+            isel_emit(isel, "JNB", bitinfo->bit, l_skip_true, instr_to_ssa_str(ins));
         }
-        isel_emit(isel, "SJMP", target_f, NULL, NULL);
+        emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+        isel_emit(isel, "LJMP", target_t, NULL, NULL);
+        isel_emit_label(isel, l_skip_true);
+        emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+        isel_emit(isel, "LJMP", target_f, NULL, NULL);
+        free(l_skip_true);
         return;
     }
 
@@ -325,12 +366,20 @@ void emit_br(ISelContext* isel, Instr* ins) {
 
     bool invert = false;
     bool has_invert = br_invert_get(isel, ins, &invert);
+    char* l_skip_true = isel_new_label(isel, "Lbr_skip_true");
+    char lb_skip_true[64];
+    snprintf(lb_skip_true, sizeof(lb_skip_true), "%s:", l_skip_true);
     if (has_invert && invert) {
-        isel_emit(isel, "JZ", target_t, NULL, instr_to_ssa_str(ins));
+        isel_emit(isel, "JNZ", l_skip_true, NULL, instr_to_ssa_str(ins));
     } else {
-        isel_emit(isel, "JNZ", target_t, NULL, instr_to_ssa_str(ins));
+        isel_emit(isel, "JZ", l_skip_true, NULL, instr_to_ssa_str(ins));
     }
-    isel_emit(isel, "SJMP", target_f, NULL, NULL);
+    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+    isel_emit(isel, "LJMP", target_t, NULL, NULL);
+    isel_emit_label(isel, l_skip_true);
+    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+    isel_emit(isel, "LJMP", target_f, NULL, NULL);
+    free(l_skip_true);
 }
 
 void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
@@ -618,16 +667,8 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
                 emit_store_symbol_imm_byte(isel, sym, 1, (int)((imm_val >> 8) & 0xFF), NULL);
                 return;
             }
-            const char* src_sym = lookup_value_addr_symbol(isel, v);
-            if (src_sym && isel_get_value_reg(isel, v) == -3) {
-                emit_load_symbol_byte(isel, src_sym, 0, "A", ins);
-                emit_store_symbol_byte(isel, sym, 0, "A", NULL);
-                emit_load_symbol_byte(isel, src_sym, 1, "A", NULL);
-                emit_store_symbol_byte(isel, sym, 1, "A", NULL);
-                return;
-            }
-            const char* src_lo = isel_get_lo_reg(isel, v);
-            const char* src_hi = isel_get_hi_reg(isel, v);
+            const char* src_lo = isel_get_extended_lo_reg(isel, v, 2);
+            const char* src_hi = isel_get_extended_hi_reg(isel, v, 2);
             if (src_lo) emit_store_symbol_byte(isel, sym, 0, src_lo, ins);
             if (src_hi) emit_store_symbol_byte(isel, sym, 1, src_hi, NULL);
         }
@@ -647,39 +688,8 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
         emit_mov(isel, dst_lo, imm_lo, NULL);
         return;
     }
-    const char* src_sym = lookup_value_addr_symbol(isel, v);
-    if (src_sym && isel_get_value_reg(isel, v) == -3) {
-        emit_load_symbol_byte(isel, src_sym, 0, dst_lo, ins);
-        emit_load_symbol_byte(isel, src_sym, 1, dst_hi, NULL);
-        return;
-    }
-    const char* src_hi = isel_get_hi_reg(isel, v);
-    const char* src_lo = isel_get_lo_reg(isel, v);
-
-    if (isel_get_value_reg(isel, v) == -3) {
-        int r = isel_reload_spill(isel, v, 2, ins);
-        if (r >= 0) {
-            src_hi = isel_reg_name(r);
-            src_lo = isel_reg_name(r + 1);
-        } else {
-            src_hi = "A";
-            src_lo = "A";
-        }
-    } else if (isel->ctx && isel->ctx->value_to_addr) {
-        char* ktmp = int_to_key(v);
-        const char* sym = (const char*)dict_get(isel->ctx->value_to_addr, ktmp);
-        free(ktmp);
-        if (sym) {
-            int r = isel_reload_spill(isel, v, 2, ins);
-            if (r >= 0) {
-                src_hi = isel_reg_name(r);
-                src_lo = isel_reg_name(r + 1);
-            } else {
-                src_hi = "A";
-                src_lo = "A";
-            }
-        }
-    }
+    const char* src_hi = isel_get_extended_hi_reg(isel, v, 2);
+    const char* src_lo = isel_get_extended_lo_reg(isel, v, 2);
 
     int src_hi_reg = reg_index_from_name(src_hi);
     int src_lo_reg = reg_index_from_name(src_lo);
@@ -810,6 +820,15 @@ static void bind_call_result_to_return_regs(ISelContext* isel, ValueName dest, i
     }
 }
 
+static Func* find_direct_callee(ISelContext* isel, const char* name) {
+    if (!isel || !isel->ctx || !isel->ctx->unit || !isel->ctx->unit->funcs || !name) return NULL;
+    for (Iter it = list_iter(isel->ctx->unit->funcs); !iter_end(it);) {
+        Func* func = iter_next(&it);
+        if (func && func->name && strcmp(func->name, name) == 0) return func;
+    }
+    return NULL;
+}
+
 void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins || !ins->labels || ins->labels->len < 1) return;
     const char* fname = list_get(ins->labels, 0);
@@ -820,6 +839,7 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName callee_val = (indirect && ins->args && ins->args->len > 0)
         ? *(ValueName*)list_get(ins->args, 0)
         : -1;
+    Func* callee_func = indirect ? NULL : find_direct_callee(isel, fname);
     int size1_index = 0;
     int size2_index = 0;
     int size3_index = 0;
@@ -836,8 +856,15 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         free(key);
 
-        int size = t ? c51_abi_type_size(t) : 1;
         int param_pos = k - arg_start;
+        int size = 0;
+        if (callee_func && callee_func->param_types && param_pos < callee_func->param_types->len) {
+            Ctype* param_type = list_get(callee_func->param_types, param_pos);
+            if (param_type) size = c51_abi_type_size(param_type);
+        }
+        if (size <= 0) {
+            size = t ? c51_abi_type_size(t) : 1;
+        }
         int class_index = 0;
         if (size == 1) {
             class_index = size1_index++;
@@ -932,21 +959,15 @@ void emit_ret(ISelContext* isel, Instr* ins) {
     if (ins->args && ins->args->len > 0) {
         ValueName ret_val = *(ValueName*)list_get(ins->args, 0);
         int ret_size = ins->type ? c51_abi_type_size(ins->type) : 1;
-        int val_size = get_value_size(isel, ret_val);
-
-        const char* ret_lo = isel_get_lo_reg(isel, ret_val);
+        const char* ret_lo = isel_get_extended_lo_reg(isel, ret_val, ret_size);
         if (ret_lo && strcmp(ret_lo, "R7") != 0) {
             emit_mov(isel, "R7", ret_lo, ins);
         }
 
         if (ret_size == 2) {
-            if (val_size == 2) {
-                const char* ret_hi = isel_get_hi_reg(isel, ret_val);
-                if (ret_hi && strcmp(ret_hi, "R6") != 0) {
-                    emit_mov(isel, "R6", ret_hi, ins);
-                }
-            } else {
-                isel_emit(isel, "MOV", "R6", "#0", NULL);
+            const char* ret_hi = isel_get_extended_hi_reg(isel, ret_val, ret_size);
+            if (ret_hi && strcmp(ret_hi, "R6") != 0) {
+                emit_mov(isel, "R6", ret_hi, ins);
             }
         }
     }
