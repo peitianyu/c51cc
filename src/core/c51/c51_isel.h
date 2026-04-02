@@ -56,6 +56,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next);
 
 /* 辅助函数：发射汇编指令 */
 void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* arg2, const char* ssa);
+void isel_emit3(ISelContext* isel, const char* op, const char* arg1, const char* arg2, const char* arg3, const char* ssa);
 void c51_emit_asm_text(Section* sec, const char* asm_text);
 
 void isel_emit_label(ISelContext* isel, const char* label);

@@ -14,9 +14,9 @@ setlocal enabledelayedexpansion
 set OUT=%~1
 if "%OUT%"=="" set OUT=c51cc.exe
 
-set SRCS=src\main.c
-for %%f in (src\core\*.c) do set SRCS=!SRCS! %%f
-for %%f in (src\core\c51\*.c) do set SRCS=!SRCS! %%f
+set SRCS=..\src\main.c
+for %%f in (..\src\core\*.c) do set SRCS=!SRCS! %%f
+for %%f in (..\src\core\c51\*.c) do set SRCS=!SRCS! %%f
 
 echo Building %OUT% ...
 tcc %SRCS% -o %OUT%

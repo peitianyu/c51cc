@@ -16,7 +16,7 @@
             "label": "build-win",
             "type": "shell",
             "command": "cmd",
-            "args": ["/c", "${workspaceFolder}\\build.bat"],
+            "args": ["/c", "${workspaceFolder}\\scripts\\build_compiler.bat"],
             "group": "build",
             "problemMatcher": ["$gcc"],
             "detail": "Windows TCC 构建"

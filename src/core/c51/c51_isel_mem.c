@@ -40,7 +40,21 @@ static bool addr_value_needs_materialization(ISelContext* isel, ValueName value)
                 if (arg && *arg == value) {
                     uses_value = true;
                     has_use = true;
-                    if (!((user->op == IROP_LOAD || user->op == IROP_STORE) && index == 0)) {
+                    if ((user->op == IROP_LOAD || user->op == IROP_STORE) && index == 0) {
+                        /* Direct load/store use: OK, no materialization needed for this use */
+                    } else if (user->op == IROP_OFFSET && index == 0
+                               && user->args->len >= 2) {
+                        /* OFFSET(value, const, scale): foldable if OFFSET result itself
+                           is only used by LOAD/STORE as pointer */
+                        ValueName offidx = *(ValueName*)list_get(user->args, 1);
+                        int64_t dummy = 0;
+                        bool idx_const = try_get_value_const(isel, offidx, &dummy);
+                        if (idx_const && !addr_value_needs_materialization(isel, user->dest)) {
+                            /* OFFSET result only used by load/store → foldable */
+                        } else {
+                            return true;
+                        }
+                    } else {
                         return true;
                     }
                 }
@@ -590,6 +604,50 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     ValueName base = *(ValueName*)list_get(ins->args, 0);
     ValueName idx = *(ValueName*)list_get(ins->args, 1);
 
+    /* Optimization: OFFSET(ADDR(sym)/direct-DATA-sym, const) where result only
+       used as ptr in LOAD/STORE → skip code generation entirely.
+       emit_load/emit_store already handle OFFSET(ADDR(sym), const) via their
+       look-through logic, so the pointer value never needs to be in a register. */
+    if (isel && isel->ctx && isel->ctx->current_func) {
+        int64_t idx_imm = 0;
+        bool idx_is_imm_early = try_get_value_const(isel, idx, &idx_imm);
+        if (idx_is_imm_early) {
+            /* Resolve base symbol */
+            const char *osym = NULL;
+            Func *f = isel->ctx->current_func;
+            Instr *bdef = find_def_instr_in_func(f, base);
+            if (bdef && bdef->op == IROP_ADDR) {
+                if (isel->ctx->value_to_addr) {
+                    char *bk = int_to_key(bdef->dest);
+                    osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                    free(bk);
+                }
+            } else if (bdef && bdef->op == IROP_LOAD
+                       && bdef->args && bdef->args->len >= 1) {
+                ValueName inner = *(ValueName*)list_get(bdef->args, 0);
+                Instr *idef2 = find_def_instr_in_func(f, inner);
+                if (idef2 && idef2->op == IROP_ADDR && isel->ctx->value_to_addr) {
+                    char *bk = int_to_key(idef2->dest);
+                    osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                    free(bk);
+                }
+            } else if (isel->ctx->value_to_addr) {
+                char *bk = int_to_key(base);
+                osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                free(bk);
+            }
+            if (osym) {
+                SectionKind osec = get_symbol_section_kind(isel, osym);
+                if (osec == SEC_DATA || osec == SEC_IDATA || osec == SEC_XDATA) {
+                    /* Result value only used as LOAD/STORE pointer → no register needed */
+                    if (!addr_value_needs_materialization(isel, ins->dest)) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     int ptr_size = get_value_size(isel, ins->dest);
     if (ptr_size < 2) ptr_size = 2;
 
@@ -734,6 +792,61 @@ void emit_store(ISelContext* isel, Instr* ins) {
             if (def && def->op == IROP_ADDR) {
                 allow_pointer_store = false;
             }
+            /* Optimization: STORE through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) → direct sym+off store */
+            if (allow_pointer_store && def && def->op == IROP_OFFSET
+                    && def->args && def->args->len >= 2) {
+                ValueName base = *(ValueName*)list_get(def->args, 0);
+                ValueName offv = *(ValueName*)list_get(def->args, 1);
+                /* Resolve base: may be ADDR(sym) or LOAD(ADDR(sym)) */
+                const char *sym = NULL;
+                Instr *bdef = find_def_instr_in_func(isel->ctx->current_func, base);
+                if (bdef && bdef->op == IROP_ADDR) {
+                    /* OFFSET(ADDR(sym), k) */
+                    if (isel->ctx->value_to_addr) {
+                        char *bkey = int_to_key(bdef->dest);
+                        sym = (const char*)dict_get(isel->ctx->value_to_addr, bkey);
+                        free(bkey);
+                    }
+                } else if (bdef && bdef->op == IROP_LOAD
+                           && bdef->args && bdef->args->len >= 1) {
+                    /* OFFSET(LOAD(ADDR(sym)), k) */
+                    ValueName inner = *(ValueName*)list_get(bdef->args, 0);
+                    Instr *idef = find_def_instr_in_func(isel->ctx->current_func, inner);
+                    if (idef && idef->op == IROP_ADDR && isel->ctx->value_to_addr) {
+                        char *bkey = int_to_key(idef->dest);
+                        sym = (const char*)dict_get(isel->ctx->value_to_addr, bkey);
+                        free(bkey);
+                    }
+                } else {
+                    /* direct lookup in value_to_addr */
+                    if (isel->ctx->value_to_addr) {
+                        char *bkey = int_to_key(base);
+                        sym = (const char*)dict_get(isel->ctx->value_to_addr, bkey);
+                        free(bkey);
+                    }
+                }
+                if (sym) {
+                    Instr *cdef = find_def_instr_in_func(isel->ctx->current_func, offv);
+                    if (cdef && cdef->op == IROP_CONST) {
+                        int64_t idx_imm = cdef->imm.ival;
+                        int scale = (int)(def->imm.ival ? def->imm.ival : 1);
+                        int off = (int)(idx_imm * scale);
+                        SectionKind sym_sec = get_symbol_section_kind(isel, sym);
+                        if (sym_sec == SEC_DATA || sym_sec == SEC_IDATA || sym_sec == SEC_XDATA) {
+                            int store_size = ins->mem_type ? c51_abi_type_size(ins->mem_type) : 1;
+                            if (store_size < 1) store_size = 1;
+                            if (store_size > 2) store_size = 2;
+                            const char* vlo = isel_get_extended_lo_reg(isel, val, store_size);
+                            const char* vhi = (store_size == 2) ? isel_get_extended_hi_reg(isel, val, store_size) : NULL;
+                            emit_store_symbol_byte(isel, sym, off, vlo, ins);
+                            if (store_size == 2 && vhi) {
+                                emit_store_symbol_byte(isel, sym, off + 1, vhi, NULL);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
         }
         if (allow_pointer_store && emit_store_to_pointer_value(isel, ins, ptr, val)) {
             return;
@@ -810,7 +923,12 @@ void emit_addr(ISelContext* isel, Instr* ins) {
     }
 
     if (!addr_value_needs_materialization(isel, ins->dest)) {
-        return;
+        /* Only skip materialization for DATA/IDATA/XDATA symbols.
+           CODE segment symbols always need DPTR materialization for MOVC. */
+        SectionKind sym_sec = var_name ? get_symbol_section_kind(isel, var_name) : SEC_DATA;
+        if (sym_sec == SEC_DATA || sym_sec == SEC_IDATA || sym_sec == SEC_XDATA) {
+            return;
+        }
     }
 
     int ptr_size = ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
@@ -847,6 +965,120 @@ void emit_load(ISelContext* isel, Instr* ins) {
             Instr* def = find_def_instr_in_func(isel->ctx->current_func, ptr);
             if (def && def->op == IROP_ADDR) {
                 allow_pointer_deref = false;
+                /* Optimization: load(addr(sym)) where result only used as base in
+                   offset(result, const, scale) and all those offsets are only used
+                   by load/store → skip emitting this load entirely.
+                   emit_load/emit_store already look through LOAD(ADDR(sym)) chains. */
+                if (ins->dest > 0) {
+                    const char *sym_early = NULL;
+                    if (isel->ctx->value_to_addr) {
+                        char *bk = int_to_key(def->dest);
+                        sym_early = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                        free(bk);
+                    }
+                    if (sym_early) {
+                        SectionKind sec_early = get_symbol_section_kind(isel, sym_early);
+                        if (sec_early == SEC_DATA || sec_early == SEC_IDATA || sec_early == SEC_XDATA) {
+                            /* Check all uses of ins->dest are OFFSET with const idx,
+                               and all those OFFSET results only used by LOAD/STORE */
+                            bool all_uses_foldable = true;
+                            bool has_any_use = false;
+                            Func *f = isel->ctx->current_func;
+                            for (Iter bbit = list_iter(f->blocks); !iter_end(bbit) && all_uses_foldable;) {
+                                Block *blk = iter_next(&bbit);
+                                if (!blk || !blk->instrs) continue;
+                                for (Iter iit2 = list_iter(blk->instrs); !iter_end(iit2) && all_uses_foldable;) {
+                                    Instr *user = iter_next(&iit2);
+                                    if (!user || !user->args) continue;
+                                    for (int ai = 0; ai < user->args->len; ai++) {
+                                        ValueName *av = list_get(user->args, ai);
+                                        if (!av || *av != ins->dest) continue;
+                                        has_any_use = true;
+                                        /* Must be OFFSET(dest, const, scale) */
+                                        if (user->op != IROP_OFFSET || ai != 0) {
+                                            all_uses_foldable = false; break;
+                                        }
+                                        /* idx (arg 1) must be const */
+                                        if (user->args->len < 2) { all_uses_foldable = false; break; }
+                                        ValueName offidx = *(ValueName*)list_get(user->args, 1);
+                                        int64_t dummy = 0;
+                                        if (!try_get_value_const(isel, offidx, &dummy)) {
+                                            all_uses_foldable = false; break;
+                                        }
+                                        /* OFFSET result only used by LOAD/STORE */
+                                        if (!addr_value_needs_materialization(isel, user->dest)) {
+                                            /* already confirmed: only used as ptr in load/store */
+                                        } else {
+                                            all_uses_foldable = false; break;
+                                        }
+                                    }
+                                    if (!all_uses_foldable) break;
+                                }
+                            }
+                            if (all_uses_foldable && has_any_use) {
+                                return; /* skip: downstream load/store will fold via LOAD(ADDR(sym)) look-through */
+                            }
+                        }
+                    }
+                }
+            }
+            /* Optimization: LOAD through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) → direct sym+off load */
+            if (allow_pointer_deref && def && def->op == IROP_OFFSET
+                    && def->args && def->args->len >= 2) {
+                ValueName obase = *(ValueName*)list_get(def->args, 0);
+                ValueName ooffv = *(ValueName*)list_get(def->args, 1);
+                const char *osym = NULL;
+                Instr *obdef = find_def_instr_in_func(isel->ctx->current_func, obase);
+                if (obdef && obdef->op == IROP_ADDR) {
+                    if (isel->ctx->value_to_addr) {
+                        char *bk = int_to_key(obdef->dest);
+                        osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                        free(bk);
+                    }
+                } else if (obdef && obdef->op == IROP_LOAD
+                           && obdef->args && obdef->args->len >= 1) {
+                    ValueName inner = *(ValueName*)list_get(obdef->args, 0);
+                    Instr *idef2 = find_def_instr_in_func(isel->ctx->current_func, inner);
+                    if (idef2 && idef2->op == IROP_ADDR && isel->ctx->value_to_addr) {
+                        char *bk = int_to_key(idef2->dest);
+                        osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                        free(bk);
+                    }
+                } else if (isel->ctx->value_to_addr) {
+                    char *bk = int_to_key(obase);
+                    osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                    free(bk);
+                }
+                if (osym) {
+                    Instr *ocdef = find_def_instr_in_func(isel->ctx->current_func, ooffv);
+                    if (ocdef && ocdef->op == IROP_CONST) {
+                        int64_t oidx = ocdef->imm.ival;
+                        int oscale = (int)(def->imm.ival ? def->imm.ival : 1);
+                        int ooff = (int)(oidx * oscale);
+                        SectionKind osec = get_symbol_section_kind(isel, osym);
+                        if (osec == SEC_DATA || osec == SEC_IDATA || osec == SEC_XDATA) {
+                            int size = ins->type ? c51_abi_type_size(ins->type) : 1;
+                            if (size < 1) size = 1;
+                            if (size > 2) size = 2;
+                            int reg = safe_alloc_reg_for_value(isel, ins->dest, size);
+                            bool temp_r = false;
+                            if (reg < 0 || reg + size - 1 > 7) {
+                                reg = alloc_temp_reg(isel, ins->dest, size);
+                                temp_r = reg >= 0;
+                            }
+                            if (reg < 0) reg = 0;
+                            const char* dst_lo_r = isel_reg_name(reg + (size == 2 ? 1 : 0));
+                            const char* dst_hi_r = (size == 2) ? isel_reg_name(reg) : NULL;
+                            emit_load_symbol_byte(isel, osym, ooff, dst_lo_r, ins);
+                            if (size == 2) {
+                                emit_load_symbol_byte(isel, osym, ooff + 1, dst_hi_r ? dst_hi_r : "A", NULL);
+                            }
+                            store_spilled_mem_result(isel, ins, reg, size);
+                            if (temp_r) free_temp_reg(isel, reg, size);
+                            return;
+                        }
+                    }
+                }
             }
         }
         if (allow_pointer_deref && emit_load_from_pointer_value(isel, ins, ptr)) return;
@@ -871,17 +1103,62 @@ void emit_load(ISelContext* isel, Instr* ins) {
         if (def && def->op == IROP_OFFSET && def->args && def->args->len >= 2) {
             ValueName base = *(ValueName*)list_get(def->args, 0);
             ValueName offv = *(ValueName*)list_get(def->args, 1);
-            char *key = int_to_key(base);
+            /* Resolve base: ADDR(sym) or LOAD(ADDR(sym)) or direct lookup */
             const char *sym = NULL;
-            if (isel->ctx->value_to_addr) sym = (const char*)dict_get(isel->ctx->value_to_addr, key);
-            free(key);
+            Instr *bdef = find_def_instr_in_func(f, base);
+            if (bdef && bdef->op == IROP_ADDR) {
+                if (isel->ctx->value_to_addr) {
+                    char *bk = int_to_key(bdef->dest);
+                    sym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                    free(bk);
+                }
+            } else if (bdef && bdef->op == IROP_LOAD
+                       && bdef->args && bdef->args->len >= 1) {
+                ValueName inner = *(ValueName*)list_get(bdef->args, 0);
+                Instr *idef2 = find_def_instr_in_func(f, inner);
+                if (idef2 && idef2->op == IROP_ADDR && isel->ctx->value_to_addr) {
+                    char *bk = int_to_key(idef2->dest);
+                    sym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                    free(bk);
+                }
+            } else {
+                if (isel->ctx->value_to_addr) {
+                    char *bk = int_to_key(base);
+                    sym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
+                    free(bk);
+                }
+            }
             if (sym) {
                 Instr *cdef = find_def_instr_in_func(f, offv);
                 if (cdef && cdef->op == IROP_CONST) {
-                    int off = (int)cdef->imm.ival;
-                    Instr *basedef = find_def_instr_in_func(f, base);
-                    int space = basedef && basedef->mem_type ? get_mem_space(basedef->mem_type) : 0;
-                    if (space == 6) {
+                    int64_t idx_imm = cdef->imm.ival;
+                    int scale_f = (int)(def->imm.ival ? def->imm.ival : 1);
+                    int off = (int)(idx_imm * scale_f);
+                    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
+                    if (size < 1) size = 1;
+                    if (size > 2) size = 2;
+                    SectionKind sym_sec = get_symbol_section_kind(isel, sym);
+                    /* DATA / IDATA / XDATA: load sym+off directly */
+                    if (sym_sec == SEC_DATA || sym_sec == SEC_IDATA || sym_sec == SEC_XDATA) {
+                        int reg = safe_alloc_reg_for_value(isel, ins->dest, size);
+                        bool temp_result = false;
+                        if (reg < 0 || reg + size - 1 > 7) {
+                            reg = alloc_temp_reg(isel, ins->dest, size);
+                            temp_result = reg >= 0;
+                        }
+                        if (reg < 0) reg = 0;
+                        const char* dst_lo_r = isel_reg_name(reg + (size == 2 ? 1 : 0));
+                        const char* dst_hi_r = (size == 2) ? isel_reg_name(reg) : NULL;
+                        emit_load_symbol_byte(isel, sym, off, dst_lo_r, ins);
+                        if (size == 2) {
+                            emit_load_symbol_byte(isel, sym, off + 1, dst_hi_r ? dst_hi_r : "A", NULL);
+                        }
+                        store_spilled_mem_result(isel, ins, reg, size);
+                        if (temp_result) free_temp_reg(isel, reg, size);
+                        return;
+                    }
+                    /* CODE segment: use MOVC */
+                    if (sym_sec == SEC_CODE) {
                         char dptr_val[256];
                         snprintf(dptr_val, sizeof(dptr_val), "#%s", sym);
                         isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
@@ -892,11 +1169,8 @@ void emit_load(ISelContext* isel, Instr* ins) {
                             isel_emit(isel, "MOV", "A", offvstr, instr_to_ssa_str(ins));
                         }
                         isel_emit(isel, "MOVC", "A", "@A+DPTR", instr_to_ssa_str(ins));
-                        const char* dst_lo = NULL;
-                        int size = ins->type ? c51_abi_type_size(ins->type) : 1;
                         int reg = safe_alloc_reg_for_value(isel, ins->dest, size);
-                        if (reg >= 0) dst_lo = isel_reg_name(reg + (size == 2 ? 1 : 0));
-                        else dst_lo = "A";
+                        const char* dst_lo = (reg >= 0) ? isel_reg_name(reg + (size == 2 ? 1 : 0)) : "A";
                         if (dst_lo && strcmp(dst_lo, "A") != 0) {
                             isel_emit(isel, "MOV", dst_lo, "A", NULL);
                         }

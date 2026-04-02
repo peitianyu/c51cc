@@ -4,3 +4,6 @@ a.out
 c51cc.exe
 *.exe
 code/
+artifacts/
+_tools/
+output/

@@ -63,6 +63,9 @@ void emit_const(ISelContext* isel, Instr* ins) {
     }
 
     int reg = alloc_reg_for_value(isel, ins->dest, size);
+    /* reg == -1 means this CONST is rematerializable (no physical register assigned).
+     * It will be inlined as an immediate operand wherever it is used. Skip materializing. */
+    if (reg == -1) return;
     int phys_reg = reg;
     if (phys_reg < 0) phys_reg = 0;
 
@@ -176,6 +179,26 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     }
     if (dst_reg < 0) dst_reg = 0;
 
+    /* If next instruction is RET, write result directly into return registers R7/R6
+     * to avoid an extra MOV copy after the addition. */
+    bool add_direct_to_ret = false;
+    if (next && next->op == IROP_RET) {
+        int ret_phys_add = (size == 2) ? 6 : 7;
+        if (dst_reg != ret_phys_add) {
+            /* Safety: don't redirect if src1 or src2 overlaps R6/R7 */
+            int s1_base = isel_get_value_reg(isel, src1);
+            int s1_sz = src1_size;
+            bool s1_safe = (s1_base < 0) || (s1_base + s1_sz - 1 < 6);
+            int s2_base = src2_is_imm ? -1 : isel_get_value_reg(isel, src2);
+            int s2_sz = src2_is_imm ? 0 : get_value_size(isel, src2);
+            bool s2_safe = (s2_base < 0) || (s2_base + s2_sz - 1 < 6);
+            if (s1_safe && s2_safe) {
+                dst_reg = ret_phys_add;
+                add_direct_to_ret = true;
+            }
+        }
+    }
+
     const char* src1_lo = isel_get_lo_reg(isel, src1);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     const char* src1_hi_preserved = NULL;
@@ -205,6 +228,45 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
                 src2_hi_preserved = (src2_hi_tmp >= 0) ? isel_reg_name(src2_hi_tmp) : "B";
                 emit_mov(isel, src2_hi_preserved, src2_hi, NULL);
             }
+        }
+    }
+
+    /* 16-bit += 1 optimization: use INC Rlo; CJNE Rlo, #0, skip; INC Rhi
+     * This avoids loading through A and saves 3 instructions vs ADD+ADDC path. */
+    if (size == 2 && src1_size == 2 && src2_is_imm && imm_val == 1 && !src1_hi_preserved) {
+        int src1_base_reg2 = isel_get_value_reg(isel, src1);
+        const char* s1_hi = (src1_base_reg2 >= 0) ? isel_reg_name(src1_base_reg2) : NULL;
+        const char* s1_lo = (src1_base_reg2 >= 0) ? isel_reg_name(src1_base_reg2 + 1) : NULL;
+        const char* d_hi  = isel_reg_name(dst_reg);
+        const char* d_lo  = isel_reg_name(dst_reg + 1);
+
+        if (s1_lo && s1_hi && d_lo && d_hi) {
+            char* ssa = instr_to_ssa_str(ins);
+
+            /* If not in-place, copy src to dst first */
+            if (dst_reg != src1_base_reg2) {
+                emit_mov(isel, d_hi, s1_hi, ins);
+                emit_mov(isel, d_lo, s1_lo, NULL);
+                if (ssa) { /* already annotated above */ free(ssa); ssa = NULL; }
+            }
+
+            /* INC lo; CJNE lo, #0, skip_inc_hi; INC hi */
+            char* skip_lbl = isel_new_label(isel, "Linc16_skip");
+            isel_emit(isel, "INC", d_lo, NULL, ssa);
+            if (ssa) { free(ssa); ssa = NULL; }
+            {
+                char arg2[64];
+                snprintf(arg2, sizeof(arg2), "#0, %s", skip_lbl);
+                isel_emit(isel, "CJNE", d_lo, arg2, NULL);
+            }
+            isel_emit(isel, "INC", d_hi, NULL, NULL);
+            isel_emit_label(isel, skip_lbl);
+            free(skip_lbl);
+
+            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+            if (src1_hi_tmp >= 0) free_temp_reg(isel, src1_hi_tmp, 1);
+            if (src2_hi_tmp >= 0) free_temp_reg(isel, src2_hi_tmp, 1);
+            return;
         }
     }
 
@@ -278,23 +340,26 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     if (src2_hi_tmp >= 0) free_temp_reg(isel, src2_hi_tmp, 1);
 
     if (next && next->op == IROP_RET) {
-        const char* ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
-        const char* ret_hi = isel_reg_name(dst_reg);
         int ret_size = next->type ? c51_abi_type_size(next->type) : 1;
+        if (!add_direct_to_ret) {
+            /* Fallback: result is in dst_reg, emit copy if needed */
+            const char* ret_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
+            const char* ret_hi = isel_reg_name(dst_reg);
 
-        if (strcmp(ret_lo, "R7") != 0) {
-            emit_mov(isel, "R7", ret_lo, NULL);
-        }
-        if (ret_size == 2) {
-            if (size == 2) {
-                if (strcmp(ret_hi, "R6") != 0) {
-                    emit_mov(isel, "R6", ret_hi, NULL);
+            if (strcmp(ret_lo, "R7") != 0) {
+                emit_mov(isel, "R7", ret_lo, NULL);
+            }
+            if (ret_size == 2) {
+                if (size == 2) {
+                    if (strcmp(ret_hi, "R6") != 0) {
+                        emit_mov(isel, "R6", ret_hi, NULL);
+                    }
+                } else {
+                    emit_mov(isel, "R6", "#0", NULL);
                 }
-            } else {
-                emit_mov(isel, "R6", "#0", NULL);
             }
         }
-
+        /* add_direct_to_ret: result was written directly to R7/R6, no copy needed */
         if (isel->ctx && isel->ctx->value_to_reg) {
             int* reg_num = malloc(sizeof(int));
             *reg_num = (size == 2) ? 6 : 7;
@@ -1193,6 +1258,24 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     }
     if (phys_dst_reg < 0) phys_dst_reg = 0;
 
+    /* If next instruction is RET, write result directly into return registers R7/R6
+     * to avoid an extra MOV copy after the subtraction. */
+    int ret_size_sub = (next && next->op == IROP_RET && next->type)
+                       ? c51_abi_type_size(next->type) : 0;
+    bool direct_to_ret = false;
+    if (next && next->op == IROP_RET && !temp_result) {
+        int ret_phys = (ret_size_sub == 2 || size == 2) ? 6 : 7;
+        if (phys_dst_reg != ret_phys) {
+            /* Safety: don't redirect if src1 overlaps R6/R7 (would corrupt read) */
+            int src1_base = isel_get_value_reg(isel, src1);
+            bool src1_safe = (src1_base < 0) || (src1_base + src1_size - 1 < 6);
+            if (src1_safe) {
+                phys_dst_reg = ret_phys;
+                direct_to_ret = true;
+            }
+        }
+    }
+
     const char* dst_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
     const char* src1_hi_preserved = NULL;
     const char* src2_hi_preserved = NULL;
@@ -1219,6 +1302,61 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
                 emit_mov(isel, src2_hi_preserved, src2_hi, NULL);
             }
         }
+    }
+
+    /* 16-bit sub-1 special case: use DEC Rlo; JNZ skip; DEC Rhi; skip:
+     * This matches the compact pattern keil generates and avoids CLR C + SUBB pair. */
+    if (size == 2 && src2_is_imm && imm_val == 1 && src1_size == 2 && !src2_spilled_mem) {
+        const char* src1_hi = src1_hi_preserved ? src1_hi_preserved : isel_get_hi_reg(isel, src1);
+        const char* dst_hi = isel_reg_name(phys_dst_reg);
+
+        /* Copy src to dst first (in-place DEC is safe when dst == src) */
+        if (strcmp(dst_lo, src1_lo) != 0) {
+            emit_mov(isel, dst_lo, src1_lo, ins);
+        }
+        if (strcmp(dst_hi, src1_hi) != 0) {
+            emit_mov(isel, dst_hi, src1_hi, ins);
+        }
+
+        char* l_skip = isel_new_label(isel, "Ldec16_skip");
+        char lb_skip[64];
+        snprintf(lb_skip, sizeof(lb_skip), "%s:", l_skip);
+
+        char* ssa = instr_to_ssa_str(ins);
+        /* DEC low byte */
+        isel_emit(isel, "DEC", dst_lo, NULL, ssa);
+        free(ssa);
+        /* If dst_lo wrapped from 0x00 to 0xFF, borrow occurred → DEC high byte
+         * CJNE Rlo, #255, skip  — jumps to skip if Rlo != 0xFF, falls through if Rlo == 0xFF */
+        {
+            char cjne_arg2[64];
+            snprintf(cjne_arg2, sizeof(cjne_arg2), "#255,%s", l_skip);
+            isel_emit(isel, "CJNE", dst_lo, cjne_arg2, NULL);
+        }
+        isel_emit(isel, "DEC", dst_hi, NULL, NULL);
+        isel_emit(isel, lb_skip, NULL, NULL, NULL);
+        free(l_skip);
+
+        store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+        if (src1_hi_tmp >= 0) free_temp_reg(isel, src1_hi_tmp, 1);
+        if (src2_hi_tmp >= 0) free_temp_reg(isel, src2_hi_tmp, 1);
+        if (next && next->op == IROP_RET) {
+            int ret_size = next->type ? c51_abi_type_size(next->type) : 1;
+            if (!direct_to_ret) {
+                const char* ret_lo = isel_reg_name(phys_dst_reg + 1);
+                const char* ret_hi = isel_reg_name(phys_dst_reg);
+                if (strcmp(ret_lo, "R7") != 0) emit_mov(isel, "R7", ret_lo, ins);
+                if (ret_size == 2 && strcmp(ret_hi, "R6") != 0) emit_mov(isel, "R6", ret_hi, ins);
+            }
+            if (isel->ctx && isel->ctx->value_to_reg) {
+                int* reg_num = malloc(sizeof(int));
+                *reg_num = 6;
+                char* key = int_to_key(ins->dest);
+                dict_put(isel->ctx->value_to_reg, key, reg_num);
+            }
+        }
+        if (temp_result) free_temp_reg(isel, phys_dst_reg, size);
+        return;
     }
 
     if (src2_spilled_mem) {
@@ -1298,29 +1436,32 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     if (src2_hi_tmp >= 0) free_temp_reg(isel, src2_hi_tmp, 1);
 
     if (next && next->op == IROP_RET) {
-        const char* ret_lo = NULL;
-        const char* ret_hi = NULL;
-        if (phys_dst_reg >= 0) {
-            ret_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
-            ret_hi = isel_reg_name(phys_dst_reg);
-        } else {
-            ret_lo = isel_get_lo_reg(isel, ins->dest);
-            ret_hi = isel_get_hi_reg(isel, ins->dest);
-        }
         int ret_size = next->type ? c51_abi_type_size(next->type) : 1;
-        if (ret_lo && strcmp(ret_lo, "R7") != 0) {
-            emit_mov(isel, "R7", ret_lo, ins);
-        }
-        if (ret_size == 2) {
-            if (size == 2) {
-                if (ret_hi && strcmp(ret_hi, "R6") != 0) {
-                    emit_mov(isel, "R6", ret_hi, ins);
-                }
+        if (!direct_to_ret) {
+            /* Fallback: result is already in phys_dst_reg, emit copy if needed */
+            const char* ret_lo = NULL;
+            const char* ret_hi = NULL;
+            if (phys_dst_reg >= 0) {
+                ret_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
+                ret_hi = isel_reg_name(phys_dst_reg);
             } else {
-                emit_mov(isel, "R6", "#00H", ins);
+                ret_lo = isel_get_lo_reg(isel, ins->dest);
+                ret_hi = isel_get_hi_reg(isel, ins->dest);
+            }
+            if (ret_lo && strcmp(ret_lo, "R7") != 0) {
+                emit_mov(isel, "R7", ret_lo, ins);
+            }
+            if (ret_size == 2) {
+                if (size == 2) {
+                    if (ret_hi && strcmp(ret_hi, "R6") != 0) {
+                        emit_mov(isel, "R6", ret_hi, ins);
+                    }
+                } else {
+                    emit_mov(isel, "R6", "#00H", ins);
+                }
             }
         }
-
+        /* direct_to_ret: result was written directly to R7/R6, no copy needed */
         if (isel->ctx && isel->ctx->value_to_reg) {
             int* reg_num = malloc(sizeof(int));
             *reg_num = (size == 2) ? 6 : 7;

@@ -308,6 +308,18 @@ void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* 
     append_asm_instr(isel->sec, op, arg1, arg2, ssa, true);
 }
 
+void isel_emit3(ISelContext* isel, const char* op, const char* arg1, const char* arg2, const char* arg3, const char* ssa) {
+    if (!isel || !isel->sec || !op) return;
+    AsmInstr* ins = calloc(1, sizeof(AsmInstr));
+    ins->op = strdup(op);
+    ins->args = make_list();
+    if (arg1) list_push(ins->args, strdup(arg1));
+    if (arg2) list_push(ins->args, strdup(arg2));
+    if (arg3) list_push(ins->args, strdup(arg3));
+    if (ssa) ins->ssa = strdup(ssa);
+    list_push(isel->sec->asminstrs, ins);
+}
+
 void isel_emit_label(ISelContext* isel, const char* label) {
     if (!isel || !isel->sec || !label) return;
     isel_emit(isel, label, NULL, NULL, NULL);
@@ -826,7 +838,16 @@ void isel_block(ISelContext* isel, Block* block) {
     precompute_br_simplify(isel, instrs, num_instrs);
 
     for (int i = 0; i < num_instrs; i++) {
-        Instr* next = (i + 1 < num_instrs) ? instrs[i + 1] : NULL;
+        /* 寻找下一条有意义的指令（跳过CONST/NOP，它们不产生代码，不阻断BR-aware路径） */
+        Instr* next = NULL;
+        for (int j = i + 1; j < num_instrs; j++) {
+            Instr* cand = instrs[j];
+            if (!cand) continue;
+            if (cand->op == IROP_NOP) continue;
+            if (cand->op == IROP_CONST) continue;
+            next = cand;
+            break;
+        }
         isel_instr(isel, instrs[i], next);
     }
 

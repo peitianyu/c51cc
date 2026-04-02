@@ -546,6 +546,94 @@ static int peephole_sjmp_to_next_label(List* instrs, int start) {
     return 0;
 }
 
+/* 返回条件指令的逆条件 */
+static const char* invert_cond(const char* op) {
+    if (!op) return NULL;
+    if (strcmp(op, "JZ")  == 0) return "JNZ";
+    if (strcmp(op, "JNZ") == 0) return "JZ";
+    if (strcmp(op, "JC")  == 0) return "JNC";
+    if (strcmp(op, "JNC") == 0) return "JC";
+    return NULL;
+}
+
+/* 窥孔优化：Jcond Lskip; SJMP/LJMP L2; Lskip: → Jinv_cond L2
+ * 将条件跳转绕过无条件跳转的模式折叠为单个反向条件跳转。
+ * 例：JZ Lskip; SJMP L2; Lskip: → JNZ L2
+ */
+static int peephole_fold_cond_jump(List* instrs, int start) {
+    if (start + 2 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    AsmInstr* ins3 = (AsmInstr*)list_get(instrs, start + 2);
+
+    if (!ins1 || !ins2 || !ins3 || !ins1->op || !ins2->op || !ins3->op) return 0;
+
+    /* ins1 必须是单操作数条件跳转（JZ/JNZ/JC/JNC） */
+    const char* inv = invert_cond(ins1->op);
+    if (!inv) return 0;
+    if (!ins1->args || ins1->args->len < 1) return 0;
+    const char* skip_target = (const char*)list_get(ins1->args, 0);
+    if (!skip_target) return 0;
+
+    /* ins2 必须是无条件跳转 SJMP/LJMP/AJMP */
+    if (!(strcmp(ins2->op, "SJMP") == 0 || strcmp(ins2->op, "LJMP") == 0 || strcmp(ins2->op, "AJMP") == 0)) return 0;
+    if (!ins2->args || ins2->args->len < 1) return 0;
+    const char* jump_target = (const char*)list_get(ins2->args, 0);
+    if (!jump_target) return 0;
+
+    /* ins3 必须是 ins1 的 skip 目标标签 */
+    size_t len3 = strlen(ins3->op);
+    if (len3 == 0 || ins3->op[len3 - 1] != ':') return 0;
+    char label3[64];
+    if (len3 >= sizeof(label3)) return 0;
+    strncpy(label3, ins3->op, len3 - 1);
+    label3[len3 - 1] = '\0';
+    if (strcmp(skip_target, label3) != 0) return 0;
+
+    /* 检查 label3 是否还有其他引用（除了 ins1 本身） */
+    int ref_count = 0;
+    for (int i = 0; i < instrs->len; i++) {
+        AsmInstr* check = (AsmInstr*)list_get(instrs, i);
+        if (!check || !check->args) continue;
+        for (int j = 0; j < check->args->len; j++) {
+            const char* arg = (const char*)list_get(check->args, j);
+            if (arg && strcmp(arg, label3) == 0) ref_count++;
+        }
+    }
+    /* 如果 label3 还被其他指令引用，不能直接删除标签，但仍可以折叠跳转 */
+
+    /* 将 ins1 的操作改为反向条件跳转，目标改为 jump_target */
+    free(ins1->op);
+    ins1->op = strdup(inv);
+    free(ins1->args->head->elem);
+    ins1->args->head->elem = strdup(jump_target);
+
+    /* 删除 ins2（原无条件跳转） */
+    remove_instr(instrs, start + 1);
+
+    /* 如果 label3 只被这一处引用，也删除标签（现在 ins3 在位置 start+1） */
+    if (ref_count <= 1) {
+        remove_instr(instrs, start + 1);
+    }
+
+    return 1;
+}
+
+/* 窥孔优化：删除 MOV Rn, Rn（自赋值） */
+static int peephole_self_mov(List* instrs, int start) {
+    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
+    if (!is_mov(ins)) return 0;
+    const char* dst = get_operand(ins, 0);
+    const char* src = get_operand(ins, 1);
+    if (!dst || !src) return 0;
+    if (strcmp(dst, src) == 0) {
+        remove_instr(instrs, start);
+        return 1;
+    }
+    return 0;
+}
+
 static bool get_next_label_name(AsmInstr* ins, char* label, size_t label_size) {
     size_t len;
 
@@ -666,6 +754,12 @@ static void optimize_section(Section* sec) {
             // FIXME: 该规则在当前寄存器分配/调用约定下仍可能误删关键MOV
             // 启用死代码删除（仅寄存器目标，且未被后续读取）
             removed = peephole_dead_code(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_self_mov(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_fold_cond_jump(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_thread_jump_chain(sec->asminstrs, i);

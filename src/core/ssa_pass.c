@@ -719,10 +719,57 @@ static bool phi_label_in_preds(Block *b, const char *lbl) {
     return false;
 }
 
-static bool phi_prune_dead_edges(Block *b, Instr *p) {
+/* 检查phi arm对应的前驱块是否已被完全清空（dead block）。
+ * 只有当前驱块的instrs和phis都为空时，才认为该arm可以安全删除。
+ * 注意：不依赖terminator是否指向当前块，因为其他pass可能尚未同步更新phi labels。 */
+static bool phi_pred_reachable_via_term(Func *f, Block *b, const char *pred_lbl) {
     (void)b;
-    (void)p;
-    return false;
+    if (!f || !pred_lbl) return true; /* 保守：保留 */
+    int pred_id = -1;
+    if (sscanf(pred_lbl, "block%d", &pred_id) != 1) return true; /* 非standard label，保守保留 */
+    Block *pred_block = find_block_by_id(f, pred_id);
+    if (!pred_block) return false; /* 块不存在，可以删除 */
+    /* 只有当前驱块的instrs完全为空时（被unreachable_block_elim清空），才认为arm无效 */
+    if (!pred_block->instrs || pred_block->instrs->len == 0) return false;
+    return true; /* 前驱块有指令，保守保留phi arm */
+}
+
+static bool phi_prune_dead_edges(Block *b, Instr *p, Func *f) {
+    if (!b || !p || p->op != IROP_PHI || !p->args || !p->labels || !f) return false;
+
+    int n = p->args->len < p->labels->len ? p->args->len : p->labels->len;
+    if (n <= 1) return false; /* 单arm phi，由phi_simplify_value处理 */
+
+    List *new_args = make_list(), *new_labels = make_list();
+    bool changed = false;
+
+    for (int i = 0; i < n; i++) {
+        const char *lbl = (const char *)list_get(p->labels, i);
+        /* 通过查询函数的CFG（terminator）来验证phi arm的有效性，
+         * 而不是依赖可能不准确的preds列表 */
+        if (phi_pred_reachable_via_term(f, b, lbl)) {
+            list_push(new_args, list_get(p->args, i));
+            list_push(new_labels, list_get(p->labels, i));
+        } else {
+            changed = true;
+        }
+    }
+
+    /* 安全检查：不删除所有arm，至少保留一个 */
+    if (changed && new_args->len == 0) {
+        free(new_args); free(new_labels);
+        return false;
+    }
+
+    if (changed) {
+        list_clear_shallow(p->args);
+        list_clear_shallow(p->labels);
+        for (Iter it = list_iter(new_args); !iter_end(it);) list_push(p->args, iter_next(&it));
+        for (Iter it = list_iter(new_labels); !iter_end(it);) list_push(p->labels, iter_next(&it));
+    }
+
+    free(new_args); free(new_labels);
+    return changed;
 }
 
 static bool phi_dedup_edges(Instr *p) {
@@ -768,7 +815,7 @@ static bool pass_phi(Func *f, Stats *s) {
         if (!b) continue;
         for (Iter kt = list_iter(b->phis); !iter_end(kt);) {
             Instr *p = iter_next(&kt);
-            if (phi_prune_dead_edges(b, p)) changed = true;
+            if (phi_prune_dead_edges(b, p, f)) changed = true;
             if (phi_simplify_value(p, f, s)) changed = true;
             if (phi_dedup_edges(p)) changed = true;
         }
@@ -812,6 +859,64 @@ static bool pass_phi_cleanup(Func *f, Stats *s) {
             else { changed = true; if (s) s->phi_rm++; }
         }
         b->phis = keep;
+    }
+    return changed;
+}
+
+/* 检查一个值是否只能产生0或1（bool范围）*/
+static bool is_bool_value(Func *f, ValueName v, int depth) {
+    if (depth > 8) return false; /* 防止无限递归 */
+    Instr *def = find_def_instr(f, v);
+    if (!def) return false;
+    switch (def->op) {
+    case IROP_CONST:
+        return def->imm.ival == 0 || def->imm.ival == 1;
+    case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE:
+    case IROP_LNOT:
+        return true; /* 比较/逻辑非结果总是0/1 */
+    case IROP_LAND: case IROP_LOR:
+        return true; /* 逻辑与/或结果也是0/1 */
+    case IROP_ZEXT: case IROP_SEXT: case IROP_TRUNC:
+        /* 若来源是bool范围，扩展后还是bool范围 */
+        return is_bool_value(f, get_arg(def, 0), depth + 1);
+    case IROP_PHI:
+        if (!def->args) return false;
+        for (Iter it = list_iter(def->args); !iter_end(it);) {
+            ValueName *arg = iter_next(&it);
+            if (!arg || *arg == 0) continue;
+            if (!is_bool_value(f, *arg, depth + 1)) return false;
+        }
+        return def->args->len > 0; /* 所有phi来源都是bool */
+    default:
+        return false;
+    }
+}
+
+/* 消除冗余的 ne(x, 0) 当 x 已经是 bool 范围（0/1）时：ne(x,0) == x */
+static bool pass_simplify_redundant_ne(Func *f, Stats *s) {
+    if (!f || !f->blocks) return false;
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op != IROP_NE) continue;
+            /* 检查是否是 ne(x, 0) */
+            int64_t rhs_val = 0;
+            if (!get_const_value(f, get_arg(i, 1), &rhs_val) || rhs_val != 0) continue;
+            /* 也尝试从labels检查imm标签 */
+            ValueName lhs = get_arg(i, 0);
+            if (!is_bool_value(f, lhs, 0)) continue;
+            /* ne(bool, 0) == bool — 变成 ZEXT(lhs) 以便 copy_prop 传播 */
+            i->op = IROP_ZEXT;
+            if (i->args) list_clear(i->args);
+            if (i->labels) list_clear(i->labels);
+            ValueName *p = pass_alloc(sizeof *p); *p = lhs;
+            if (!i->args) i->args = make_list();
+            list_push(i->args, p);
+            ++s->fold; changed = true;
+        }
     }
     return changed;
 }
@@ -869,6 +974,30 @@ static bool pass_const_fold(Func *f, Stats *s) {
                     r = a & m; ok = true;
                 }
                 break;
+            case IROP_SELECT: {
+                /* 若条件是常量，折叠为对应分支 */
+                if (!ha) break; /* 条件不是常量，跳过 */
+                /* args: [0]=cond, [1]=v_true, [2]=v_false */
+                ValueName chosen = get_arg(i, a != 0 ? 1 : 2);
+                int64_t cv = 0;
+                if (chosen != 0 && get_const_value(f, chosen, &cv)) {
+                    /* 被选分支也是常量，直接折叠 */
+                    i->op = IROP_CONST; i->imm.ival = cv;
+                    if (i->args) list_clear(i->args);
+                    if (i->labels) list_clear(i->labels);
+                    ++s->fold; changed = true;
+                } else if (chosen != 0) {
+                    /* 被选分支是变量，变成 ZEXT(chosen) 以供 copy_prop 传播 */
+                    i->op = IROP_ZEXT;
+                    if (i->args) list_clear(i->args);
+                    if (i->labels) list_clear(i->labels);
+                    ValueName *p = pass_alloc(sizeof *p); *p = chosen;
+                    if (!i->args) i->args = make_list();
+                    list_push(i->args, p);
+                    ++s->fold; changed = true;
+                }
+                continue;
+            }
             case IROP_STORE:
                 if (i->args->len >= 2) {
                     Instr *addr = find_def_instr(f, get_arg(i, 0));
@@ -1711,11 +1840,22 @@ static bool inline_single_call(Func *f, Instr *call, int *next_val, Stats *s, Li
     if (!f || !call || call->op != IROP_CALL || !call->labels || call->labels->len < 1) return false;
     const char *callee_name = (const char *)list_get(call->labels, 0);
     Func *callee = find_func_in_unit(callee_name);
-    if (!callee || !callee->is_inline || callee->is_interrupt || callee->is_noreturn) return false;
+    if (!callee || callee->is_interrupt || callee->is_noreturn) return false;
     if (callee == f) return false; // 递归暂不内联
     if (!callee->blocks || callee->blocks->len != 1 || !callee->entry) return false;
     Block *cb = callee->entry;
     if (cb->phis && cb->phis->len > 0) return false;
+    /* 若未显式标记inline，则只在足够简单（≤6条有效指令，无CALL）时自动内联 */
+    if (!callee->is_inline) {
+        int eff = 0;
+        for (Iter it = list_iter(cb->instrs); !iter_end(it);) {
+            Instr *ii = iter_next(&it);
+            if (!ii || ii->op == IROP_NOP || ii->op == IROP_PARAM || ii->op == IROP_RET) continue;
+            if (ii->op == IROP_CALL) return false; /* 有调用则不自动内联 */
+            eff++;
+        }
+        if (eff > 6) return false;
+    }
 
     int argc = call->args ? call->args->len : 0;
     ValueName params[32];
@@ -1785,21 +1925,43 @@ static bool inline_single_call(Func *f, Instr *call, int *next_val, Stats *s, Li
     }
 
     ValueName ret_val = 0;
-    if (ret->args && ret->args->len > 0) {
-        ValueName rv = *(ValueName *)list_get(ret->args, 0);
-        bool found = false;
-        ret_val = vmap_get(vmap, vmap_count, rv, &found);
-        if (!found) return false;
+    bool ret_is_imm = false;
+    long ret_imm_val = 0;
+    if (ret->labels && ret->labels->len > 0) {
+        char *tag = (char *)list_get(ret->labels, 0);
+        if (tag && strcmp(tag, "imm") == 0) {
+            /* pass_ret_const_inline 把 ret vX 变成了 ret imm 形式 */
+            ret_is_imm = true;
+            ret_imm_val = ret->imm.ival;
+        }
+    }
+    if (!ret_is_imm) {
+        if (ret->args && ret->args->len > 0) {
+            ValueName rv = *(ValueName *)list_get(ret->args, 0);
+            bool found = false;
+            ret_val = vmap_get(vmap, vmap_count, rv, &found);
+            if (!found) return false;
+        }
     }
 
-    if (call->dest && !ret_val) return false;
+    if (call->dest && !ret_is_imm && !ret_val) return false;
 
     for (Iter it = list_iter(cloned); !iter_end(it);)
         list_push(out_instrs, iter_next(&it));
 
     list_clear_shallow(cloned);
 
-    if (call->dest && ret_val) {
+    if (call->dest && ret_is_imm) {
+        /* 内联返回常量：把 call->dest 改成 CONST 指令 */
+        call->op = IROP_CONST;
+        call->imm.ival = ret_imm_val;
+        if (call->args) { list_clear(call->args); call->args = NULL; }
+        if (call->labels) { list_clear(call->labels); call->labels = NULL; }
+        /* 把这条 CONST 指令加入输出（call 会被 continue 跳过，所以要直接加） */
+        list_push(out_instrs, call);
+        if (s) s->fold++;
+        return true;
+    } else if (call->dest && ret_val) {
         bool dummy_changed = false;
         replace_all_uses(f, call->dest, ret_val, &dummy_changed);
     }
@@ -2685,6 +2847,7 @@ void ssa_optimize_func(Func *f, int level) {
 #define RUN_PASS(_p) do { if (_p(f, &st)) { changed = true; rebuild_preds(f); } } while (0)
         changed = false;
         RUN_PASS(pass_const_fold);
+        RUN_PASS(pass_simplify_redundant_ne);
         RUN_PASS(pass_store_load_forwarding);
         RUN_PASS(pass_load_load_forwarding);
         RUN_PASS(pass_addr_deref_fold);

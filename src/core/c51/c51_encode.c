@@ -725,6 +725,13 @@ static int size_cjne_view(const InstrView *view)
 	char *label = NULL;
 	int size = -1;
 	if (!view || !view->op || strcmp(view->op, "CJNE") != 0) return 0;
+	/* CJNE Rn, #imm, rel — 3 bytes (opcode B8+n, imm, rel) */
+	if (view->arg1 && reg_index(view->arg1) >= 0 && split_cjne_arg2(view->arg2, &cmp_operand, &label)) {
+		if (is_immediate(cmp_operand)) size = 3;
+		free(cmp_operand);
+		free(label);
+		return size;
+	}
 	if (view->arg1 && is_acc(view->arg1) && split_cjne_arg2(view->arg2, &cmp_operand, &label)) {
 		if (is_immediate(cmp_operand)) size = 3;
 		else if (reg_index(cmp_operand) >= 0 || is_indirect_reg(cmp_operand)) size = 5;
@@ -969,6 +976,33 @@ static int encode_cjne(EncodeState *state, const InstrView *view, unsigned char 
 	int reg;
 	int target;
 	if (!view || !view->op || strcmp(view->op, "CJNE") != 0) return 0;
+
+	/* Handle CJNE Rn, #imm, rel (opcode B8+n, imm, rel8) */
+	reg = view->arg1 ? reg_index(view->arg1) : -1;
+	if (reg >= 0 && split_cjne_arg2(view->arg2, &cmp_operand, &label)) {
+		if (!is_immediate(cmp_operand)) {
+			report_encode_error(state, view->ins, "CJNE Rn requires immediate operand");
+			free(cmp_operand); free(label); return -1;
+		}
+		if (!eval_expr(state, label, &expr) || expr.is_symbolic) {
+			if (!lookup_local_label(state, label, &target)) {
+				report_encode_error(state, view->ins, "CJNE requires local label target");
+				free(cmp_operand); free(label); return -1;
+			}
+		} else {
+			target = expr.value;
+		}
+		out[view->pc - state->start_offset] = (unsigned char)(0xB8 + reg);
+		if (!eval_immediate(state, cmp_operand, &expr) ||
+		    !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) {
+			free(cmp_operand); free(label); return -1;
+		}
+		out[view->pc - state->start_offset + 2] = (unsigned char)checked_rel8(state, view->ins, view->next_pc, target);
+		free(cmp_operand); free(label);
+		return view->size;
+	}
+	free(cmp_operand); free(label); cmp_operand = NULL; label = NULL;
+
 	if (!(view->arg1 && is_acc(view->arg1) && split_cjne_arg2(view->arg2, &cmp_operand, &label))) {
 		report_encode_error(state, view->ins, "unsupported CJNE form");
 		free(cmp_operand);
@@ -1429,6 +1463,83 @@ static void record_labels(EncodeState *state)
 	}
 }
 
+/*
+ * LJMP→SJMP relaxation pass.
+ * Iteratively replaces LJMP with SJMP when the branch target is within
+ * the signed 8-bit relative range (−128..+127) from the instruction
+ * that follows the SJMP (next_pc = sjmp_pc + 2).
+ * Runs before record_labels so label positions are correct.
+ */
+static void relax_ljmp_to_sjmp(Section *sec, int start_offset)
+{
+    if (!sec || !sec->asminstrs) return;
+
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+
+        /* Step 1: compute PC for each instruction and build label→PC map */
+        Dict *label_pcs = make_dict(NULL);  /* label name → int* pc */
+        int pc = start_offset;
+        for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+            AsmInstr *ins = iter_next(&it);
+            if (!ins || !ins->op) continue;
+            size_t oplen = strlen(ins->op);
+            if (oplen > 0 && ins->op[oplen - 1] == ':') {
+                /* Label: record pc */
+                char *name = malloc(oplen);  /* without ':' */
+                if (!name) { dict_free(label_pcs, free); return; }
+                memcpy(name, ins->op, oplen - 1);
+                name[oplen - 1] = '\0';
+                int *ppc = malloc(sizeof(int));
+                if (!ppc) { free(name); dict_free(label_pcs, free); return; }
+                *ppc = pc;
+                dict_put(label_pcs, name, ppc);
+            } else {
+                /* Instruction: add its size */
+                int sz = instruction_size(ins);
+                if (sz > 0) pc += sz;
+            }
+        }
+
+        /* Step 2: scan for LJMP that can be replaced with SJMP */
+        pc = start_offset;
+        for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+            AsmInstr *ins = iter_next(&it);
+            if (!ins || !ins->op) continue;
+            size_t oplen = strlen(ins->op);
+            if (oplen > 0 && ins->op[oplen - 1] == ':') continue; /* label */
+
+            int sz = instruction_size(ins);
+            if (sz <= 0) { pc += (sz < 0 ? 3 : 0); continue; }
+
+            if (strcmp(ins->op, "LJMP") == 0 &&
+                ins->args && ins->args->len > 0) {
+                const char *target_lbl = (const char *)list_get(ins->args, 0);
+                if (target_lbl) {
+                    int *ptarget = (int *)dict_get(label_pcs, target_lbl);
+                    if (ptarget) {
+                        int sjmp_next_pc = pc + 2;  /* SJMP is 2 bytes */
+                        int rel = *ptarget - sjmp_next_pc;
+                        if (rel >= -128 && rel <= 127) {
+                            /* Replace LJMP with SJMP */
+                            free(ins->op);
+                            ins->op = malloc(5);
+                            if (ins->op) {
+                                strcpy(ins->op, "SJMP");
+                                changed = 1;
+                            }
+                        }
+                    }
+                }
+            }
+            pc += sz;
+        }
+
+        dict_free(label_pcs, free);
+    }
+}
+
 static void encode_section(ObjFile *obj, int sec_idx, Section *sec)
 {
 	EncodeState state;
@@ -1445,6 +1556,9 @@ static void encode_section(ObjFile *obj, int sec_idx, Section *sec)
 	state.sec_idx = sec_idx;
 	state.start_offset = sec->bytes_len;
 	state.labels = make_dict(NULL);
+
+	/* Relax LJMP→SJMP before computing label positions */
+	relax_ljmp_to_sjmp(sec, state.start_offset);
 
 	record_labels(&state);
 	if (state.failed) {

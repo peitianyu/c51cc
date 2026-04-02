@@ -160,6 +160,7 @@ static int get_value_interval_size(C51GenContext* genctx, Func* func, ValueName 
 void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext* genctx) {
     if (!lsc || !func) return;
     (void)genctx;
+    int dbg = getenv("C51CC_REGDEBUG") != NULL;
 
     const int kMaxValue = 1000000;
     lsc->interval_count = 0;
@@ -489,6 +490,20 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
             continue;
         }
 
+        /* CONST values: do not assign a physical register; they will be
+           rematerialized as immediate operands whenever needed.
+           This avoids wasting registers on constants that span long intervals. */
+        if (genctx && genctx->current_func) {
+            Instr* cdef = find_def_instr_in_func(genctx->current_func, interval->val);
+            if (cdef && cdef->op == IROP_CONST) {
+                /* Mark as "no register needed" (-4 = rematerializable CONST).
+                   alloc_reg_for_value will return -1 directly for this value,
+                   causing emit_const to skip materialization. */
+                interval->reg = -4;
+                continue;
+            }
+        }
+
         /* 返回值寄存器保护：如果是函数返回值，生命周期内禁止分配R7/R6等 */
         // TODO: 可根据函数返回类型进一步保护R7/R6/R5/R4等
 
@@ -617,9 +632,23 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
         free(spill_slots[i].name);
     }
     free(spill_slots);
-}
 
-/* 注意：这个函数现在只查询线性扫描已经分配的结果，不再做动态分配 */
+    /* DEBUG: print interval allocations */
+    if (genctx && genctx->current_func && getenv("C51CC_REGDEBUG")) {
+        fprintf(stderr, "[regalloc] func=%s intervals=%d\n",
+            genctx->current_func->name ? genctx->current_func->name : "?",
+            lsc->interval_count);
+        for (int i = 0; i < lsc->interval_count; i++) {
+            LiveInterval* iv = &lsc->intervals[i];
+            if (iv->reg == -3)
+                fprintf(stderr, "  v%d: start=%d end=%d size=%d SPILL\n",
+                    iv->val, iv->start, iv->end, iv->size);
+            else
+                fprintf(stderr, "  v%d: start=%d end=%d size=%d reg=R%d\n",
+                    iv->val, iv->start, iv->end, iv->size, iv->reg);
+        }
+    }
+}
 int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
     if (!isel || !isel->ctx) return -1;
 
@@ -628,6 +657,8 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
     if (existing >= 0 && existing + size - 1 > k_temp_reg_max) {
         existing = -1;
     }
+    /* -4 means rematerializable CONST: no physical register, skip dynamic alloc */
+    if (existing == -4) return -1;
     if (existing >= 0 || existing == -2 || existing == -3) {
         /* If linear scan already assigned a register, ensure the
          * isel context marks those physical registers as busy so
@@ -901,41 +932,61 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
             }
 
             if (size <= 2 && isel && isel->ctx) {
-                C51GenContext* gen = isel->ctx;
-                char buf[128];
-                snprintf(buf, sizeof(buf), "__arg_%s_%d", f->name, param_pos);
-
-                SectionKind use_kind = gen->spill_section;
-                if (gen->spill_use_xdata_for_large && size > 1) {
-                    use_kind = SEC_XDATA;
+                /* Check if this parameter needs to be addressable (any ADDR @param_name used).
+                   If not, keep it in registers — no __arg_N memory slot needed. */
+                bool param_needs_addr = false;
+                if (f->blocks) {
+                    for (Iter bbit = list_iter(f->blocks); !iter_end(bbit) && !param_needs_addr;) {
+                        Block *blk = iter_next(&bbit);
+                        if (!blk || !blk->instrs) continue;
+                        for (Iter iit2 = list_iter(blk->instrs); !iter_end(iit2) && !param_needs_addr;) {
+                            Instr *ii = iter_next(&iit2);
+                            if (!ii || ii->op != IROP_ADDR || !ii->labels || ii->labels->len == 0) continue;
+                            const char *lbl = list_get(ii->labels, 0);
+                            if (!lbl) continue;
+                            const char *lbl_name = (lbl[0] == '@') ? lbl + 1 : lbl;
+                            if (strcmp(lbl_name, param_name) == 0) param_needs_addr = true;
+                        }
+                    }
                 }
-                ensure_local_value_symbol(gen, buf, size, use_kind);
 
-                char* addr_key = int_to_key(param_ins->dest);
-                dict_put(gen->value_to_addr, addr_key, strdup(buf));
+                if (param_needs_addr) {
+                    C51GenContext* gen = isel->ctx;
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "__arg_%s_%d", f->name, param_pos);
 
-                int* reg_num = malloc(sizeof(int));
-                *reg_num = -3;
-                char* reg_key = int_to_key(param_ins->dest);
-                dict_put(gen->value_to_reg, reg_key, reg_num);
+                    SectionKind use_kind = gen->spill_section;
+                    if (gen->spill_use_xdata_for_large && size > 1) {
+                        use_kind = SEC_XDATA;
+                    }
+                    ensure_local_value_symbol(gen, buf, size, use_kind);
 
-                if (size == 1) {
-                    emit_store_symbol_byte(isel, buf, 0, isel_reg_name(expected_regs[0]), NULL);
+                    char* addr_key = int_to_key(param_ins->dest);
+                    dict_put(gen->value_to_addr, addr_key, strdup(buf));
+
+                    int* reg_num = malloc(sizeof(int));
+                    *reg_num = -3;
+                    char* reg_key = int_to_key(param_ins->dest);
+                    dict_put(gen->value_to_reg, reg_key, reg_num);
+
+                    if (size == 1) {
+                        emit_store_symbol_byte(isel, buf, 0, isel_reg_name(expected_regs[0]), NULL);
+                    } else {
+                        emit_store_symbol_byte(isel, buf, 0, isel_reg_name(expected_regs[1]), NULL);
+                        emit_store_symbol_byte(isel, buf, 1, isel_reg_name(expected_regs[0]), NULL);
+                    }
                 } else {
-                    emit_store_symbol_byte(isel, buf, 0, isel_reg_name(expected_regs[1]), NULL);
-                    emit_store_symbol_byte(isel, buf, 1, isel_reg_name(expected_regs[0]), NULL);
+                    /* No address taken: keep parameter in registers */
+                    for (int j = 0; j < reg_count; j++) {
+                        int r = expected_regs[j];
+                        isel->reg_busy[r] = true;
+                        isel->reg_val[r] = param_ins->dest;
+                    }
+                    int* reg_num = malloc(sizeof(int));
+                    *reg_num = expected_regs[0];
+                    char* key = int_to_key(param_ins->dest);
+                    dict_put(isel->ctx->value_to_reg, key, reg_num);
                 }
-            } else {
-                for (int j = 0; j < reg_count; j++) {
-                    int r = expected_regs[j];
-                    isel->reg_busy[r] = true;
-                    isel->reg_val[r] = param_ins->dest;
-                }
-
-                int* reg_num = malloc(sizeof(int));
-                *reg_num = expected_regs[0];
-                char* key = int_to_key(param_ins->dest);
-                dict_put(isel->ctx->value_to_reg, key, reg_num);
             }
         }
 

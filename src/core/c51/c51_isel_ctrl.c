@@ -354,6 +354,59 @@ void emit_br(ISelContext* isel, Instr* ins) {
     block_label_name(target_t, sizeof(target_t), id_t);
     block_label_name(target_f, sizeof(target_f), id_f);
 
+    /* Fuse BR with preceding NE/EQ compare: emit XRL+ORL+JNZ/JZ directly
+     * instead of reading the bool value materialized by emit_ne/emit_eq.
+     * Only applies when src1 is 16-bit, src2 is a small constant (hi==0),
+     * and both operands are in registers. */
+    if (isel && isel->ctx && isel->ctx->current_func) {
+        Func* br_func = isel->ctx->current_func;
+        Instr* cond_def = find_def_instr_in_func(br_func, cond);
+        if (cond_def && (cond_def->op == IROP_NE || cond_def->op == IROP_EQ)) {
+            ValueName csrc1 = get_src1_value(cond_def);
+            ValueName csrc2 = get_src2_value(cond_def);
+            int64_t cst = 0;
+            bool csrc2_is_const = try_get_value_const(isel, csrc2, &cst);
+            int csrc1_size = get_value_size(isel, csrc1);
+            if (csrc2_is_const && csrc1_size == 2 && ((cst >> 8) & 0xFF) == 0) {
+                const char* s1_lo = isel_get_lo_reg(isel, csrc1);
+                const char* s1_hi = isel_get_hi_reg(isel, csrc1);
+                if (s1_lo && s1_hi && strcmp(s1_lo, "A") != 0) {
+                    char imm_lo[16];
+                    snprintf(imm_lo, sizeof(imm_lo), "#%d", (int)(cst & 0xFF));
+
+                    char* ssa = instr_to_ssa_str(cond_def);
+                    emit_mov(isel, "A", s1_lo, ins);
+                    isel_emit(isel, "XRL", "A", imm_lo, ssa);
+                    free(ssa);
+                    isel_emit(isel, "ORL", "A", s1_hi, NULL);
+
+                    /* NE: JNZ → true, fall → false
+                     * EQ: JNZ → false, fall → true (JNZ goes to l_ne, then false path) */
+                    char* l_skip_true_fuse = isel_new_label(isel, "Lbr_skip_true");
+                    if (cond_def->op == IROP_NE) {
+                        /* JNZ → true (NE = true means not-equal) */
+                        isel_emit(isel, "JZ", l_skip_true_fuse, NULL, instr_to_ssa_str(ins));
+                        emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                        isel_emit(isel, "LJMP", target_t, NULL, NULL);
+                        isel_emit_label(isel, l_skip_true_fuse);
+                        emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                        isel_emit(isel, "LJMP", target_f, NULL, NULL);
+                    } else {
+                        /* EQ: JNZ → false (not equal means EQ=false) */
+                        isel_emit(isel, "JNZ", l_skip_true_fuse, NULL, instr_to_ssa_str(ins));
+                        emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
+                        isel_emit(isel, "LJMP", target_t, NULL, NULL);
+                        isel_emit_label(isel, l_skip_true_fuse);
+                        emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
+                        isel_emit(isel, "LJMP", target_f, NULL, NULL);
+                    }
+                    free(l_skip_true_fuse);
+                    return;
+                }
+            }
+        }
+    }
+
     int size = get_value_size(isel, cond);
     if (size == 2) {
         const char* hi = isel_get_hi_reg(isel, cond);
