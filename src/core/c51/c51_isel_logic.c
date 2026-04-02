@@ -584,6 +584,155 @@ void emit_lnot(ISelContext* isel, Instr* ins, Instr* next) {
     }
 }
 
+void emit_land(ISelContext* isel, Instr* ins, Instr* next) {
+    ValueName s1 = get_src1_value(ins);
+    ValueName s2 = get_src2_value(ins);
+    int size = ins && ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
+    if (size < 1) size = 1;
+
+    int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+    bool temp_result = false;
+    if (dst_reg < 0 || dst_reg + size - 1 > 7) {
+        dst_reg = alloc_temp_reg(isel, ins ? ins->dest : -1, size);
+        temp_result = dst_reg >= 0;
+    }
+    if (dst_reg < 0) dst_reg = 0;
+
+    char* l_true = isel_new_label(isel, "Land_true");
+    char* l_false = isel_new_label(isel, "Land_false");
+    char* l_end = isel_new_label(isel, "Land_end");
+    char lb_true[64], lb_false[64], lb_end[64];
+    snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
+    snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
+    snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+
+    /* test s1 != 0 */
+    if (get_value_size(isel, s1) == 2) {
+        int tmp1 = -1, tmp2 = -1;
+        const char* lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, s1), &tmp1);
+        const char* hi = save_acc_operand_for_cmp(isel, isel_get_hi_reg(isel, s1), &tmp2);
+        emit_mov(isel, "A", hi, ins);
+        isel_emit(isel, "ORL", "A", lo, NULL);
+        free_saved_cmp_operand(isel, tmp1);
+        free_saved_cmp_operand(isel, tmp2);
+    } else {
+        int tmp = -1;
+        const char* v = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, s1), &tmp);
+        emit_mov(isel, "A", v, ins);
+        free_saved_cmp_operand(isel, tmp);
+    }
+
+    /* if s1 == 0 -> false */
+    isel_emit(isel, "JZ", l_false, NULL, NULL);
+
+    /* test s2 != 0 */
+    if (get_value_size(isel, s2) == 2) {
+        int tmp1 = -1, tmp2 = -1;
+        const char* lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, s2), &tmp1);
+        const char* hi = save_acc_operand_for_cmp(isel, isel_get_hi_reg(isel, s2), &tmp2);
+        emit_mov(isel, "A", hi, NULL);
+        isel_emit(isel, "ORL", "A", lo, NULL);
+        free_saved_cmp_operand(isel, tmp1);
+        free_saved_cmp_operand(isel, tmp2);
+    } else {
+        int tmp = -1;
+        const char* v = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, s2), &tmp);
+        emit_mov(isel, "A", v, NULL);
+        free_saved_cmp_operand(isel, tmp);
+    }
+
+    isel_emit(isel, "JZ", l_false, NULL, NULL);
+
+    /* both non-zero -> true */
+    isel_emit(isel, "SJMP", l_true, NULL, NULL);
+
+    /* false */
+    isel_emit(isel, lb_false, NULL, NULL, NULL);
+    emit_set_bool_result(isel, ins, dst_reg, size, false);
+    isel_emit(isel, "SJMP", l_end, NULL, NULL);
+
+    /* true */
+    isel_emit(isel, lb_true, NULL, NULL, NULL);
+    emit_set_bool_result(isel, ins, dst_reg, size, true);
+    isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+    free(l_true); free(l_false); free(l_end);
+    if (temp_result) free_temp_reg(isel, dst_reg, size);
+}
+
+void emit_lor(ISelContext* isel, Instr* ins, Instr* next) {
+    ValueName s1 = get_src1_value(ins);
+    ValueName s2 = get_src2_value(ins);
+    int size = ins && ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
+    if (size < 1) size = 1;
+
+    int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
+    bool temp_result = false;
+    if (dst_reg < 0 || dst_reg + size - 1 > 7) {
+        dst_reg = alloc_temp_reg(isel, ins ? ins->dest : -1, size);
+        temp_result = dst_reg >= 0;
+    }
+    if (dst_reg < 0) dst_reg = 0;
+
+    char* l_true = isel_new_label(isel, "Lor_true");
+    char* l_false = isel_new_label(isel, "Lor_false");
+    char* l_end = isel_new_label(isel, "Lor_end");
+    char lb_true[64], lb_false[64], lb_end[64];
+    snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
+    snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
+    snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+
+    /* test s1 != 0 */
+    if (get_value_size(isel, s1) == 2) {
+        int tmp1 = -1, tmp2 = -1;
+        const char* lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, s1), &tmp1);
+        const char* hi = save_acc_operand_for_cmp(isel, isel_get_hi_reg(isel, s1), &tmp2);
+        emit_mov(isel, "A", hi, ins);
+        isel_emit(isel, "ORL", "A", lo, NULL);
+        free_saved_cmp_operand(isel, tmp1);
+        free_saved_cmp_operand(isel, tmp2);
+    } else {
+        int tmp = -1;
+        const char* v = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, s1), &tmp);
+        emit_mov(isel, "A", v, ins);
+        free_saved_cmp_operand(isel, tmp);
+    }
+
+    /* if s1 != 0 -> true */
+    isel_emit(isel, "JNZ", l_true, NULL, NULL);
+
+    /* test s2 != 0 */
+    if (get_value_size(isel, s2) == 2) {
+        int tmp1 = -1, tmp2 = -1;
+        const char* lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, s2), &tmp1);
+        const char* hi = save_acc_operand_for_cmp(isel, isel_get_hi_reg(isel, s2), &tmp2);
+        emit_mov(isel, "A", hi, NULL);
+        isel_emit(isel, "ORL", "A", lo, NULL);
+        free_saved_cmp_operand(isel, tmp1);
+        free_saved_cmp_operand(isel, tmp2);
+    } else {
+        int tmp = -1;
+        const char* v = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, s2), &tmp);
+        emit_mov(isel, "A", v, NULL);
+        free_saved_cmp_operand(isel, tmp);
+    }
+
+    isel_emit(isel, "JNZ", l_true, NULL, NULL);
+
+    /* false */
+    isel_emit(isel, lb_false, NULL, NULL, NULL);
+    emit_set_bool_result(isel, ins, dst_reg, size, false);
+    isel_emit(isel, "SJMP", l_end, NULL, NULL);
+
+    /* true */
+    isel_emit(isel, lb_true, NULL, NULL, NULL);
+    emit_set_bool_result(isel, ins, dst_reg, size, true);
+    isel_emit(isel, lb_end, NULL, NULL, NULL);
+
+    free(l_true); free(l_false); free(l_end);
+    if (temp_result) free_temp_reg(isel, dst_reg, size);
+}
+
 void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName src1 = get_src1_value(ins);
     ValueName src2 = get_src2_value(ins);

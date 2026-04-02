@@ -234,6 +234,14 @@ static bool valid_init_var(Ast *var, Ast *init)
 {
     // NOTE: 未初始化, 则不判断
     if(!init) return true;
+    /* 允许外层是 cast 的初始化（如 (int)&a 或 (void*)(int)0x4000） */
+    if (init->type == AST_CAST) {
+        if (is_inttype(var->ctype) && is_inttype(init->ctype)) return true;
+        if (var->ctype->type == CTYPE_PTR) {
+            if (init->ctype && (init->ctype->type == CTYPE_PTR || init->ctype->type == CTYPE_ARRAY)) return true;
+            if (init->cast_expr && init->cast_expr->type == AST_ADDR) return true;
+        }
+    }
     if(init->type == AST_CAST) init = init->cast_expr;
     switch(var->ctype->type) {
         case CTYPE_BOOL ... CTYPE_DOUBLE:
@@ -624,6 +632,13 @@ static int compound_base_op(int p)
 static int eval_intexpr(Ast *ast)
 {
     switch (ast->type) {
+    case AST_CAST:
+        /* 支持类似 (void*)(int)0x4000 的写法：如果内层表达式是整型常量，仍然可以求值 */
+        if (is_inttype(ast->ctype)) return eval_intexpr(ast->cast_expr);
+        if (ast->cast_expr && is_inttype(ast->cast_expr->ctype))
+            return eval_intexpr(ast->cast_expr);
+        error("Integer expression expected, but got %s", ast_to_string(ast));
+    
     case AST_LITERAL:
         if (is_inttype(ast->ctype)) return ast->ival;
         error("Integer expression expected, but got %s", ast_to_string(ast));
@@ -685,6 +700,14 @@ static int eval_intexpr(Ast *ast)
 static float eval_floatexpr(Ast *ast) 
 {
     switch (ast->type) {
+    case AST_CAST:
+        /* 支持将内层整/浮点常量通过 cast 后用于浮点常量求值 */
+        if (is_flotype(ast->ctype) || is_inttype(ast->ctype))
+            return eval_floatexpr(ast->cast_expr);
+        if (ast->cast_expr && (is_flotype(ast->cast_expr->ctype) || is_inttype(ast->cast_expr->ctype)))
+            return eval_floatexpr(ast->cast_expr);
+        error("Float expression expected, but got %s", ast_to_string(ast));
+
     case AST_LITERAL:
         if (is_flotype(ast->ctype))
             return ast->fval;

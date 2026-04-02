@@ -94,6 +94,7 @@ static bool inline_allowed_op(IrOp op) {
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD: case IROP_NEG:
     case IROP_AND: case IROP_OR: case IROP_XOR: case IROP_NOT:
     case IROP_SHL: case IROP_SHR:
+    case IROP_LAND: case IROP_LOR:
     case IROP_EQ: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: case IROP_NE:
     case IROP_LNOT:
     case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT: case IROP_BITCAST:
@@ -302,6 +303,7 @@ static bool is_pure_instr(const Instr *i) {
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
     case IROP_AND: case IROP_OR:  case IROP_XOR:
     case IROP_SHL: case IROP_SHR: case IROP_NOT: case IROP_NEG: case IROP_LNOT:
+    case IROP_LAND: case IROP_LOR:
     case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE:
     case IROP_TRUNC: case IROP_ZEXT: case IROP_SEXT:
     case IROP_BITCAST: case IROP_INTTOPTR: case IROP_PTRTOINT:
@@ -858,6 +860,8 @@ static bool pass_const_fold(Func *f, Stats *s) {
             case IROP_NEG: ok = ha; r = u ? (int64_t)(0ULL - (uint64_t)a) : -a; break;
             case IROP_NOT: ok = ha; r = ~a; break;
             case IROP_LNOT: ok = ha; r = !a; break;
+            case IROP_LAND: if (ha && hb) { ok = true; r = (a != 0 && b_val != 0); } break;
+            case IROP_LOR:  if (ha && hb) { ok = true; r = (a != 0 || b_val != 0); } break;
             case IROP_TRUNC:
                 if (ha) {
                     int sz = i->type ? i->type->size : 1;

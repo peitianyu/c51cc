@@ -2219,14 +2219,16 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
         break;
     }
     case IROP_ADD: case IROP_SUB: case IROP_MUL: case IROP_DIV: case IROP_MOD:
-    case IROP_AND: case IROP_OR: case IROP_XOR: {
+    case IROP_AND: case IROP_OR: case IROP_XOR: case IROP_LAND: case IROP_LOR: {
         const char *op_str = (i->op == IROP_ADD) ? "add" :
                             (i->op == IROP_SUB) ? "sub" :
                             (i->op == IROP_MUL) ? "mul" :
                             (i->op == IROP_DIV) ? "div" :
                             (i->op == IROP_MOD) ? "mod" :
                             (i->op == IROP_AND) ? "and" :
-                            (i->op == IROP_OR) ? "or" : "xor";
+                            (i->op == IROP_OR) ? "or" :
+                            (i->op == IROP_LAND) ? "land" :
+                            (i->op == IROP_LOR) ? "lor" : "xor";
         ValueName *a1 = list_get(i->args, 0);
         fprintf(fp, "%s v%d", op_str, *a1);
         if (i->labels && i->labels->len > 0) {

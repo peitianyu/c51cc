@@ -748,6 +748,12 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         case IROP_LNOT:
             emit_lnot(isel, ins, next);
             break;
+        case IROP_LAND:
+            emit_land(isel, ins, next);
+            break;
+        case IROP_LOR:
+            emit_lor(isel, ins, next);
+            break;
         case IROP_TRUNC:
             emit_trunc(isel, ins);
             break;

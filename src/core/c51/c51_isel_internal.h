@@ -91,6 +91,8 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
 void emit_not(ISelContext* isel, Instr* ins, Instr* next);
 void emit_ne(ISelContext* isel, Instr* ins, Instr* next);
 void emit_lnot(ISelContext* isel, Instr* ins, Instr* next);
+void emit_land(ISelContext* isel, Instr* ins, Instr* next);
+void emit_lor(ISelContext* isel, Instr* ins, Instr* next);
 void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next);
 void emit_cmp_lt_gt(ISelContext* isel, Instr* ins, Instr* next, bool is_gt);
 void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge);

@@ -21,7 +21,7 @@ typedef enum IrOp {
     // 比较
     IROP_EQ, IROP_LT, IROP_GT, IROP_LE, IROP_GE, IROP_NE,
     // 逻辑
-    IROP_LNOT,
+    IROP_LNOT, IROP_LAND, IROP_LOR,
     // 新增：C基础类型/指针操作（注：位域不单独设IROP，用位运算组合实现）
     IROP_TRUNC,         // 截断: (char)i
     IROP_ZEXT,          // 零扩展: unsigned提升

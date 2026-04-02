@@ -36,28 +36,30 @@ char irop_cmp(char a, char b) {
     r += (a >= b);         /* GE */
     r += (a != b);         /* NE */
     r += !a;               /* LNOT */
+    r += (a && b);         /* LAND */
+    r += (a || b);         /* LOR */
     return r;
 }
 
 /* 截断/扩展/位重解释/指针<->整数/地址计算/选择 */
 char irop_casts_and_ptrs(char a) {
-    char tc = (char)a;                     /* TRUNC */
-    unsigned char uz = (unsigned char)a;     /* ZEXT (unsigned) */
-    char ss = (char)a;                   /* SEXT (signed char) */
+    char tc = (char)a;                      /* TRUNC */
+    unsigned char uz = (unsigned char)a;    /* ZEXT (unsigned) */
+    char ss = (char)a;                      /* SEXT (signed char) */
 
     /* BITCAST: 通过 union 把 float 的位解释为 char */
     union { float f; char i; } ub;
     ub.f = 1.5f;
     char bitcast_i = ub.i;                  /* BITCAST */
 
-    // /* charTOPTR / PTRTOchar */
-    // void *p = (void*)(ucharptr_t)0x4000;    /* charTOPTR */
-    // ucharptr_t ip = (ucharptr_t)&a;          /* PTRTOchar */
+    /* INTTOPTR / PTRTOINT */
+    void *p = (void*)(int)0x4000;           /* INTTOPTR */
+    int ip = (int)&a;                       /* PTRTOINT */
 
     /* OFFSET / LOAD / STORE */
     char arr[4] = {1,2,3,4};
-    char *ptr = &arr[1];                     /* ADDR */
-    char load = ptr[0];                      /* LOAD / OFFSET */
+    char *ptr = &arr[1];                    /* ADDR */
+    char load = ptr[0];                     /* LOAD / OFFSET */
     ptr[0] = load + 7;                      /* STORE */
 
     /* SELECT (三元运算) */

@@ -106,6 +106,31 @@ int test_algebraic_div_one(int a) {
     return b;
 }
 
+// 增加对于逻辑与或的代数简化
+// x && 1 = x
+int test_algebraic_land_one(int a) {
+    int b = a && 1;          // => a
+    return b;
+}
+
+// x && 0 = 0
+int test_algebraic_land_zero(int a) {
+    int b = a && 0;          // => 0
+    return b;
+}
+
+// x || 1 = 1
+int test_algebraic_lor_one(int a) {
+    int b = a || 1;          // => 1
+    return b;
+}
+
+// x || 0 = x
+int test_algebraic_lor_zero(int a) {
+    int b = a || 0;          // => a
+    return b;
+}
+
 // ============================================
 // 3. 强度削弱测试 (Strength Reduction)
 // ============================================
