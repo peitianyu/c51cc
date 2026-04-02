@@ -234,7 +234,9 @@ typedef struct __Ast {
         struct {
             struct __Ast *ctrl;         
             List *cases;       /* List<SwitchCase*> */
-            struct __Ast *default_stmt; 
+            struct __Ast *default_stmt;
+            struct __Ast *switch_body;
+            char *default_label;
         };
 
         /* goto/label */
@@ -263,7 +265,11 @@ typedef struct __Ast {
     };
 } Ast;
 
-typedef struct { long low, high; Ast *stmt; } SwitchCase;
+typedef struct {
+    long low, high;
+    Ast *stmt;
+    char *label;
+} SwitchCase;
 
 /* verbose.c */
 extern char *token_to_string(const Token tok);

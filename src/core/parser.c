@@ -26,8 +26,18 @@ static List *labels = NULL;
 static bool in_cond_expr = false;  // 标记是否在?:的then分支中
 static Dict *parser_empty_dict = &EMPTY_DICT;
 
+typedef struct SwitchParseCtx {
+    Dict *seen;
+    List *cases;
+    char *default_label;
+    struct SwitchParseCtx *parent;
+} SwitchParseCtx;
+
+static SwitchParseCtx *switch_ctx = NULL;
+
 static Ctype *ctype_void = &(Ctype){0, CTYPE_VOID, 0, NULL};
 static Ctype *ctype_int = &(Ctype){0, CTYPE_INT, 2, NULL};
+static Ctype *ctype_short = &(Ctype){0, CTYPE_INT, 2, NULL}; /* short == int on MCS-51 */
 static Ctype *ctype_long = &(Ctype){0, CTYPE_LONG, 4, NULL};
 static Ctype *ctype_bool = &(Ctype){0, CTYPE_BOOL, 1, NULL};
 static Ctype *ctype_char = &(Ctype){0, CTYPE_CHAR, 1, NULL};
@@ -56,6 +66,8 @@ static bool is_type_keyword(const Token tok);
 static Ctype *read_decl_spec(void);
 static Ctype *read_array_dimensions(Ctype *basetype);
 static void read_func_ptr_params(void);
+static Ast *read_switch_case_stmt(void);
+static Ast *read_switch_default_stmt(void);
 
 void parser_reset(void)
 {
@@ -69,6 +81,7 @@ void parser_reset(void)
     localenv = NULL;
     localvars = NULL;
     labels = NULL;
+    switch_ctx = NULL;
 
     ctypes = make_list();
     strings = make_list();
@@ -154,9 +167,15 @@ static Ast *ast_lvar(Ctype *ctype, char *name)
 
 static Ast *ast_gvar(Ctype *ctype, char *name, bool filelocal)
 {
-    // FIXME: 应该考虑多文件的, 暂时不考虑
-    if(globalenv && dict_get(globalenv, name))
-        error("Redefine global var: %s", name);
+    // 支持 tentative definition：允许同一全局变量多次声明，最后一次带初始值的生效
+    if (globalenv) {
+        Ast *existing = dict_get(globalenv, name);
+        if (existing) {
+            // 允许重复声明（tentative definition）：返回已有节点
+            // 调用方若有初始值会通过 ginit 字段更新
+            return existing;
+        }
+    }
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_GVAR;
     r->ctype = ctype;
@@ -320,23 +339,26 @@ static Ast *ast_ternary(Ctype *ctype, Ast *cond, Ast *then, Ast *els)
     return r;
 }
 
-static Ast *ast_switch(Ast *ctrl, List *cases, Ast *def_stmt)
+static Ast *ast_switch(Ast *ctrl, List *cases, Ast *body, char *default_label)
 {
     Ast *r = malloc(sizeof(Ast));
     r->type = AST_SWITCH;
     r->ctype = NULL;
     r->ctrl = ctrl;
     r->cases = cases;
-    r->default_stmt = def_stmt;
+    r->default_stmt = NULL;
+    r->switch_body = body;
+    r->default_label = default_label;
     return r;
 }
 
-static SwitchCase *make_switch_case(long low, long high, Ast *stmt)
+static SwitchCase *make_switch_case(long low, long high, Ast *stmt, char *label)
 {
     SwitchCase *c = malloc(sizeof(SwitchCase));
     c->low  = low;
     c->high  = high;
     c->stmt = stmt;
+    c->label = label;
     return c;
 }
 
@@ -585,6 +607,24 @@ static void expect(char punct)
 static bool is_ident(const Token tok, char *s)
 {
     return get_ttype(tok) == TTYPE_IDENT && !strcmp(get_ident(tok), s);
+}
+
+static SwitchParseCtx *current_switch_ctx(void)
+{
+    return switch_ctx;
+}
+
+static void switch_ctx_record_case(SwitchParseCtx *ctx, long low, long high)
+{
+    if (!ctx) return;
+    for (long v = low; v <= high; ++v) {
+        String buf = make_string();
+        string_appendf(&buf, "%ld", v);
+        char *key = get_cstring(buf);
+        if (dict_get(ctx->seen, key))
+            error("duplicate case value %ld in range", v);
+        dict_put(ctx->seen, key, (void *)1);
+    }
 }
 
 static bool is_right_assoc(const Token tok)
@@ -984,9 +1024,32 @@ static Ctype *result_type_int(jmp_buf *jmp, int op, Ctype *a, Ctype *b)
     }
 
     if (a->type == CTYPE_PTR || b->type == CTYPE_PTR) {
-        if (op == '=') return a->type == CTYPE_PTR ? a : b;          // 赋值取左值指针
-        if (op != '+' && op != '-') goto err;
-        return a->type == CTYPE_PTR ? a : b;                         // +/- 结果取指针侧
+        if (op == '=') return a->type == CTYPE_PTR ? a : b;
+
+        if (op == PUNCT_EQ || op == PUNCT_NE || op == '<' || op == '>' ||
+            op == PUNCT_LE || op == PUNCT_GE) {
+            if (a->type == CTYPE_PTR && b->type == CTYPE_PTR)
+                return ctype_int;
+            goto err;
+        }
+
+        if (op == '-') {
+            if (a->type == CTYPE_PTR && b->type == CTYPE_PTR)
+                return ctype_int;
+            if (a->type == CTYPE_PTR)
+                return a;
+            goto err;
+        }
+
+        if (op == '+') {
+            if (a->type == CTYPE_PTR && b->type != CTYPE_PTR)
+                return a;
+            if (b->type == CTYPE_PTR && a->type != CTYPE_PTR)
+                return b;
+            goto err;
+        }
+
+        goto err;
     }
     if (a->type == CTYPE_ARRAY || b->type == CTYPE_ARRAY) goto err;
 
@@ -1073,9 +1136,19 @@ static Ast *read_unary_expr(void)
     }
 
     if (is_ident(tok, "sizeof")) {
-        expect('(');
-        Ast *e = read_expr();
-        expect(')');
+        Token t = read_token();
+        if (is_punct(t, '(')) {
+            if (is_type_keyword(peek_token())) {
+                Ctype *target = read_decl_spec();
+                expect(')');
+                return ast_inttype(ctype_int, target->size);
+            }
+            Ast *e = read_expr();
+            expect(')');
+            return ast_inttype(ctype_int, e->ctype->size);
+        }
+        unget_token(t);
+        Ast *e = read_unary_expr();
         return ast_inttype(ctype_int, e->ctype->size);
     }
 
@@ -1328,6 +1401,7 @@ static Ctype *get_ctype(const Token tok)
     char *ident = get_ident(tok);
     if (!strcmp(ident, "void"))     return ctype_void;
     if (!strcmp(ident, "int"))      return ctype_int;
+    if (!strcmp(ident, "short"))    return ctype_short;
     if (!strcmp(ident, "long"))     return ctype_long;
     if (!strcmp(ident, "bool"))     return ctype_bool;
     if (!strcmp(ident, "char"))     return ctype_char;
@@ -1342,7 +1416,7 @@ static bool is_type_keyword(const Token tok)
         is_ident(tok, "const") || is_ident(tok, "volatile") || is_ident(tok, "restrict") ||
         is_ident(tok, "static") || is_ident(tok, "extern") || is_ident(tok, "unsigned")|| 
         is_ident(tok, "register") || is_ident(tok, "typedef") || is_ident(tok, "inline") || 
-        is_ident(tok, "noreturn") || is_ident(tok, "data") || is_ident(tok, "idata") || 
+        is_ident(tok, "noreturn") || is_ident(tok, "short") || is_ident(tok, "data") || is_ident(tok, "idata") || 
         is_ident(tok, "pdata") || is_ident(tok, "xdata") || is_ident(tok, "edata") || 
         is_ident(tok, "code");   
 
@@ -1611,29 +1685,74 @@ static Ctype *read_union_def(void)
 static Ctype *read_struct_def(void)
 {
     char *tag = read_struct_union_enum_tag();
-    Ctype *ctype = dict_get(struct_defs, tag);
-    if (ctype)
+    Ctype *ctype = tag ? dict_get(struct_defs, tag) : NULL;
+    if (ctype) {
+        /* 如果已注册的类型已有字段（完整类型），直接返回 */
+        /* 如果是前向声明（没有字段），也直接返回占位符（字段后续填充） */
+        Token next = peek_token();
+        if (!is_punct(next, '{'))
+            return ctype; /* 纯引用：struct S x; 或 struct S *p; */
+        /* 否则是重新定义，继续解析字段（不报错，允许完成不完整类型） */
+    }
+
+    /* 如果没有 '{' 则是前向声明 struct T; 注册占位符 */
+    Token next = peek_token();
+    if (!is_punct(next, '{')) {
+        /* 前向声明：创建不完整类型占位符 */
+        if (tag && !ctype) {
+            Ctype *fwd = malloc(sizeof(Ctype));
+            memset(fwd, 0, sizeof(Ctype));
+            fwd->type = CTYPE_STRUCT;
+            fwd->fields = make_dict(NULL);
+            fwd->size = 0;
+            dict_put(struct_defs, tag, fwd);
+            ctype = fwd;
+        }
+        if (!ctype)
+            error("Type expected, but got %s", token_to_string(peek_token()));
         return ctype;
+    }
+
+    /* 在解析字段前，先注册占位符以支持自引用 */
+    Ctype *placeholder = NULL;
+    if (tag) {
+        if (!ctype) {
+            placeholder = malloc(sizeof(Ctype));
+            memset(placeholder, 0, sizeof(Ctype));
+            placeholder->type = CTYPE_STRUCT;
+            placeholder->fields = make_dict(NULL);
+            placeholder->size = 0;
+            dict_put(struct_defs, tag, placeholder);
+        } else {
+            placeholder = ctype; /* 可能是前向声明的占位符 */
+        }
+    }
+
     Dict *fields = read_struct_union_fields(true);
     int offset = 0;
     Iter i = list_iter(dict_values(fields));
-    Ctype *fieldtype;
+    Ctype *fieldtype = NULL;
     for (; !iter_end(i);) {
         fieldtype = iter_next(&i);
         int size = (fieldtype->size < MAX_ALIGN) ? fieldtype->size : MAX_ALIGN;
-        if (offset % size != 0)
+        if (size > 0 && offset % size != 0)
             offset += size - offset % size;
         fieldtype->offset = offset;
         offset += fieldtype->size;
     }
-    if(fieldtype->bit_size) {
+    if (fieldtype && fieldtype->bit_size) {
         offset = (fieldtype->bit_offset+fieldtype->bit_size)/8;
         if((fieldtype->bit_offset+fieldtype->bit_size)%8) offset++;
     }
 
+    if (placeholder) {
+        /* 原地更新占位符，使所有持有该指针的自引用都能正确看到字段 */
+        placeholder->fields = fields;
+        placeholder->size = offset;
+        return placeholder;
+    }
+
     Ctype *r = make_struct_type(fields, offset, false);
-    if (tag)
-        dict_put(struct_defs, tag, r);
     return r;
 }
 
@@ -1929,10 +2048,12 @@ static Ast *read_decl_init_single(Ast *var)
 static Ast *read_global_decl_multi(Ctype *ctype, char *first_ident)
 {
     List *decls = make_list();
+    Ctype *base_ctype = ctype;
     char *ident = first_ident;
+    Ctype *ident_ctype = base_ctype;
 
     while (1) {
-        Ctype *var_ctype = read_array_dimensions(ctype);
+        Ctype *var_ctype = read_array_dimensions(ident_ctype);
         Ast *var = ast_gvar(var_ctype, ident, false);
         Ast *decl = read_decl_init_single(var);
         list_push(decls, decl);
@@ -1943,9 +2064,16 @@ static Ast *read_global_decl_multi(Ctype *ctype, char *first_ident)
         if (!is_punct(tok, ','))
             error("Comma expected, but got %s", token_to_string(tok));
 
+        /* 下一个变量名前可能有 * (指针修饰符) */
+        Ctype *next_ctype = base_ctype;
         Token next = read_token();
+        while (is_punct(next, '*')) {
+            next_ctype = make_ptr_type(next_ctype);
+            next = read_token();
+        }
         if (get_ttype(next) != TTYPE_IDENT)
             error("Identifier expected, but got %s", token_to_string(next));
+        ident_ctype = next_ctype;
         ident = get_ident(next);
     }
 
@@ -1958,7 +2086,9 @@ static Ast *read_global_decl_multi(Ctype *ctype, char *first_ident)
 static Ast *read_decl_multi(Ctype *ctype, Token first_name)
 {
     List *decls = make_list();
+    Ctype *base_ctype = ctype;
     Token varname = first_name;
+    Ctype *var_base = base_ctype;
     
     while (1) {
         if (ctype->type == CTYPE_VOID)
@@ -1966,7 +2096,7 @@ static Ast *read_decl_multi(Ctype *ctype, Token first_name)
         if (have_redefine_var(get_ident(varname)))
             error("Fuction redefine local val: %s", token_to_string(varname));
         
-        Ctype *var_ctype = read_array_dimensions(ctype);
+        Ctype *var_ctype = read_array_dimensions(var_base);
         Ast *var = ast_lvar(var_ctype, get_ident(varname));
         Ast *decl = read_decl_init_single(var);
         list_push(decls, decl);
@@ -1977,8 +2107,14 @@ static Ast *read_decl_multi(Ctype *ctype, Token first_name)
             break;
         }
         
-        // 读取下一个变量名
+        /* 下一个变量名前可能有 * (指针修饰符) */
+        Ctype *next_ctype = base_ctype;
         varname = read_token();
+        while (is_punct(varname, '*')) {
+            next_ctype = make_ptr_type(next_ctype);
+            varname = read_token();
+        }
+        var_base = next_ctype;
         if (get_ttype(varname) != TTYPE_IDENT)
             error("Identifier expected, but got %s", token_to_string(varname));
     }
@@ -1996,6 +2132,11 @@ static Ast *read_decl(void)
 {
     Ctype *ctype = read_decl_spec();
     Token varname = read_token();
+
+    /* 仅类型声明（如 struct T; / enum E;） */
+    if (is_punct(varname, ';')) {
+        return ast_compound_stmt(make_list());
+    }
     
     // 检查是否是函数指针语法: type (*name)(params)
     if (is_punct(varname, '(')) {
@@ -2053,57 +2194,64 @@ static Ast *read_switch_stmt(void)
     Ast *ctrl = read_expr();
     expect(')');
 
-    /* 用来查重 case 值 */
-    Dict *seen = &EMPTY_DICT;
-    List *cases = make_list();
-    Ast  *def_stmt = NULL;
+    SwitchParseCtx ctx = {0};
+    ctx.seen = make_dict(NULL);
+    ctx.cases = make_list();
+    ctx.default_label = NULL;
+    ctx.parent = switch_ctx;
+    switch_ctx = &ctx;
 
-    expect('{');
-    while (1) {
-        Token tok = peek_token();
-        if (is_punct(tok, '}')) { read_token(); break; }
+    Ast *body = read_stmt();
 
-        if (is_ident(tok, "case")) {
-            read_token();
-            long cv = eval_intexpr(read_expr());
-            long low = cv, high = cv;
+    switch_ctx = ctx.parent;
+    return ast_switch(ctrl, ctx.cases, body, ctx.default_label);
+}
 
-            tok = peek_token();
-            if(is_punct(tok, PUNCT_ELLIPSIS)) {
-                read_token();
-                high = eval_intexpr(read_expr());
-                if (high < low) error("case range end (%ld) < start (%ld)", high, low);
-            }
+static Ast *read_switch_case_stmt(void)
+{
+    SwitchParseCtx *ctx = current_switch_ctx();
+    if (!ctx) error("case label not within switch");
 
-            
-            for (long v = low; v <= high; ++v) {
-                String buf = make_string();
-                string_appendf(&buf, "%ld", v);
-                char *key = get_cstring(buf);
-                if (dict_get(seen, key))
-                    error("duplicate case value %ld in range", key);
-                
-                dict_put(seen, key, (void *)1);
-            }
-                
-            expect(':');
-            list_push(cases, make_switch_case(low, high, read_stmt()));
-            continue;
-        }
+    long low = eval_intexpr(read_expr());
+    long high = low;
 
-        if (is_ident(tok, "default")) {
-            read_token();
-            if (def_stmt) error("multiple default labels");
-            expect(':'); 
-            def_stmt = read_stmt();
-            continue;
-        }
-
-        read_stmt();  
+    Token tok = peek_token();
+    if (is_punct(tok, PUNCT_ELLIPSIS)) {
+        read_token();
+        high = eval_intexpr(read_expr());
+        if (high < low)
+            error("case range end (%ld) < start (%ld)", high, low);
     }
 
-    seen = NULL;
-    return ast_switch(ctrl, cases, def_stmt);
+    switch_ctx_record_case(ctx, low, high);
+    expect(':');
+
+    char *label = make_label();
+    list_push(ctx->cases, make_switch_case(low, high, NULL, label));
+
+    List *stmts = make_list();
+    list_push(stmts, ast_label(label));
+    Ast *stmt = read_stmt();
+    if (stmt)
+        list_push(stmts, stmt);
+    return ast_compound_stmt(stmts);
+}
+
+static Ast *read_switch_default_stmt(void)
+{
+    SwitchParseCtx *ctx = current_switch_ctx();
+    if (!ctx) error("default label not within switch");
+    if (ctx->default_label) error("multiple default labels");
+
+    expect(':');
+    ctx->default_label = make_label();
+
+    List *stmts = make_list();
+    list_push(stmts, ast_label(ctx->default_label));
+    Ast *stmt = read_stmt();
+    if (stmt)
+        list_push(stmts, stmt);
+    return ast_compound_stmt(stmts);
 }
 
 
@@ -2196,6 +2344,10 @@ static bool is_first = true;
 static Ast *read_stmt(void)
 {
     Token tok = peek_token();  
+    if (current_switch_ctx()) {
+        if (is_ident(tok, "case")) { read_token(); return read_switch_case_stmt(); }
+        if (is_ident(tok, "default")) { read_token(); return read_switch_default_stmt(); }
+    }
     if(!is_first) {
         if (is_ident(tok, "continue"))  { read_token(); return read_continue_stmt(); } 
         if (is_ident(tok, "break"))     { read_token(); return read_break_stmt(); }
@@ -2239,6 +2391,8 @@ static Ast *read_decl_or_stmt(void)
 static Ast *read_compound_stmt(void)
 {
     localenv = make_dict(localenv);
+    struct_defs = make_dict(struct_defs);
+    union_defs = make_dict(union_defs);
     List *list = make_list();
     while (1) {
         Token tok = read_token();
@@ -2254,6 +2408,8 @@ static Ast *read_compound_stmt(void)
             break;
     }
     localenv = dict_parent(localenv);
+    struct_defs = dict_parent(struct_defs);
+    union_defs = dict_parent(union_defs);
     return ast_compound_stmt(list);
 }
 

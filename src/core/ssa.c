@@ -15,6 +15,8 @@ typedef struct CFContext {
     struct CFContext *parent;
 } CFContext;
 
+static Dict *current_label_blocks = NULL;
+
 static void* ssa_alloc(size_t size) {
     void *p = malloc(size);
     if (!p) {
@@ -75,6 +77,13 @@ static void ssa_emit(SSABuild *b, Instr *i) {
     }
 }
 
+static bool block_has_terminator(Block *blk) {
+    if (!blk || !blk->instrs || blk->instrs->len == 0) return false;
+    Instr *last = list_get(blk->instrs, blk->instrs->len - 1);
+    if (!last) return false;
+    return last->op == IROP_JMP || last->op == IROP_BR || last->op == IROP_RET;
+}
+
 static Block* ssa_build_block(SSABuild *b) {
     Block *blk = ssa_alloc(sizeof(Block));
     blk->id = b->next_block++;
@@ -87,6 +96,17 @@ static Block* ssa_build_block(SSABuild *b) {
     if (b->cur_func) {
         list_push(b->cur_func->blocks, blk);
     }
+    return blk;
+}
+
+static Block *ssa_get_or_create_label_block(SSABuild *b, const char *label) {
+    if (!b || !label) return NULL;
+    if (!current_label_blocks)
+        current_label_blocks = make_dict(NULL);
+    Block *blk = dict_get(current_label_blocks, (char *)label);
+    if (blk) return blk;
+    blk = ssa_build_block(b);
+    dict_put(current_label_blocks, ssa_strdup(label), blk);
     return blk;
 }
 
@@ -1464,6 +1484,22 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
     if (!ast || !b->cur_block) return;
     
     switch (ast->type) {
+    case AST_LABEL: {
+        Block *label_b = ssa_get_or_create_label_block(b, ast->label);
+        if (b->cur_block && b->cur_block != label_b && !block_has_terminator(b->cur_block)) {
+            ssa_build_jmp(b, label_b);
+        }
+        ssa_build_position(b, label_b);
+        break;
+    }
+    case AST_GOTO: {
+        Block *target = ssa_get_or_create_label_block(b, ast->label);
+        if (b->cur_block) {
+            ssa_build_jmp(b, target);
+            b->cur_block = NULL;
+        }
+        break;
+    }
     case AST_ASM: {
         Instr *i = ssa_make_instr(b, IROP_ASM);
         ssa_add_label(i, ast->asm_text ? ast->asm_text : "");
@@ -1560,6 +1596,52 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
     }
 
     case AST_SWITCH: {
+        if (ast->switch_body) {
+            ValueName ctrl = gen_expr(b, ast->ctrl);
+            Block *exit = ssa_build_block(b);
+            int n = ast->cases ? ast->cases->len : 0;
+            List *checks = make_list();
+
+            for (int i = 0; i < n; ++i)
+                list_push(checks, ssa_build_block(b));
+
+            Block *default_b = ast->default_label ? ssa_get_or_create_label_block(b, ast->default_label) : exit;
+            Block *chk = b->cur_block;
+
+            for (int i = 0; i < n; ++i) {
+                if (i > 0) {
+                    chk = list_get(checks, i);
+                    ssa_build_position(b, chk);
+                }
+
+                SwitchCase *c = list_get(ast->cases, i);
+                Block *case_b = ssa_get_or_create_label_block(b, c->label);
+                ValueName cmp = 0;
+                if (c->low == c->high) {
+                    cmp = ssa_build_binop(b, IROP_EQ, ctrl, ssa_build_const(b, c->low));
+                } else {
+                    ValueName ge = ssa_build_binop(b, IROP_GE, ctrl, ssa_build_const(b, c->low));
+                    ValueName le = ssa_build_binop(b, IROP_LE, ctrl, ssa_build_const(b, c->high));
+                    cmp = ssa_build_binop(b, IROP_AND, ge, le);
+                }
+
+                Block *false_tgt = (i + 1 < n) ? list_get(checks, i + 1) : default_b;
+                ssa_build_br(b, cmp, case_b, false_tgt);
+                ssa_build_seal(b, chk);
+            }
+
+            ssa_build_push_cf(b, exit, NULL);
+            b->cur_block = NULL;
+            gen_stmt(b, ast->switch_body);
+            ssa_build_pop_cf(b);
+
+            if (b->cur_block && !block_has_terminator(b->cur_block))
+                ssa_build_jmp(b, exit);
+
+            ssa_build_position(b, exit);
+            break;
+        }
+
         ValueName ctrl = gen_expr(b, ast->ctrl);
 
         // Fast-path: if every case (and default if present) is a simple
@@ -1877,6 +1959,7 @@ static void gen_func(SSABuild *b, Ast *ast) {
 
     Ctype *ret = ast->ctype;
     Func *f = ssa_build_function(b, ast->fname, ret);
+    current_label_blocks = make_dict(NULL);
     if (ast->ctype) {
         CtypeAttr attr = get_attr(ast->ctype->attr);
         f->is_inline = attr.ctype_inline;
@@ -1899,6 +1982,11 @@ static void gen_func(SSABuild *b, Ast *ast) {
     
     if (ast->body) {
         gen_stmt(b, ast->body);
+    }
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        ssa_build_seal(b, blk);
     }
     
     // 只在当前块不为空或有前驱时才添加默认ret
@@ -1930,6 +2018,7 @@ static void gen_interrupt_func(SSABuild *b, Ast *ast) {
     
     // 创建函数并标记为中断
     Func *f = ssa_build_function(b, ssa_strdup(isr_name), ret);
+    current_label_blocks = make_dict(NULL);
     f->is_interrupt = true;
     f->interrupt_id = ast->interrupt_id;
     f->bank_id = ast->bank_id;
@@ -1938,6 +2027,11 @@ static void gen_interrupt_func(SSABuild *b, Ast *ast) {
     
     if (ast->body) {
         gen_stmt(b, ast->body);
+    }
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        ssa_build_seal(b, blk);
     }
     
     if (b->cur_block) {

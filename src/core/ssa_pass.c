@@ -2204,6 +2204,21 @@ static bool pass_bool_return_simplify(Func *f, Stats *s) {
         if (!((vt == 1 && vf == 0) || (vt == 0 && vf == 1))) continue;
 
         ValueName cond = get_arg(term, 0);
+        Instr *cond_def = find_def_instr(f, cond);
+        if (cond_def) {
+            switch (cond_def->op) {
+            case IROP_EQ:
+            case IROP_NE:
+            case IROP_LT:
+            case IROP_LE:
+            case IROP_GT:
+            case IROP_GE:
+                continue;
+            default:
+                break;
+            }
+        }
+
         ValueName ret_val = cond;
 
         if (vt == 0 && vf == 1) {
@@ -2211,8 +2226,7 @@ static bool pass_bool_return_simplify(Func *f, Stats *s) {
             memset(ln, 0, sizeof(*ln));
             ln->op = IROP_LNOT;
             ln->dest = next_val++;
-            Instr *cdef = find_def_instr(f, cond);
-            ln->type = cdef ? cdef->type : NULL;
+            ln->type = cond_def ? cond_def->type : NULL;
             ln->args = make_list();
             ValueName *p = pass_alloc(sizeof(ValueName));
             *p = cond;
