@@ -20,9 +20,12 @@ C51GenContext* c51_ctx_new(void) {
     ctx->value_to_const = make_dict(NULL);
     ctx->value_to_spill = make_dict(NULL);
     ctx->next_spill_id = 0;
-    /* 默认 spill 区使用 IDATA，较大（size>1）时使用 XDATA */
+    /* spill 区统一使用 IDATA（内部 RAM），用直接寻址 MOV 代替 MOVX，
+     * 节省大量指令：每次 16 位 spill 从 6 条 MOVX 指令减为 2 条 MOV 指令。
+     * 注意：IDATA 只有 128 字节（0x00-0x7F），如果溢出太多变量，
+     * 可能需要回退到 XDATA（由 spill_use_xdata_for_large 控制）。*/
     ctx->spill_section = SEC_IDATA;
-    ctx->spill_use_xdata_for_large = 1;
+    ctx->spill_use_xdata_for_large = 0;
     ctx->v16_regs = make_dict(NULL);
     ctx->mmio_map = make_dict(NULL);
     ctx->temp_values = make_list();

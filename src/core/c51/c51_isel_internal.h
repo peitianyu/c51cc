@@ -108,10 +108,10 @@ enum {
 void emit_signed_cmp8_result(ISelContext* isel, Instr* ins, int dst_reg, int size, ValueName lhs, ValueName rhs, int cmp_type);
 bool is_unsigned_compare(ISelContext* isel, ValueName a, ValueName b);
 void emit_neg(ISelContext* isel, Instr* ins);
-void emit_shift(ISelContext* isel, Instr* ins, bool is_shr);
+void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr);
 void emit_mul(ISelContext* isel, Instr* ins, Instr* next);
 void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod);
-void emit_select(ISelContext* isel, Instr* ins);
+void emit_select(ISelContext* isel, Instr* ins, Instr* next);
 void emit_simple_cast(ISelContext* isel, Instr* ins, bool sign_extend);
 void emit_trunc(ISelContext* isel, Instr* ins);
 

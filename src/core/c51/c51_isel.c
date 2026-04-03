@@ -736,10 +736,10 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_not(isel, ins, next);
             break;
         case IROP_SHL:
-            emit_shift(isel, ins, false);
+            emit_shift(isel, ins, next, false);
             break;
         case IROP_SHR:
-            emit_shift(isel, ins, true);
+            emit_shift(isel, ins, next, true);
             break;
         case IROP_EQ:
             emit_cmp_eq(isel, ins, next);
@@ -786,7 +786,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_offset(isel, ins);
             break;
         case IROP_SELECT:
-            emit_select(isel, ins);
+            emit_select(isel, ins, next);
             break;
         case IROP_PHI:
             break;

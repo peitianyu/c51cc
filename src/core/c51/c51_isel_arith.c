@@ -213,7 +213,13 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     int src1_hi_tmp = -1;
     int src2_hi_tmp = -1;
     int src2_size = (!src2_is_imm) ? get_value_size(isel, src2) : 0;
-    if (src2_spilled_mem) {
+    /* 检查 src2 是否是 IDATA spill: 如果是，可以直接用 ADD A, sym 避免中转 B */
+    bool src2_idata_direct = false;
+    if (src2_spilled_mem && src2_sym) {
+        SectionKind src2_sec = get_symbol_section_kind(isel, src2_sym);
+        src2_idata_direct = (src2_sec == SEC_IDATA);
+    }
+    if (src2_spilled_mem && !src2_idata_direct) {
         emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
     }
 
@@ -299,7 +305,12 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         }
     } else {
         if (src2_spilled_mem) {
-            isel_emit(isel, "ADD", "A", "B", NULL);
+            if (src2_idata_direct) {
+                /* IDATA 直接地址：ADD A, sym  (节省通过 B 的中转) */
+                isel_emit(isel, "ADD", "A", src2_sym, NULL);
+            } else {
+                isel_emit(isel, "ADD", "A", "B", NULL);
+            }
         } else {
             const char* src2_lo = isel_get_lo_reg(isel, src2);
             isel_emit(isel, "ADD", "A", src2_lo, NULL);
@@ -325,10 +336,17 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         } else {
             if (src2_size == 2) {
                 if (src2_spilled_mem) {
-                    emit_mov(isel, dst_hi, "A", NULL);
-                    emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
-                    emit_mov(isel, "A", dst_hi, NULL);
-                    isel_emit(isel, "ADDC", "A", "B", NULL);
+                    if (src2_idata_direct) {
+                        /* IDATA 直接：ADDC A, (sym+1) — 节省 save/load/B 中转共 4 条指令 */
+                        char ref[256];
+                        snprintf(ref, sizeof(ref), "(%s + 1)", src2_sym);
+                        isel_emit(isel, "ADDC", "A", ref, NULL);
+                    } else {
+                        emit_mov(isel, dst_hi, "A", NULL);
+                        emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
+                        emit_mov(isel, "A", dst_hi, NULL);
+                        isel_emit(isel, "ADDC", "A", "B", NULL);
+                    }
                 } else {
                     const char* src2_hi = src2_hi_preserved ? src2_hi_preserved : isel_get_hi_reg(isel, src2);
                     isel_emit(isel, "ADDC", "A", src2_hi, NULL);
@@ -403,12 +421,33 @@ void emit_neg(ISelContext* isel, Instr* ins) {
     store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
 }
 
-void emit_shift(ISelContext* isel, Instr* ins, bool is_shr) {
+void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
     ValueName src = get_src1_value(ins);
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
-    int dst_reg = alloc_dest_reg(isel, ins, NULL, size, true);
+    int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
     int phys_dst_reg = dst_reg;
     bool temp_result = false;
+
+    /* 如果下一条指令是 RET，且结果寄存器不是 R6/R7，
+     * 直接将结果写入返回寄存器，避免移位后再 MOV R7/R6, Rx 的冗余拷贝 */
+    if (next && next->op == IROP_RET && size == 2) {
+        int ret_base = 6; /* R6:R7 */
+        int src_base = isel_get_value_reg(isel, src);
+        bool src_safe = (src_base < 0) || (src_base >= ret_base);
+        if (src_safe && phys_dst_reg != ret_base) {
+            phys_dst_reg = ret_base;
+            dst_reg = ret_base;
+            if (isel && isel->ctx && isel->ctx->value_to_reg) {
+                int* reg_num = malloc(sizeof(int));
+                if (reg_num) {
+                    *reg_num = ret_base;
+                    char* k = int_to_key(ins->dest);
+                    dict_put(isel->ctx->value_to_reg, k, reg_num);
+                }
+            }
+        }
+    }
+
     if (phys_dst_reg < 0 || phys_dst_reg + size - 1 > 7) {
         phys_dst_reg = alloc_temp_reg(isel, ins->dest, size);
         temp_result = phys_dst_reg >= 0;
@@ -1006,7 +1045,7 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
     exit(1);
 }
 
-void emit_select(ISelContext* isel, Instr* ins) {
+void emit_select(ISelContext* isel, Instr* ins, Instr* next) {
     if (!ins->args || ins->args->len < 3) return;
     ValueName cond = *(ValueName*)list_get(ins->args, 0);
     ValueName tv = *(ValueName*)list_get(ins->args, 1);
@@ -1027,6 +1066,35 @@ void emit_select(ISelContext* isel, Instr* ins) {
     }
     if (phys_dst_reg < 0) phys_dst_reg = 0;
 
+    /* 当 select 结果直接被 RET 使用时，强制分配到 R6/R7，避免 RET 前额外拷贝 */
+    if (next && next->op == IROP_RET && size == 2 && phys_dst_reg != 6) {
+        int tv_reg = isel_get_value_reg(isel, tv);
+        int fv_reg = isel_get_value_reg(isel, fv);
+        /* 确保 tv/fv 的源寄存器不在 R6/R7 范围内（避免覆盖源） */
+        bool tv_safe = (tv_reg < 0) || (tv_reg + size - 1 < 6);
+        bool fv_safe = (fv_reg < 0) || (fv_reg + size - 1 < 6);
+        if (tv_safe && fv_safe) {
+            /* 释放旧分配，重新绑定到 R6 */
+            if (phys_dst_reg >= 0 && phys_dst_reg <= 7) {
+                for (int j = 0; j < size; j++) {
+                    if (isel->reg_val[phys_dst_reg + j] == ins->dest)
+                        isel->reg_val[phys_dst_reg + j] = 0;
+                    isel->reg_busy[phys_dst_reg + j] = false;
+                }
+            }
+            phys_dst_reg = 6;
+            dst_reg = 6;
+            temp_result = false;
+            /* 更新 value_to_reg */
+            int* rptr = malloc(sizeof(int));
+            *rptr = 6;
+            char* key = int_to_key(ins->dest);
+            dict_put(isel->ctx->value_to_reg, key, rptr);
+            isel->reg_busy[6] = true; isel->reg_val[6] = ins->dest;
+            isel->reg_busy[7] = true; isel->reg_val[7] = ins->dest;
+        }
+    }
+
     const char* dst_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(phys_dst_reg);
 
@@ -1037,8 +1105,27 @@ void emit_select(ISelContext* isel, Instr* ins) {
     snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
 
     if (get_value_size(isel, cond) == 2) {
+        /* 16位cond测试：加载lo，保存，再加载hi到A，ORL A, lo_saved */
+        const char* cond_lo_raw = isel_get_lo_reg(isel, cond);
+        int cond_lo_tmp = -1;
+        const char* cond_lo_safe;
+        if (strcmp(cond_lo_raw, "A") == 0) {
+            /* lo在A中，需先保存到临时寄存器 */
+            int tr = alloc_temp_reg(isel, -1, 1);
+            if (tr >= 0) {
+                emit_mov(isel, isel_reg_name(tr), "A", NULL);
+                cond_lo_tmp = tr;
+                cond_lo_safe = isel_reg_name(tr);
+            } else {
+                isel_emit(isel, "MOV", "B", "A", NULL);
+                cond_lo_safe = "B";
+            }
+        } else {
+            cond_lo_safe = cond_lo_raw;
+        }
         emit_mov(isel, "A", isel_get_hi_reg(isel, cond), NULL);
-        isel_emit(isel, "ORL", "A", isel_get_lo_reg(isel, cond), NULL);
+        isel_emit(isel, "ORL", "A", cond_lo_safe, NULL);
+        if (cond_lo_tmp >= 0) free_temp_reg(isel, cond_lo_tmp, 1);
     } else {
         isel_ensure_in_acc(isel, cond);
     }
@@ -1202,6 +1289,16 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         }
     }
 
+    /* 检查 src2 是否是 IDATA spill: 如果是，可以直接用 SUBB A, sym 避免中转 B */
+    bool src2_idata_direct_sub = false;
+    if (src2_spilled_mem && src2_sym) {
+        SectionKind src2_sec_sub = get_symbol_section_kind(isel, src2_sym);
+        src2_idata_direct_sub = (src2_sec_sub == SEC_IDATA);
+    }
+    if (src2_spilled_mem && !src2_idata_direct_sub) {
+        emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
+    }
+
     /* 16-bit sub-1 special case: use DEC Rlo; JNZ skip; DEC Rhi; skip:
      * This matches the compact pattern keil generates and avoids CLR C + SUBB pair. */
     if (size == 2 && src2_is_imm && imm_val == 1 && src1_size == 2 && !src2_spilled_mem) {
@@ -1257,7 +1354,8 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         return;
     }
 
-    if (src2_spilled_mem) {
+    /* src2_spilled_mem 且非 IDATA 直接：预加载 B (IDATA 直接时在 SUBB 指令中使用 sym 字面量) */
+    if (src2_spilled_mem && !src2_idata_direct_sub) {
         emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
     }
     emit_mov(isel, "A", src1_lo, ins);
@@ -1285,7 +1383,12 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         isel_emit(isel, "CLR", "C", NULL, NULL);
         char* ssa = instr_to_ssa_str(ins);
         if (src2_spilled_mem) {
-            isel_emit(isel, "SUBB", "A", "B", ssa);
+            if (src2_idata_direct_sub) {
+                /* IDATA 直接地址：SUBB A, sym */
+                isel_emit(isel, "SUBB", "A", src2_sym, ssa);
+            } else {
+                isel_emit(isel, "SUBB", "A", "B", ssa);
+            }
         } else {
             const char* src2_lo = isel_get_lo_reg(isel, src2);
             isel_emit(isel, "SUBB", "A", src2_lo, ssa);
@@ -1312,10 +1415,17 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         } else {
             if (src2_size == 2) {
                 if (src2_spilled_mem) {
-                    emit_mov(isel, dst_hi, "A", NULL);
-                    emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
-                    emit_mov(isel, "A", dst_hi, NULL);
-                    isel_emit(isel, "SUBB", "A", "B", NULL);
+                    if (src2_idata_direct_sub) {
+                        /* IDATA 直接：SUBB A, (sym+1) */
+                        char ref[256];
+                        snprintf(ref, sizeof(ref), "(%s + 1)", src2_sym);
+                        isel_emit(isel, "SUBB", "A", ref, NULL);
+                    } else {
+                        emit_mov(isel, dst_hi, "A", NULL);
+                        emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
+                        emit_mov(isel, "A", dst_hi, NULL);
+                        isel_emit(isel, "SUBB", "A", "B", NULL);
+                    }
                 } else {
                     const char* src2_hi = src2_hi_preserved ? src2_hi_preserved : isel_get_hi_reg(isel, src2);
                     isel_emit(isel, "SUBB", "A", src2_hi, NULL);

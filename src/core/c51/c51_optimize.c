@@ -173,11 +173,14 @@ static int peephole_mov_chain(List* instrs, int start) {
     const char* dst2 = get_operand(ins2, 0);
     const char* src2 = get_operand(ins2, 1);
     
-    // MOV A, x; MOV y, A -> MOV y, x; MOV A, x
+    // MOV A, x; MOV y, A -> MOV y, x; (remove MOV A, x)
+    // Works for: x = register, immediate, or direct IDATA address (not indirect)
+    // y must be a register (not A, not indirect)
     if (operands_equal(dst1, "A") && operands_equal(src2, "A") && 
-        is_register_operand(dst2) && (is_register_operand(src1) || is_immediate_operand(src1))) {
+        is_register_operand(dst2) && !operands_equal(dst2, "A") &&
+        src1 && !is_indirect_operand(src1)) {
         
-        // 检查第三条指令是否立即使用A
+        // Check if A is used by the next instruction
         bool a_used_next = false;
         if (start + 2 < instrs->len) {
             AsmInstr* ins3 = (AsmInstr*)list_get(instrs, start + 2);
@@ -186,7 +189,7 @@ static int peephole_mov_chain(List* instrs, int start) {
             }
         }
         
-        // 如果A不会立即被使用，优化为 MOV y, x
+        // If A is not immediately needed, optimize: MOV y, x (remove MOV A, x)
         if (!a_used_next) {
             free(ins2->args->head->next->elem);
             ins2->args->head->next->elem = strdup(src1);
@@ -339,31 +342,54 @@ static int peephole_add_zero_16(List* instrs, int start) {
     return 1;
 }
 
-/* 窥孔优化：MOV x, A; MOV A, x -> MOV x, A (删除冗余加载) */
+/* 窥孔优化：MOV x, A; MOV A, x -> MOV x, A (删除冗余加载)
+ * 也处理跨越最多2条不修改A和Rn的中间指令的情况 */
 static int peephole_redundant_load(List* instrs, int start) {
     if (start + 1 >= instrs->len) return 0;
     
     AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
-    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
-
-    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
-    
-    if (!is_mov(ins1) || !is_mov(ins2)) return 0;
+    if (is_basic_block_barrier(ins1)) return 0;
+    if (!is_mov(ins1)) return 0;
     
     const char* dst1 = get_operand(ins1, 0);
     const char* src1 = get_operand(ins1, 1);
-    const char* dst2 = get_operand(ins2, 0);
-    const char* src2 = get_operand(ins2, 1);
-    
-    // 仅对寄存器间的 redundant load 进行删除，避免误删 SFR/内存访问
-    if (is_register_operand(dst1) && is_register_operand(src1) &&
-        is_register_operand(dst2) && is_register_operand(src2)) {
-        // MOV x, A; MOV A, x -> MOV x, A (删除第二条)
-        if (operands_equal(src1, "A") && operands_equal(dst2, "A") && 
-            operands_equal(dst1, src2)) {
-            remove_instr(instrs, start + 1);
-            return 1;
+
+    /* Only handle: MOV Rn, A pattern (src="A", dst=Rn) */
+    if (!is_register_operand(dst1) || !operands_equal(src1, "A")) return 0;
+
+    /* Scan forward: look for MOV A, Rn; allow instructions that don't touch A or Rn */
+    for (int offset = 1; offset <= 3 && start + offset < instrs->len; offset++) {
+        AsmInstr* ins_next = (AsmInstr*)list_get(instrs, start + offset);
+        if (!ins_next) break;
+        if (is_basic_block_barrier(ins_next)) break;
+
+        if (is_mov(ins_next)) {
+            const char* dst_n = get_operand(ins_next, 0);
+            const char* src_n = get_operand(ins_next, 1);
+            if (!dst_n || !src_n) break;
+
+            /* Found MOV A, Rn: remove it */
+            if (operands_equal(dst_n, "A") && operands_equal(src_n, dst1)) {
+                remove_instr(instrs, start + offset);
+                return 1;
+            }
+
+            /* If this MOV writes to A or dst1 (Rn), we can't skip it */
+            if (operands_equal(dst_n, "A") || operands_equal(dst_n, dst1)) break;
+
+            /* This MOV writes to some other register - safe to skip */
+            continue;
         }
+
+        /* Non-MOV instruction: check if it modifies A or dst1 */
+        if (!ins_next->op) break;
+        /* CLR C / SETB C are safe */
+        if ((strcmp(ins_next->op, "CLR") == 0 || strcmp(ins_next->op, "SETB") == 0)) {
+            const char* arg0 = get_operand(ins_next, 0);
+            if (arg0 && strcmp(arg0, "C") == 0) continue;
+        }
+        /* Any other non-MOV instruction may modify A - stop */
+        break;
     }
     
     return 0;
@@ -560,7 +586,319 @@ static int peephole_xdata_store_load_forward(List* instrs, int start) {
     return removed_count - added_count;
 }
 
+/* 帮助函数：检查字符串是否是 "(__spill_N + 1)" 形式并与 "sym" 对应 */
+static bool is_idata_hi_of(const char* hi_str, const char* lo_str) {
+    /* hi_str should be "(lo_str + 1)" */
+    if (!hi_str || !lo_str) return false;
+    size_t lo_len = strlen(lo_str);
+    /* Expected format: "(" + lo_str + " + 1)" 
+     * Total length: 1 + lo_len + 5 = lo_len + 6 */
+    if (strlen(hi_str) != lo_len + 6) return false;
+    if (hi_str[0] != '(') return false;
+    if (strncmp(hi_str + 1, lo_str, lo_len) != 0) return false;
+    if (strcmp(hi_str + 1 + lo_len, " + 1)") != 0) return false;
+    return true;
+}
 
+/* 窥孔优化：IDATA 16-bit store-then-load forward
+ *
+ * Pattern (7 instructions):
+ *   [0] MOV sym, A           ; store lo
+ *   [1] MOV A, hi_src        ; load hi value (reg or immediate)
+ *   [2] MOV (sym + 1), A     ; store hi
+ *   [3] MOV A, sym           ; reload lo  <- redundant
+ *   [4] MOV Rlo, A
+ *   [5] MOV A, (sym + 1)     ; reload hi  <- redundant
+ *   [6] MOV Rhi, A
+ *
+ * We need to know what value was in A at [0].
+ * Look backwards from [0] for the most recent instruction that set A:
+ *   - MOV A, lo_src  -> lo_src is the value
+ *   - Other (ANL, ADD etc.) -> A was computed, not easily traceable
+ *     In that case, we can still forward [5-6] but not [3-4].
+ *
+ * Replace [3-6] with:
+ *   MOV Rlo, lo_src  (if lo_src found)
+ *   MOV Rhi, hi_src
+ * Savings: 4 instructions (or 2 if lo_src not found)
+ *
+ * Also handle the simpler 8-bit case (no hi part):
+ *   [0] MOV sym, A
+ *   [1] MOV A, sym    <- can forward if A unchanged between [0] and [1]
+ * -> remove [1]  (saves 1)
+ */
+static int peephole_idata_store_load_forward(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* i0 = (AsmInstr*)list_get(instrs, start);
+    if (!i0 || !is_mov(i0)) return 0;
+    if (is_basic_block_barrier(i0)) return 0;
+
+    const char* dst0 = get_operand(i0, 0);
+    const char* src0 = get_operand(i0, 1);
+
+    /* [0] must be MOV sym, A  where sym is an IDATA address (memory operand, not indirect) */
+    if (!dst0 || !src0) return 0;
+    if (!is_memory_operand(dst0) || is_indirect_operand(dst0)) return 0;
+    if (!operands_equal(src0, "A")) return 0;
+    /* sym must look like a spill symbol (starts with __ or contains spill) - be permissive */
+    /* Just check it's a plain IDATA symbol */
+
+    /* Simple 8-bit case first: [0] MOV sym, A; [1] MOV A, sym */
+    if (start + 1 < instrs->len) {
+        AsmInstr* i1 = (AsmInstr*)list_get(instrs, start + 1);
+        if (i1 && is_mov(i1) && !is_basic_block_barrier(i1)) {
+            const char* dst1 = get_operand(i1, 0);
+            const char* src1 = get_operand(i1, 1);
+            if (operands_equal(dst1, "A") && operands_equal(src1, dst0)) {
+                /* MOV sym, A; MOV A, sym -> remove MOV A, sym */
+                remove_instr(instrs, start + 1);
+                return 1;
+            }
+        }
+    }
+
+    /* 16-bit case: need at least 7 instructions total */
+    if (start + 6 >= instrs->len) return 0;
+
+    AsmInstr* i1 = (AsmInstr*)list_get(instrs, start + 1);
+    AsmInstr* i2 = (AsmInstr*)list_get(instrs, start + 2);
+    AsmInstr* i3 = (AsmInstr*)list_get(instrs, start + 3);
+    AsmInstr* i4 = (AsmInstr*)list_get(instrs, start + 4);
+    AsmInstr* i5 = (AsmInstr*)list_get(instrs, start + 5);
+    AsmInstr* i6 = (AsmInstr*)list_get(instrs, start + 6);
+
+    if (!i1||!i2||!i3||!i4||!i5||!i6) return 0;
+    if (is_basic_block_barrier(i1) || is_basic_block_barrier(i2) ||
+        is_basic_block_barrier(i3) || is_basic_block_barrier(i4) ||
+        is_basic_block_barrier(i5) || is_basic_block_barrier(i6)) return 0;
+
+    /* [1]: MOV A, hi_src */
+    if (!is_mov(i1)) return 0;
+    const char* dst1 = get_operand(i1, 0);
+    const char* hi_src = get_operand(i1, 1);
+    if (!operands_equal(dst1, "A")) return 0;
+    if (!hi_src) return 0;
+
+    /* [2]: MOV (sym + 1), A */
+    if (!is_mov(i2)) return 0;
+    const char* dst2 = get_operand(i2, 0);
+    const char* src2 = get_operand(i2, 1);
+    if (!operands_equal(src2, "A")) return 0;
+    if (!is_idata_hi_of(dst2, dst0)) return 0;
+
+    /* [3]: MOV A, sym */
+    if (!is_mov(i3)) return 0;
+    const char* dst3 = get_operand(i3, 0);
+    const char* src3 = get_operand(i3, 1);
+    if (!operands_equal(dst3, "A") || !operands_equal(src3, dst0)) return 0;
+
+    /* [4]: MOV Rlo, A */
+    if (!is_mov(i4)) return 0;
+    const char* rlo = get_operand(i4, 0);
+    const char* src4 = get_operand(i4, 1);
+    if (!rlo || rlo[0] != 'R') return 0;
+    if (!operands_equal(src4, "A")) return 0;
+
+    /* [5]: MOV A, (sym + 1) */
+    if (!is_mov(i5)) return 0;
+    const char* dst5 = get_operand(i5, 0);
+    const char* src5 = get_operand(i5, 1);
+    if (!operands_equal(dst5, "A") || !operands_equal(src5, dst2)) return 0;
+
+    /* [6]: MOV Rhi, A */
+    if (!is_mov(i6)) return 0;
+    const char* rhi = get_operand(i6, 0);
+    const char* src6 = get_operand(i6, 1);
+    if (!rhi || rhi[0] != 'R') return 0;
+    if (!operands_equal(src6, "A")) return 0;
+
+    /* All pattern checks passed.
+     * Now find what value was in A at instruction [0] by scanning backwards.
+     * We look for:
+     *   - MOV A, Rx  → lo_src = Rx  (only safe if contiguous or skipping non-A writes)
+     *   - MOV A, #imm → lo_src = #imm
+     *   - MOV Rx, A  → lo_src = Rx  (A was just stored to Rx, which equals A)
+     * We only look up to 4 instructions back, skipping MOVs that don't write A.
+     * Once we find any instruction that WRITES A, that is the source; stop.
+     * If we find MOV Rx, A (A-save), record Rx as a candidate but keep looking
+     * for the actual setter of A (unless A-save is the immediate predecessor).
+     */
+    const char* lo_src = NULL;
+    for (int k = start - 1; k >= 0 && k >= start - 4; k--) {
+        AsmInstr* prev = (AsmInstr*)list_get(instrs, k);
+        if (!prev || !prev->op) break;
+        if (is_label_instr(prev)) break;
+
+        if (!is_mov(prev)) {
+            /* Non-MOV: could be a computation that set A. Stop. */
+            break;
+        }
+        const char* pdst = get_operand(prev, 0);
+        const char* psrc = get_operand(prev, 1);
+        if (!pdst || !psrc) break;
+
+        if (operands_equal(pdst, "A")) {
+            /* Found setter of A */
+            if (is_register_operand(psrc) || is_immediate_operand(psrc)) {
+                lo_src = psrc;
+            }
+            break;
+        }
+        /* MOV Rx, A at exactly start-1: A saved to Rx, Rx == A's current value */
+        if (k == start - 1 && operands_equal(psrc, "A") && is_register_operand(pdst)) {
+            lo_src = pdst;
+            break;
+        }
+        /* Other MOV (not writing A): skip over it */
+    }
+
+    /* Remove [3..6] and replace with MOV Rlo, lo_src + MOV Rhi, hi_src */
+    remove_instr(instrs, start + 6);
+    remove_instr(instrs, start + 5);
+    remove_instr(instrs, start + 4);
+    remove_instr(instrs, start + 3);
+
+    int added = 0;
+    int insert_pos = start + 3;
+
+    /* MOV Rhi, hi_src */
+    if (!operands_equal(rhi, hi_src)) {
+        AsmInstr* new_hi = calloc(1, sizeof(AsmInstr));
+        new_hi->op = strdup("MOV");
+        new_hi->args = make_list();
+        list_push(new_hi->args, strdup(rhi));
+        list_push(new_hi->args, strdup(hi_src));
+        insert_instr(instrs, insert_pos, new_hi);
+        added++;
+    }
+
+    if (lo_src) {
+        /* MOV Rlo, lo_src (insert first so order is: Rlo then Rhi) */
+        if (!operands_equal(rlo, lo_src)) {
+            AsmInstr* new_lo = calloc(1, sizeof(AsmInstr));
+            new_lo->op = strdup("MOV");
+            new_lo->args = make_list();
+            list_push(new_lo->args, strdup(rlo));
+            list_push(new_lo->args, strdup(lo_src));
+            insert_instr(instrs, insert_pos, new_lo);
+            added++;
+        }
+    } else {
+        /* Can't trace lo_src: keep the original [3-4] pair but forward hi */
+        /* Restore MOV A, sym; MOV Rlo, A */
+        AsmInstr* new_lo_dst = calloc(1, sizeof(AsmInstr));
+        new_lo_dst->op = strdup("MOV");
+        new_lo_dst->args = make_list();
+        list_push(new_lo_dst->args, strdup(rlo));
+        list_push(new_lo_dst->args, strdup(dst0)); /* MOV Rlo, sym (direct) */
+        insert_instr(instrs, insert_pos, new_lo_dst);
+        added++;
+    }
+
+    /* Net savings: removed 4, added <= 2 → net >= 2 */
+    return 4 - added;
+}
+
+/* 窥孔优化：IDATA 直接加载前向替换
+ * 如果有: MOV Rx, sym (直接 IDATA 加载)
+ * 且向前查找能找到: MOV sym, A (存储), 且之前找到 MOV Rsave, A (保存 A 到寄存器)
+ * 且 Rsave 在 sym 存储和当前加载之间未被修改
+ * 则: MOV Rx, sym -> MOV Rx, Rsave (避免内存访问)
+ *
+ * Pattern:
+ *   MOV Rsave, A   <- backward scan finds this
+ *   ... (no modification of Rsave or sym)
+ *   MOV sym, A     <- backward scan finds this first
+ *   ... (no modification of sym)
+ *   MOV Rx, sym    <- current instruction (start)
+ */
+static int peephole_idata_load_from_reg(List* instrs, int start) {
+    if (start < 1) return 0;
+
+    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
+    if (!ins || !is_mov(ins)) return 0;
+    if (is_basic_block_barrier(ins)) return 0;
+
+    const char* dst = get_operand(ins, 0);
+    const char* sym = get_operand(ins, 1);
+
+    /* Target must be a register, source must be direct IDATA (not indirect, not register, not imm) */
+    if (!dst || !sym) return 0;
+    if (!is_register_operand(dst) || operands_equal(dst, "A")) return 0;
+    if (is_register_operand(sym) || is_immediate_operand(sym) || is_indirect_operand(sym)) return 0;
+
+    /* Look backward for MOV sym, A (the store instruction) */
+    const char* reg_save = NULL;
+    bool found_store = false;
+    for (int k = start - 1; k >= 0 && k >= start - 8; k--) {
+        AsmInstr* prev = (AsmInstr*)list_get(instrs, k);
+        if (!prev || !prev->op) break;
+        if (is_label_instr(prev)) break; /* basic block boundary */
+        if (is_control_transfer_instr(prev)) break;
+
+        if (is_mov(prev)) {
+            const char* pdst = get_operand(prev, 0);
+            const char* psrc = get_operand(prev, 1);
+            if (!pdst || !psrc) break;
+
+            if (!found_store) {
+                /* Looking for MOV sym, A */
+                if (operands_equal(pdst, sym) && operands_equal(psrc, "A")) {
+                    found_store = true;
+                    /* Now look further back for MOV Rsave, A */
+                    for (int j = k - 1; j >= 0 && j >= k - 4; j--) {
+                        AsmInstr* pprev = (AsmInstr*)list_get(instrs, j);
+                        if (!pprev || !pprev->op) break;
+                        if (is_label_instr(pprev)) break;
+                        if (!is_mov(pprev)) {
+                            /* Non-MOV: might have computed A. Stop. */
+                            break;
+                        }
+                        const char* ppdst = get_operand(pprev, 0);
+                        const char* ppsrc = get_operand(pprev, 1);
+                        if (!ppdst || !ppsrc) break;
+                        if (operands_equal(ppdst, "A")) break; /* A was set here - wrong direction */
+                        if (operands_equal(ppsrc, "A") && is_register_operand(ppdst)) {
+                            /* Found MOV Rsave, A: check Rsave not modified between j and start */
+                            bool modified = false;
+                            for (int m = j + 1; m < start; m++) {
+                                AsmInstr* mid = (AsmInstr*)list_get(instrs, m);
+                                if (!mid || !mid->op) break;
+                                if (is_basic_block_barrier(mid)) { modified = true; break; }
+                                if (is_mov(mid)) {
+                                    const char* mdst = get_operand(mid, 0);
+                                    if (operands_equal(mdst, ppdst)) { modified = true; break; }
+                                }
+                            }
+                            if (!modified) {
+                                reg_save = ppdst;
+                            }
+                        }
+                        /* If MOV writes to sym, stop */
+                        if (operands_equal(ppdst, sym)) break;
+                    }
+                    break; /* Stop backward scan once store is found */
+                }
+                /* If something writes to sym between start and the store, stop */
+                if (operands_equal(pdst, sym)) break;
+                /* If instruction is a barrier or writes to A from memory, continue */
+            }
+        } else {
+            /* Non-MOV: check if it's a barrier */
+            if (is_control_transfer_instr(prev)) break;
+            /* Other non-MOV: might write to sym or A, stop conservatively */
+            break;
+        }
+    }
+
+    if (!found_store || !reg_save) return 0;
+
+    /* Replace MOV Rx, sym with MOV Rx, reg_save */
+    free(ins->args->head->next->elem);
+    ins->args->head->next->elem = strdup(reg_save);
+    return 1;
+}
 
 /* 检查指令是否不修改指定寄存器 */
 static bool instr_does_not_modify_reg(AsmInstr* ins, const char* reg) {
@@ -1038,6 +1376,12 @@ static void optimize_section(Section* sec) {
             if (removed) { changed = 1; continue; }
 
             removed = peephole_mem_to_reg(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_idata_store_load_forward(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_idata_load_from_reg(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_xdata_store_load_forward(sec->asminstrs, i);

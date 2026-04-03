@@ -12,8 +12,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 
-C51CC_DIR = REPO_ROOT / "output" / "c51cc" / "single-exec"
-KEIL_DIR = REPO_ROOT / "output" / "keil" / "single-exec"
+C51CC_DIR = REPO_ROOT / "output" / "c51cc" / "test"
+KEIL_DIR = REPO_ROOT / "output" / "keil" / "test"
 
 # 跳过注释和空行，只保留有效汇编指令
 COMMENT_RE = re.compile(r";.*$")
@@ -45,27 +45,51 @@ def is_directive(line: str) -> bool:
     return False
 
 
+# c51cc 生成的 STARTUP 段范围：从 SJMP STARTUP1 到 SJMP HALT（含HALT标签）
+STARTUP_BEGIN_RE = re.compile(r"^\s*SJMP\s+STARTUP1\b", re.IGNORECASE)
+HALT_RE = re.compile(r"^\s*HALT\s*:", re.IGNORECASE)
+
+
 def extract_instructions(path: Path):
     """从 .asm 文件提取有效指令（非注释、非标签、非伪指令）"""
     instrs = []
     if not path.exists():
         return instrs
+    # 先扫描一遍，确定 STARTUP 段范围，然后跳过
+    lines = []
     with open(path, encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            line = strip_comment(raw)
-            if not line:
-                continue
-            if LABEL_RE.match(raw):
-                continue
-            if is_directive(line):
-                continue
-            # keil 生成带缩进 + 内部注释行（SOURCE LINE）
-            if line.startswith(";"):
-                continue
-            # 跳过 c51cc 的 Symbol Table / Relocations 注释块标题
-            if line.startswith("=") or line.startswith("-"):
-                continue
-            instrs.append(line)
+        lines = f.readlines()
+
+    # 找到 STARTUP 段：从 "SJMP STARTUP1" 到 "SJMP HALT" 那行（含）
+    in_startup = False
+    skip_set = set()
+    for idx, raw in enumerate(lines):
+        stripped = strip_comment(raw)
+        if not in_startup and STARTUP_BEGIN_RE.match(stripped):
+            in_startup = True
+        if in_startup:
+            skip_set.add(idx)
+            # SJMP HALT 作为 startup 的最后一条指令
+            if re.match(r"^\s*SJMP\s+HALT\b", stripped, re.IGNORECASE):
+                in_startup = False
+
+    for idx, raw in enumerate(lines):
+        if idx in skip_set:
+            continue
+        line = strip_comment(raw)
+        if not line:
+            continue
+        if LABEL_RE.match(raw):
+            continue
+        if is_directive(line):
+            continue
+        # keil 生成带缩进 + 内部注释行（SOURCE LINE）
+        if line.startswith(";"):
+            continue
+        # 跳过 c51cc 的 Symbol Table / Relocations 注释块标题
+        if line.startswith("=") or line.startswith("-"):
+            continue
+        instrs.append(line)
     return instrs
 
 

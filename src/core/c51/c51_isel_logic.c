@@ -105,8 +105,6 @@ static bool emit_cmp_zero_branch(ISelContext* isel, Instr* ins, ValueName value,
                                  bool want_positive, bool want_negative,
                                  bool unsigned_cmp, int true_id, int false_id) {
     int width = get_value_size(isel, value) >= 2 ? 2 : 1;
-    const char* lo = width == 2 ? get_cmp_lo_reg(isel, value, 2) : isel_get_lo_reg(isel, value);
-    const char* hi = width == 2 ? get_cmp_hi_reg(isel, value, 2) : NULL;
 
     if (unsigned_cmp) {
         if (want_negative) {
@@ -115,14 +113,26 @@ static bool emit_cmp_zero_branch(ISelContext* isel, Instr* ins, ValueName value,
         }
 
         char* ssa = instr_to_ssa_str(ins);
-        emit_mov(isel, "A", width == 2 ? hi : lo, ins);
         if (width == 2) {
-            isel_emit(isel, "ORL", "A", lo, NULL);
+            /* 16位：先加载 hi，再 ORL lo。若 lo 是IDATA需先保存到临时寄存器 */
+            const char* lo = get_cmp_lo_reg(isel, value, 2);
+            int lo_tmp = -1;
+            const char* lo_safe = save_acc_operand_for_cmp(isel, lo, &lo_tmp);
+            const char* hi = get_cmp_hi_reg(isel, value, 2);
+            emit_mov(isel, "A", hi, ins);
+            isel_emit(isel, "ORL", "A", lo_safe, NULL);
+            free_saved_cmp_operand(isel, lo_tmp);
+        } else {
+            const char* lo = isel_get_lo_reg(isel, value);
+            emit_mov(isel, "A", lo, ins);
         }
         emit_cond_branch_to_blocks(isel, "JNZ", true_id, false_id, ins, ssa);
         free(ssa);
         return true;
     }
+
+    const char* lo = width == 2 ? get_cmp_lo_reg(isel, value, 2) : isel_get_lo_reg(isel, value);
+    const char* hi = width == 2 ? get_cmp_hi_reg(isel, value, 2) : NULL;
 
     if (want_negative) {
         char* ssa = instr_to_ssa_str(ins);
@@ -243,6 +253,15 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
     ValueName src2 = get_src2_value(ins);
 
+    /* 检查 src2 是否是 IDATA spill：如果是，可以用 ANL/ORL/XRL A, sym 直接地址避免中转 */
+    const char* src2_sym = (!src2_is_imm) ? lookup_value_addr_symbol(isel, src2) : NULL;
+    bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == -3;
+    bool src2_idata_direct = false;
+    if (src2_spilled_mem && src2_sym) {
+        SectionKind src2_bitw_sec = get_symbol_section_kind(isel, src2_sym);
+        src2_idata_direct = (src2_bitw_sec == SEC_IDATA);
+    }
+
     int reg = alloc_dest_reg(isel, ins, next, size, true);
     int phys_reg = reg;
     bool temp_result = false;
@@ -322,33 +341,70 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
         : NULL;
 
     if (src2_is_imm) {
+        uint8_t lo_byte = (uint8_t)(imm_val & 0xFF);
+        bool is_and = (strcmp(op_mnem, "ANL") == 0);
+        bool is_or  = (strcmp(op_mnem, "ORL") == 0);
+        bool is_xor = (strcmp(op_mnem, "XRL") == 0);
+        /* 低字节特殊值优化 */
+        if (is_and && lo_byte == 0xFF) {
+            /* ANL A, #0xFF = no-op：直接 MOV dst_lo, src1_lo */
+            emit_mov(isel, dst_lo, src1_lo, ins);
+        } else if (is_and && lo_byte == 0x00) {
+            /* ANL A, #0 = CLR A：直接 MOV dst_lo, #0 */
+            isel_emit(isel, "MOV", dst_lo, "#0", NULL);
+        } else if ((is_or || is_xor) && lo_byte == 0x00) {
+            /* ORL/XRL A, #0 = no-op：直接 MOV dst_lo, src1_lo */
+            emit_mov(isel, dst_lo, src1_lo, ins);
+        } else {
+            emit_mov(isel, "A", src1_lo, ins);
+            char imm_str[16];
+            snprintf(imm_str, sizeof(imm_str), "#%d", (int)lo_byte);
+            isel_emit(isel, op_mnem, "A", imm_str, NULL);
+            emit_mov(isel, dst_lo, "A", ins);
+        }
+        if (size == 2) {
+            uint8_t hi_byte = (uint8_t)((imm_val >> 8) & 0xFF);
+            if (is_and && hi_byte == 0xFF) {
+                emit_mov(isel, dst_hi, src1_hi, ins);
+            } else if (is_and && hi_byte == 0x00) {
+                isel_emit(isel, "MOV", dst_hi, "#0", NULL);
+            } else if ((is_or || is_xor) && hi_byte == 0x00) {
+                emit_mov(isel, dst_hi, src1_hi, ins);
+            } else {
+                emit_mov(isel, "A", src1_hi, ins);
+                char imm_str[16];
+                snprintf(imm_str, sizeof(imm_str), "#%d", (int)hi_byte);
+                isel_emit(isel, op_mnem, "A", imm_str, NULL);
+                emit_mov(isel, dst_hi, "A", ins);
+            }
+        }
+    } else if (src2_idata_direct) {
+        /* IDATA 直接地址：ANL/ORL/XRL A, sym (无需临时寄存器中转) */
         emit_mov(isel, "A", src1_lo, ins);
-        char imm_str[16];
-        snprintf(imm_str, sizeof(imm_str), "#%d", (int)(imm_val & 0xFF));
-        isel_emit(isel, op_mnem, "A", imm_str, NULL);
+        isel_emit(isel, op_mnem, "A", src2_sym, NULL);
+        emit_mov(isel, dst_lo, "A", ins);
+        if (size == 2) {
+            char ref[256];
+            snprintf(ref, sizeof(ref), "(%s + 1)", src2_sym);
+            emit_mov(isel, "A", src1_hi, ins);
+            isel_emit(isel, op_mnem, "A", ref, NULL);
+            emit_mov(isel, dst_hi, "A", ins);
+        }
     } else {
         int src2_lo_tmp = -1;
         const char* src2_lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, src2), &src2_lo_tmp);
         emit_mov(isel, "A", src1_lo, ins);
         isel_emit(isel, op_mnem, "A", src2_lo, NULL);
         free_saved_cmp_operand(isel, src2_lo_tmp);
-    }
-    emit_mov(isel, dst_lo, "A", ins);
-
-    if (size == 2) {
-        if (src2_is_imm) {
-            emit_mov(isel, "A", src1_hi, ins);
-            char imm_str[16];
-            snprintf(imm_str, sizeof(imm_str), "#%d", (int)((imm_val >> 8) & 0xFF));
-            isel_emit(isel, op_mnem, "A", imm_str, NULL);
-        } else {
+        emit_mov(isel, dst_lo, "A", ins);
+        if (size == 2) {
             int src2_hi_tmp = -1;
             const char* src2_hi = save_acc_operand_for_cmp(isel, isel_get_hi_reg(isel, src2), &src2_hi_tmp);
             emit_mov(isel, "A", src1_hi, ins);
             isel_emit(isel, op_mnem, "A", src2_hi, NULL);
             free_saved_cmp_operand(isel, src2_hi_tmp);
+            emit_mov(isel, dst_hi, "A", ins);
         }
-        emit_mov(isel, dst_hi, "A", ins);
     }
 
     emit_store_spilled_result(isel, ins->dest, phys_reg, size, ins);
@@ -1091,53 +1147,59 @@ static int emit_s16cmp_core(ISelContext* isel, Instr* ins,
     isel_emit(isel, set_carry ? "SETB" : "CLR", "C", NULL, NULL);
     emit_mov(isel, "A", llo, ins);
     isel_emit(isel, "SUBB", "A", rlo_op, NULL);
-    emit_mov(isel, "A", lhi, NULL);
-    isel_emit(isel, "XRL", "A", "#128", NULL);    /* flip lhs sign bit */
 
     /* Now prepare rhi ^ 0x80 */
     if (rhi_raw && rhi_raw[0] == '#') {
-        /* Immediate: fold XOR into constant */
+        /* Immediate: fold XOR into constant, then do lhi XRL and SUBB imm
+         * MOV A, lhi; XRL A, #128; SUBB A, rhi_xored  (3 instructions) */
         char rhi_xored[32];
         int v = (int)strtol(rhi_raw + 1, NULL, 0);
         snprintf(rhi_xored, sizeof(rhi_xored), "#%d", (v ^ 0x80) & 0xFF);
+        emit_mov(isel, "A", lhi, NULL);
+        isel_emit(isel, "XRL", "A", "#128", NULL);
         isel_emit(isel, "SUBB", "A", rhi_xored, NULL);
         return -1;
     } else {
-        /* Register: compute rhi^0x80 into a temp reg, then SUBB */
+        /* Register rhi: compute rhi^0x80 into a temp reg, then SUBB from A (lhi^0x80).
+         * Keil pattern (4 instructions):
+         *   MOV tmp, rhi       -- save rhi
+         *   MOV A, rhi         -- A = rhi
+         *   XRL A, #128        -- A = rhi^0x80
+         *   MOV tmp, A         -- tmp = rhi^0x80
+         *   (A still = lhi^0x80 ... no, A was overwritten)
+         * Better: MOV A, rhi; XRL A,#128; MOV tmp,A; MOV A,lhi; XRL A,#128; SUBB A,tmp = 6 ops
+         * Even better (Keil style): save lhi^0x80 to tmp first:
+         *   tmp = lhi (already XRL'd into A, so MOV tmp, A)
+         *   MOV A, rhi; XRL A,#128; SUBB A, tmp  → but SUBB A,tmp = (rhi^0x80)-(lhi^0x80), wrong sign
+         * Keil actually stores rhi^0x80 in R0 then restores lhi^0x80:
+         *   MOV A, rhi_raw; XRL A,#128; MOV tmp, A; MOV A, lhi; XRL A,#128; SUBB A,tmp (6 ops!)
+         * Keil style (4 instructions after lo-byte SUBB):
+         *   MOV A, rhi; XRL A,#128; MOV tmp, A; MOV A, lhi; XRL A,#128; SUBB A, tmp = 6 ops
+         * OR with tmp pre-computed:
+         *   MOV A, rhi_raw; XRL A,#128; MOV tmp, A  (3 ops, then:)
+         *   MOV A, lhi; XRL A,#128; SUBB A, tmp     (3 ops)
+         * Total: 6 ops. Same count but avoids B register.
+         * Even better with no tmp: use B as scratch:
+         *   MOV A, rhi; XRL A,#128; MOV B, A; MOV A, lhi; XRL A,#128; SUBB A, B  = 6 ops
+         */
         int tmp = alloc_temp_reg(isel, -1, 1);
         if (tmp >= 0) {
             const char* tmp_name = isel_reg_name(tmp);
-            emit_mov(isel, tmp_name, rhi_raw, NULL);          /* tmp = hi_rhs */
-            /* A = lhi^0x80, tmp = rhi; XRL tmp with 0x80 in A temporarily */
-            /* Better: save A to tmp2... but we only have 1 tmp.
-               Use B register for lhi^0x80: */
-            isel_emit(isel, "MOV", "B", "A", NULL);            /* B = lhi^0x80 */
-            emit_mov(isel, "A", tmp_name, NULL);               /* A = rhi */
+            /* Keil-style: compute rhi^0x80 into tmp first, then lhi^0x80 in A, SUBB tmp */
+            emit_mov(isel, "A", rhi_raw, NULL);                /* A = rhi */
             isel_emit(isel, "XRL", "A", "#128", NULL);         /* A = rhi^0x80 */
             emit_mov(isel, tmp_name, "A", NULL);               /* tmp = rhi^0x80 */
-            isel_emit(isel, "MOV", "A", "B", NULL);            /* A = lhi^0x80 */
+            emit_mov(isel, "A", lhi, NULL);                    /* A = lhi */
+            isel_emit(isel, "XRL", "A", "#128", NULL);         /* A = lhi^0x80 */
             isel_emit(isel, "SUBB", "A", tmp_name, NULL);      /* A = lhi^0x80 - rhi^0x80 - C */
             free_temp_reg(isel, tmp, 1);
             return -1; /* already freed */
         } else {
-            /* No temp available: use B for lhi^0x80 and compute rhi^0x80 inline */
-            isel_emit(isel, "MOV", "B", "A", NULL);            /* B = lhi^0x80 */
+            /* No temp available: use B register as scratch */
             emit_mov(isel, "A", rhi_raw, NULL);                /* A = rhi */
             isel_emit(isel, "XRL", "A", "#128", NULL);         /* A = rhi^0x80 */
-            /* Now need: B - A - C (but 8051 only has A - operand) */
-            /* Use CLR trick: negate A, then ADD? Too complex. */
-            /* Alternative: spill approach — just store rhi^0x80 in @R0 then restore */
-            /* Simplest fallback that avoids XCH: use the fact that at this point
-               SUBB A, B would subtract B from A (wrong direction).
-               We need: MOV R7,A; MOV A,B; SUBB A,R7 — but that corrupts R7 */
-            /* For now use B-register approach with negation:
-               SUBB A,B computes A-B-C = (rhi^0x80) - (lhi^0x80) - C (wrong sign)
-               Instead: we can use CPL + ADD to negate B... too complex.
-               Best: save A (rhi^0x80) back to B, restore lhi^0x80 and do SUBB A, B */
-            /* Since this is a rare fallback, just use: MOV B, A (now B=rhi^0x80);
-               MOV A, lhi (reload); XRL A, #128; SUBB A, B */
             isel_emit(isel, "MOV", "B", "A", NULL);            /* B = rhi^0x80 */
-            emit_mov(isel, "A", lhi, NULL);                    /* A = lhi (reload) */
+            emit_mov(isel, "A", lhi, NULL);                    /* A = lhi */
             isel_emit(isel, "XRL", "A", "#128", NULL);         /* A = lhi^0x80 */
             isel_emit(isel, "SUBB", "A", "B", NULL);           /* A = lhi^0x80 - rhi^0x80 - C */
             return -1;
