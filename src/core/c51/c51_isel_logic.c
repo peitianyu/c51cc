@@ -1001,13 +1001,22 @@ void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
         }
     }
 
-    char* l_true = isel_new_label(isel, "Leq_true");
+    /* For EQ result: CJNE jumps to false on mismatch; fall-through is true.
+     * This avoids the extra SJMP l_true that the old layout required.
+     * Layout:
+     *   CJNE A, s2_lo, l_false
+     *   [CJNE A, s2_hi, l_false]   (16-bit only)
+     *   MOV Rx, #1                  ← true (fall-through)
+     *   SJMP l_end
+     * l_false:
+     *   MOV Rx, #0
+     * l_end:
+     */
     char* l_false = isel_new_label(isel, "Leq_false");
     char* l_end = isel_new_label(isel, "Leq_end");
-    char lb_true[64], lb_false[64], lb_end[64];
-    snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
+    char lb_false[64], lb_end[64];
     snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
-    snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+    snprintf(lb_end,  sizeof(lb_end),  "%s:", l_end);
 
     const char* s2_lo = save_acc_operand_in_b(isel, isel_get_extended_lo_reg(isel, src2, 2));
     const char* s1_lo = isel_get_extended_lo_reg(isel, src1, 2);
@@ -1029,21 +1038,31 @@ void emit_cmp_eq(ISelContext* isel, Instr* ins, Instr* next) {
         }
     }
 
-    isel_emit(isel, "SJMP", l_true, NULL, NULL);
+    /* true: fall-through path */
+    emit_set_bool_result(isel, ins, dst_reg, size, true);
+    isel_emit(isel, "SJMP", l_end, NULL, NULL);
+    /* false: jump target */
     isel_emit(isel, lb_false, NULL, NULL, NULL);
     emit_set_bool_result(isel, ins, dst_reg, size, false);
-    isel_emit(isel, "SJMP", l_end, NULL, NULL);
-    isel_emit(isel, lb_true, NULL, NULL, NULL);
-    emit_set_bool_result(isel, ins, dst_reg, size, true);
     isel_emit(isel, lb_end, NULL, NULL, NULL);
 
-    free(l_true); free(l_false); free(l_end);
+    free(l_false); free(l_end);
     if (temp_result) {
         free_temp_reg(isel, dst_reg, size);
     }
 }
 
 void emit_signed_cmp8_result(ISelContext* isel, Instr* ins, int dst_reg, int size, ValueName lhs, ValueName rhs, int cmp_type) {
+    /* Keil-style sign-flip trick for 8-bit signed compare:
+     * XOR both operands with 0x80 to flip the sign bit, then do an unsigned
+     * subtraction.  This avoids the 4-instruction sign-bit branch sequence.
+     *
+     * Strategy by cmp_type (a = lhs, b = rhs):
+     *   LT (a <  b): CLR C;  A = (a^80)-(b^80);     JC  true  (borrow → a<b)
+     *   GE (a >= b): CLR C;  A = (a^80)-(b^80);     JNC true  (no borrow → a>=b)
+     *   LE (a <= b): SETB C; A = (a^80)-(b^80)-1;   JC  true  (borrow → a<=b)
+     *   GT (a >  b): SETB C; A = (a^80)-(b^80)-1;   JNC true  (no borrow → a>b)
+     */
     bool temp_result = false;
     if (dst_reg < 0 || dst_reg + size - 1 > 7) {
         dst_reg = alloc_temp_reg(isel, ins ? ins->dest : -1, size);
@@ -1052,64 +1071,58 @@ void emit_signed_cmp8_result(ISelContext* isel, Instr* ins, int dst_reg, int siz
     if (dst_reg < 0) dst_reg = 0;
 
     char* l_true = isel_new_label(isel, "Lscmp_true");
-    char* l_false = isel_new_label(isel, "Lscmp_false");
-    char* l_same = isel_new_label(isel, "Lscmp_same");
-    char* l_end = isel_new_label(isel, "Lscmp_end");
-    char lb_true[64], lb_false[64], lb_same[64], lb_end[64];
+    char* l_end  = isel_new_label(isel, "Lscmp_end");
+    char lb_true[64], lb_end[64];
     snprintf(lb_true, sizeof(lb_true), "%s:", l_true);
-    snprintf(lb_false, sizeof(lb_false), "%s:", l_false);
-    snprintf(lb_same, sizeof(lb_same), "%s:", l_same);
-    snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+    snprintf(lb_end,  sizeof(lb_end),  "%s:", l_end);
 
     const char* llo = isel_get_lo_reg(isel, lhs);
-    const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
+    const char* rlo_raw = isel_get_lo_reg(isel, rhs);
 
-    emit_mov(isel, "A", llo, ins);
-    isel_emit(isel, "XRL", "A", rlo, NULL);
-    isel_emit(isel, "ANL", "A", "#128", NULL);
-    isel_emit(isel, "JZ", l_same, NULL, NULL);
+    /* Determine CLR/SETB C */
+    bool set_carry = (cmp_type == SIGNED_CMP_LE || cmp_type == SIGNED_CMP_GT);
+    isel_emit(isel, set_carry ? "SETB" : "CLR", "C", NULL, NULL);
 
-    emit_mov(isel, "A", llo, NULL);
-    isel_emit(isel, "ANL", "A", "#128", NULL);
-    switch (cmp_type) {
-        case SIGNED_CMP_LT:
-        case SIGNED_CMP_LE:
-            isel_emit(isel, "JNZ", l_true, NULL, NULL);
-            isel_emit(isel, "SJMP", l_false, NULL, NULL);
-            break;
-        case SIGNED_CMP_GT:
-        case SIGNED_CMP_GE:
-            isel_emit(isel, "JZ", l_true, NULL, NULL);
-            isel_emit(isel, "SJMP", l_false, NULL, NULL);
-            break;
+    /* Prepare (rhs ^ 0x80) into a temp operand */
+    if (rlo_raw && rlo_raw[0] == '#') {
+        /* Immediate rhs: fold XOR into the constant */
+        int v = (int)strtol(rlo_raw + 1, NULL, 0);
+        char rlo_xored[32];
+        snprintf(rlo_xored, sizeof(rlo_xored), "#%d", (v ^ 0x80) & 0xFF);
+        /* Emit:  MOV A, lhs; XRL A, #128; SUBB A, #(rhs^80) */
+        emit_mov(isel, "A", llo, ins);
+        isel_emit(isel, "XRL", "A", "#128", NULL);
+        isel_emit(isel, "SUBB", "A", rlo_xored, NULL);
+    } else {
+        /* Register/memory rhs: compute rhs^0x80 into a scratch location first */
+        int tmp = alloc_temp_reg(isel, -1, 1);
+        const char* rlo_xored;
+        if (tmp >= 0) {
+            rlo_xored = isel_reg_name(tmp);
+            emit_mov(isel, "A", rlo_raw, NULL);
+            isel_emit(isel, "XRL", "A", "#128", NULL);
+            emit_mov(isel, rlo_xored, "A", NULL);
+        } else {
+            /* Fall back to B register as scratch */
+            rlo_xored = "B";
+            emit_mov(isel, "A", rlo_raw, NULL);
+            isel_emit(isel, "XRL", "A", "#128", NULL);
+            isel_emit(isel, "MOV", "B", "A", NULL);
+        }
+        /* Emit:  MOV A, lhs; XRL A, #128; SUBB A, tmp */
+        emit_mov(isel, "A", llo, ins);
+        isel_emit(isel, "XRL", "A", "#128", NULL);
+        isel_emit(isel, "SUBB", "A", rlo_xored, NULL);
+        if (tmp >= 0) free_temp_reg(isel, tmp, 1);
     }
 
-    isel_emit(isel, lb_same, NULL, NULL, NULL);
-    isel_emit(isel, "CLR", "C", NULL, NULL);
-    emit_mov(isel, "A", llo, NULL);
-    isel_emit(isel, "SUBB", "A", rlo, NULL);
-    switch (cmp_type) {
-        case SIGNED_CMP_LT:
-            isel_emit(isel, "JC", l_true, NULL, NULL);
-            isel_emit(isel, "SJMP", l_false, NULL, NULL);
-            break;
-        case SIGNED_CMP_GT:
-            isel_emit(isel, "JC", l_false, NULL, NULL);
-            isel_emit(isel, "JZ", l_false, NULL, NULL);
-            isel_emit(isel, "SJMP", l_true, NULL, NULL);
-            break;
-        case SIGNED_CMP_LE:
-            isel_emit(isel, "JC", l_true, NULL, NULL);
-            isel_emit(isel, "JZ", l_true, NULL, NULL);
-            isel_emit(isel, "SJMP", l_false, NULL, NULL);
-            break;
-        case SIGNED_CMP_GE:
-            isel_emit(isel, "JC", l_false, NULL, NULL);
-            isel_emit(isel, "SJMP", l_true, NULL, NULL);
-            break;
-    }
+    /* Branch: carry set means "a < b" (unsigned after flip) */
+    const char* jump_true  = (cmp_type == SIGNED_CMP_LT || cmp_type == SIGNED_CMP_LE) ? "JC" : "JNC";
+    const char* jump_false = (cmp_type == SIGNED_CMP_LT || cmp_type == SIGNED_CMP_LE) ? "JNC" : "JC";
+    (void)jump_false;
+    isel_emit(isel, jump_true, l_true, NULL, NULL);
 
-    isel_emit(isel, lb_false, NULL, NULL, NULL);
+    /* false path: fall through */
     emit_set_bool_result(isel, ins, dst_reg, size, false);
     isel_emit(isel, "SJMP", l_end, NULL, NULL);
     isel_emit(isel, lb_true, NULL, NULL, NULL);
@@ -1117,8 +1130,6 @@ void emit_signed_cmp8_result(ISelContext* isel, Instr* ins, int dst_reg, int siz
     isel_emit(isel, lb_end, NULL, NULL, NULL);
 
     free(l_true);
-    free(l_false);
-    free(l_same);
     free(l_end);
     if (temp_result) {
         free_temp_reg(isel, dst_reg, size);

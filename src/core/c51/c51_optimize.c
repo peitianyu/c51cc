@@ -522,13 +522,18 @@ static int peephole_fold_mov_a_to_mem(List* instrs, int start) {
     /* Check if src1 is an immediate - always safe to fold */
     bool src_is_imm = is_immediate_operand(src1);
 
-    /* Check if src1 is a register Rx - safe only if A is not used after */
+    /* Check if src1 is a register Rx */
     bool src_is_reg = (src1[0] == 'R' && src1[1] >= '0' && src1[1] <= '7' && src1[2] == '\0');
 
-    if (!src_is_imm && !src_is_reg) return 0;
+    /* Check if src1 is a direct memory operand (non-indirect, non-SFR-like) */
+    bool src_is_mem = !src_is_imm && !src_is_reg && !is_indirect_operand(src1);
 
-    if (src_is_reg) {
-        /* Must verify A is not used after MOV mem, A before being overwritten */
+    if (!src_is_imm && !src_is_reg && !src_is_mem) return 0;
+
+    if (src_is_reg || src_is_mem) {
+        /* Must verify A is not used after MOV dst2, A before being overwritten.
+         * For src_is_mem: removing MOV A,mem means A no longer has that value,
+         * so any subsequent read of A (before overwrite) would see a wrong value. */
         /* Scan forward: if A is read before being written, abort */
         for (int offset = 2; offset <= 6 && start + offset < instrs->len; offset++) {
             AsmInstr* next = (AsmInstr*)list_get(instrs, start + offset);
@@ -537,9 +542,7 @@ static int peephole_fold_mov_a_to_mem(List* instrs, int start) {
             if (instr_reads_acc(next)) return 0; /* A still live */
             if (instr_writes_acc(next)) break;   /* A overwritten - safe */
         }
-        /* If we reach here without A being read, it's safe
-         * BUT: if we didn't find a write within 6 instructions and didn't
-         * hit a barrier, be conservative and allow it (A was not read) */
+        /* If we reach here without A being read, it's safe */
     }
 
     /* Perform optimization: change MOV mem, A → MOV mem, src1
@@ -694,6 +697,43 @@ static int peephole_logical_nop(List* instrs, int start) {
         return 1;
     }
     return 0;
+}
+
+/* 窥孔优化：CLR C; RLC A → ADD A, A（逻辑左移1位）
+ * CLR C; RLC A 是标准的逻辑左移，但需要2条指令。
+ * ADD A, A 等效（A+A = A*2 = A<<1），只需1条指令。
+ * 前提：不能在 carry 标志参与运算之前（C 不应被后面的指令读取）
+ * 注意：ADD A, A 会设置 C（进位），RLC 也会设置 C，行为一致。
+ */
+static int peephole_clr_c_rlc_to_add(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    if (!ins1 || !ins2) return 0;
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
+
+    /* ins1: CLR C */
+    if (!ins1->op || strcmp(ins1->op, "CLR") != 0) return 0;
+    const char* clr_arg = get_operand(ins1, 0);
+    if (!clr_arg || strcmp(clr_arg, "C") != 0) return 0;
+
+    /* ins2: RLC A */
+    if (!ins2->op || strcmp(ins2->op, "RLC") != 0) return 0;
+    const char* rlc_arg = get_operand(ins2, 0);
+    if (!rlc_arg || strcmp(rlc_arg, "A") != 0) return 0;
+
+    /* Replace ins2: RLC A → ADD A, A */
+    free(ins2->op);
+    ins2->op = strdup("ADD");
+    /* Change arg from ["A"] to ["A", "A"] */
+    if (ins2->args->len == 1) {
+        list_push(ins2->args, strdup("A"));
+    }
+
+    /* Remove ins1: CLR C */
+    remove_instr(instrs, start);
+    return 1;
 }
 
 /* 窥孔优化：A=#0 时 ORL A, src 等于 MOV A, src
@@ -1372,8 +1412,12 @@ static int peephole_eliminate_temp_reg(List* instrs, int start) {
         return 0;
     }
 
-    // 仅在 src1 不是内存/外设（即为寄存器或立即数）时安全应用
-    if (is_memory_operand(src1)) return 0;
+    /* 如果 src1 是间接寻址（@R0/@R1），则不安全 */
+    if (is_indirect_operand(src1)) return 0;
+
+    /* src1 是内存操作数（如变量、spill槽、SFR）时，需要额外验证：
+     * 中间的指令不能写入 src1（内存被修改） */
+    bool src1_is_mem = is_memory_operand(src1);
     
     /* 查找下一条 MOV A, Rx 指令
      * 可以跨越不影响 Rx 或 A 的指令（MOV, CLR C, SETB C）
@@ -1403,9 +1447,9 @@ static int peephole_eliminate_temp_reg(List* instrs, int start) {
             
             /* If this MOV writes to A or dst1 (Rx), stop */
             if (operands_equal(dst_next, "A") || operands_equal(dst_next, dst1)) break;
-            
-            /* Also stop if this MOV reads from src1 into dst_next and then would create confusion */
-            /* Actually, if src_next == src1, writing dst_next with src1 is fine to skip */
+
+            /* If src1 is a memory location, check if this MOV writes to it */
+            if (src1_is_mem && operands_equal(dst_next, src1)) break;
 
             /* This MOV writes to some other register - safe to skip */
             offset++;
@@ -1422,6 +1466,163 @@ static int peephole_eliminate_temp_reg(List* instrs, int start) {
         break;
     }
     
+    return 0;
+}
+
+/*
+ * 窥孔优化：复制传播
+ * 模式：MOV Ra, src; [跳过不影响Ra/src的指令]; MOV Rb, Ra
+ * 条件：Ra≠A, Rb≠A, Ra≠Rb, src非间接, Ra之后不被使用
+ * 动作：MOV Rb, Ra → MOV Rb, src，删除 MOV Ra, src
+ * 例：MOV R0, R4; MOV R1, R2; MOV R6, R0 → MOV R1, R2; MOV R6, R4
+ */
+static int peephole_copy_propagate(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    if (!ins1 || !is_mov(ins1) || is_basic_block_barrier(ins1)) return 0;
+
+    const char* dst1 = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+    if (!dst1 || !src1) return 0;
+
+    /* dst1 must be Rx (not A, not memory, not indirect) */
+    if (!is_register_operand(dst1) || operands_equal(dst1, "A")) return 0;
+
+    /* src1 must not be indirect */
+    if (is_indirect_operand(src1)) return 0;
+    /* src1 must not be A (we don't track A liveness here) */
+    if (operands_equal(src1, "A")) return 0;
+
+    bool src1_is_mem = is_memory_operand(src1);
+
+    /* Scan forward for MOV Rb, Ra (where Rb is any Rx, Rb != Ra) */
+    int offset = 1;
+    while (start + offset < instrs->len && offset <= 6) {
+        AsmInstr* ins_next = (AsmInstr*)list_get(instrs, start + offset);
+        if (!ins_next) break;
+        if (is_basic_block_barrier(ins_next)) break;
+
+        if (is_mov(ins_next)) {
+            const char* dst_next = get_operand(ins_next, 0);
+            const char* src_next = get_operand(ins_next, 1);
+            if (!dst_next || !src_next) break;
+
+            /* Found MOV Rb, Ra */
+            if (is_register_operand(dst_next) && !operands_equal(dst_next, "A") &&
+                operands_equal(src_next, dst1) && !operands_equal(dst_next, dst1)) {
+                /* Check Ra is not used after this point */
+                if (!reg_read_before_write_or_end(instrs, start + offset + 1, dst1)) {
+                    /* Replace MOV Rb, Ra → MOV Rb, src1 */
+                    free(ins_next->args->head->next->elem);
+                    ins_next->args->head->next->elem = strdup(src1);
+                    remove_instr(instrs, start);
+                    return 1;
+                }
+                break; /* Ra is used later */
+            }
+
+            /* Stop if dst_next == Ra (Ra overwritten) */
+            if (operands_equal(dst_next, dst1)) break;
+            /* Stop if src1 is memory and dst_next == src1 (memory overwritten) */
+            if (src1_is_mem && operands_equal(dst_next, src1)) break;
+            /* Skip this MOV (unrelated) */
+            offset++;
+            continue;
+        }
+
+        /* CLR C / SETB C are safe to skip */
+        if (ins_next->op && (strcmp(ins_next->op, "CLR") == 0 || strcmp(ins_next->op, "SETB") == 0)) {
+            const char* arg0 = get_operand(ins_next, 0);
+            if (arg0 && strcmp(arg0, "C") == 0) { offset++; continue; }
+        }
+
+        /* Any other non-MOV instruction may use Ra or src1 - stop */
+        break;
+    }
+
+    return 0;
+}
+
+/* 窥孔优化：前向目标替换
+ * 模式：MOV Rd, A; [中间指令(最多8条)]; MOV Rf, Rd
+ *    → MOV Rf, A; [中间指令]; (删除 MOV Rf, Rd)
+ * 条件：
+ *   - ins1: MOV Rd, A (dst=R0-R7, src=A)
+ *   - 中间指令可以自由修改 A（这正是 Rd 被需要的原因）
+ *   - 中间指令不能读取 Rd（除了 terminal MOV Rf, Rd）
+ *   - 中间指令不能写入 Rf
+ *   - 扫描窗口内 Rd 只被用于一次 terminal copy
+ *   - Rf != Rd, Rf 是 R0-R7（不是 A，不是内存）
+ * 典型场景：16位算术写入临时寄存器再复制到目标
+ *   ADD A, R5; MOV R1, A; MOV A, R6; ADDC A, R4; MOV R0, A; MOV R7, R1; MOV R6, R0
+ *   → ADD A, R5; MOV R7, A; MOV A, R6; ADDC A, R4; MOV R6, A
+ */
+static int peephole_forward_copy_to_dest(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    if (!ins1 || !is_mov(ins1) || is_basic_block_barrier(ins1)) return 0;
+
+    const char* dst1 = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+    if (!dst1 || !src1) return 0;
+
+    /* dst1 must be R0-R7 */
+    if (!(dst1[0] == 'R' && dst1[1] >= '0' && dst1[1] <= '7' && dst1[2] == '\0')) return 0;
+    /* src1 must be A */
+    if (!operands_equal(src1, "A")) return 0;
+
+    /* 向前扫描，查找唯一用途：MOV Rf, Rd */
+    for (int offset = 1; offset <= 8 && start + offset < instrs->len; offset++) {
+        AsmInstr* ins_next = (AsmInstr*)list_get(instrs, start + offset);
+        if (!ins_next || is_basic_block_barrier(ins_next)) break;
+
+        if (is_mov(ins_next)) {
+            const char* dst_n = get_operand(ins_next, 0);
+            const char* src_n = get_operand(ins_next, 1);
+            if (!dst_n || !src_n) break;
+
+            /* 发现 MOV Rf, Rd (terminal copy) */
+            if (operands_equal(src_n, dst1)) {
+                /* Rf 必须是 R0-R7（不是 A，不是内存） */
+                if (!(dst_n[0] == 'R' && dst_n[1] >= '0' && dst_n[1] <= '7' && dst_n[2] == '\0')) break;
+                /* Rf != Rd */
+                if (operands_equal(dst_n, dst1)) break;
+                /* 验证：Rd 在 terminal copy 之后未被读取 */
+                if (reg_read_before_write_or_end(instrs, start + offset + 1, dst1)) break;
+                /* 执行替换：将 ins1 的 dst 改为 Rf，删除 terminal copy */
+                free(ins1->args->head->elem);
+                ins1->args->head->elem = strdup(dst_n);
+                remove_instr(instrs, start + offset);
+                return 1;
+            }
+
+            /* 如果中间指令写入 Rd，则 Rd 被重定义，终止扫描 */
+            if (operands_equal(dst_n, dst1)) break;
+            /* 如果中间指令写入 Rf（我们想用的目标），也需要停止
+             * 注意：此时我们还不知道 Rf，但可以保守地检查当前写入目标
+             * 是否与后面任何可能的 Rf 冲突 — 但由于我们还不知道 Rf，
+             * 只有在找到 terminal copy 时才做检查，这里仅检查 Rd */
+            /* 中间 MOV 可以安全跳过（不涉及 Rd） */
+            continue;
+        }
+
+        /* 非 MOV 指令：检查是否读取 Rd（作为操作数） */
+        if (ins_next->op) {
+            /* 检查 Rd 是否作为源操作数出现 */
+            bool rd_used = false;
+            ListNode* node = ins_next->args ? ins_next->args->head : NULL;
+            while (node) {
+                const char* arg = (const char*)node->elem;
+                if (arg && operands_equal(arg, dst1)) { rd_used = true; break; }
+                node = node->next;
+            }
+            if (rd_used) break; /* Rd 被非 MOV 指令使用，无法前向传播 */
+            /* 非 MOV 指令可自由修改 A，这是预期的 */
+        }
+    }
+
     return 0;
 }
 
@@ -1892,6 +2093,10 @@ static void optimize_section(Section* sec) {
             removed = peephole_logical_nop(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
+            // CLR C; RLC A → ADD A, A (逻辑左移1位，节省1条指令)
+            removed = peephole_clr_c_rlc_to_add(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
             removed = peephole_orl_with_zero_acc(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
@@ -1920,6 +2125,14 @@ static void optimize_section(Section* sec) {
 
             // 启用在 src 非内存时的 temp reg 消除优化
             removed = peephole_eliminate_temp_reg(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            // 复制传播：MOV Ra, src; ...; MOV Rb, Ra → MOV Rb, src; 删除 MOV Ra, src
+            removed = peephole_copy_propagate(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            // 前向目标替换：MOV Rd, A; [中间]; MOV Rf, Rd → MOV Rf, A; [中间]; 删除 MOV Rf, Rd
+            removed = peephole_forward_copy_to_dest(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_mem_to_reg(sec->asminstrs, i);
