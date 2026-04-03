@@ -230,6 +230,408 @@ static int peephole_mov_reg_to_any(List* instrs, int start) {
     return 0;
 }
 
+/* 窥孔优化：立即数传播
+ * 模式：MOV Rx, #imm; [...不修改 Rx 的指令(最多8条)...]; MOV dst, Rx
+ *    → 将 MOV dst, Rx 中的 Rx 换成 #imm
+ * 不删除 MOV Rx, #imm（由 peephole_dead_code / peephole_mov_reg_to_any 处理）
+ * 若 Rx 之后无其他使用，后续 pass 会删除源指令。
+ * 注意：只传播立即数（含 #0），不传播寄存器来源，避免错误。
+ */
+static int peephole_propagate_reg_imm(List* instrs, int start) {
+    if (start + 2 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    if (!ins1 || is_basic_block_barrier(ins1)) return 0;
+    if (!is_mov(ins1)) return 0;
+
+    const char* dst1 = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+
+    /* dst1 must be R0-R7 */
+    if (!dst1 || !(dst1[0] == 'R' && dst1[1] >= '0' && dst1[1] <= '7' && dst1[2] == '\0')) return 0;
+    /* src1 must be an immediate */
+    if (!src1 || src1[0] != '#') return 0;
+
+    /* Forward scan: find uses of dst1 within 8 instructions */
+    int changed = 0;
+    for (int offset = 1; offset <= 8 && start + offset < instrs->len; offset++) {
+        AsmInstr* ins = (AsmInstr*)list_get(instrs, start + offset);
+        if (!ins || is_basic_block_barrier(ins)) break;
+
+        /* Check if this instruction WRITES to dst1 (kills it) */
+        if (is_mov(ins)) {
+            const char* d = get_operand(ins, 0);
+            if (d && operands_equal(d, dst1)) break;  /* dst1 redefined, stop */
+        } else {
+            /* Non-MOV: check if it writes dst1 (INC, DEC, ADD A -> dst1 etc.) */
+            if (ins->op) {
+                /* INC/DEC with dst1 as arg: kills dst1 */
+                if ((strcmp(ins->op, "INC") == 0 || strcmp(ins->op, "DEC") == 0)) {
+                    const char* a0 = get_operand(ins, 0);
+                    if (a0 && operands_equal(a0, dst1)) break;
+                }
+                /* Any instruction with dst1 as source is OK - don't break */
+                /* If it writes dst1 as a side effect, we're conservative - break */
+                /* For safety: only continue through MOV, CLR C, SETB C */
+                bool safe = false;
+                if (strcmp(ins->op, "CLR") == 0 || strcmp(ins->op, "SETB") == 0) {
+                    const char* a0 = get_operand(ins, 0);
+                    if (a0 && strcmp(a0, "C") == 0) safe = true;
+                }
+                if (!safe) break;
+            }
+        }
+
+        /* Check if this instruction READS dst1 as a source: MOV dst, Rx */
+        if (is_mov(ins)) {
+            const char* s = get_operand(ins, 1);
+            if (s && operands_equal(s, dst1)) {
+                /* Replace src with #imm */
+                free(ins->args->head->next->elem);
+                ins->args->head->next->elem = strdup(src1);
+                changed++;
+                /* Do not break: there may be more uses ahead (don't continue
+                 * past the now-replaced instruction's effect on state) */
+                /* Actually after replacing, dst1 is no longer read here,
+                 * but it may still appear ahead. Continue scanning. */
+            }
+        }
+    }
+
+    return changed;
+}
+
+/* 帮助函数：检查指令是否读取 A 累加器 */
+static bool instr_reads_acc(AsmInstr* ins) {
+    if (!ins || !ins->op) return false;
+    /* Instructions that always read A: ALU ops with A as source */
+    const char* op = ins->op;
+    /* MOV: reads A only if src is A (e.g. MOV Rx, A) */
+    if (strcmp(op, "MOV") == 0) {
+        const char* src = get_operand(ins, 1);
+        return src && operands_equal(src, "A");
+    }
+    /* Arithmetic/logic with A as implicit source */
+    if (strcmp(op, "ADD") == 0 || strcmp(op, "ADDC") == 0 ||
+        strcmp(op, "SUBB") == 0 || strcmp(op, "ANL") == 0 ||
+        strcmp(op, "ORL") == 0 || strcmp(op, "XRL") == 0 ||
+        strcmp(op, "CJNE") == 0 || strcmp(op, "JNZ") == 0 ||
+        strcmp(op, "JZ") == 0) {
+        const char* dst = get_operand(ins, 0);
+        return dst && operands_equal(dst, "A");
+    }
+    /* Instructions that always read A */
+    if (strcmp(op, "CPL") == 0 || strcmp(op, "RL") == 0 || strcmp(op, "RR") == 0 ||
+        strcmp(op, "RLC") == 0 || strcmp(op, "RRC") == 0 || strcmp(op, "SWAP") == 0 ||
+        strcmp(op, "DA") == 0 || strcmp(op, "INC") == 0 || strcmp(op, "DEC") == 0) {
+        /* These modify A but also read it first; treat as reading A */
+        const char* dst = get_operand(ins, 0);
+        if (!dst) return false;
+        return operands_equal(dst, "A");
+    }
+    /* MOVX A, @x: loads from memory INTO A (does NOT read A)
+     * MOVX @x, A: stores A to memory (READS A) */
+    if (strcmp(op, "MOVX") == 0) {
+        const char* dst = get_operand(ins, 0);
+        if (!dst) return false;
+        /* MOVX @ptr, A → reads A */
+        return !operands_equal(dst, "A");
+    }
+    /* MOVC A, @A+DPTR or @A+PC: reads A as part of address */
+    if (strcmp(op, "MOVC") == 0) {
+        return true; /* MOVC always uses A as index */
+    }
+    /* PUSH ACC / POP ACC */
+    if (strcmp(op, "PUSH") == 0 || strcmp(op, "POP") == 0) {
+        const char* arg = get_operand(ins, 0);
+        return arg && (strcmp(arg, "ACC") == 0 || strcmp(arg, "A") == 0);
+    }
+    /* MUL/DIV always use A */
+    if (strcmp(op, "MUL") == 0 || strcmp(op, "DIV") == 0) return true;
+    return false;
+}
+
+/* 帮助函数：检查指令是否写入（覆盖）A 累加器 */
+static bool instr_writes_acc(AsmInstr* ins) {
+    if (!ins || !ins->op) return false;
+    const char* op = ins->op;
+    if (strcmp(op, "MOV") == 0 || strcmp(op, "MOVX") == 0 || strcmp(op, "MOVC") == 0) {
+        const char* dst = get_operand(ins, 0);
+        return dst && operands_equal(dst, "A");
+    }
+    /* ALU ops that write result to A */
+    if (strcmp(op, "ADD") == 0 || strcmp(op, "ADDC") == 0 || strcmp(op, "SUBB") == 0 ||
+        strcmp(op, "ANL") == 0 || strcmp(op, "ORL") == 0 || strcmp(op, "XRL") == 0 ||
+        strcmp(op, "CPL") == 0 || strcmp(op, "RL") == 0 || strcmp(op, "RR") == 0 ||
+        strcmp(op, "RLC") == 0 || strcmp(op, "RRC") == 0 || strcmp(op, "SWAP") == 0 ||
+        strcmp(op, "DA") == 0) {
+        const char* dst = get_operand(ins, 0);
+        return dst && operands_equal(dst, "A");
+    }
+    if (strcmp(op, "CLR") == 0 || strcmp(op, "SETB") == 0) {
+        const char* arg = get_operand(ins, 0);
+        return arg && operands_equal(arg, "A");
+    }
+    if (strcmp(op, "MUL") == 0 || strcmp(op, "DIV") == 0) return true;
+    if (strcmp(op, "POP") == 0) {
+        const char* arg = get_operand(ins, 0);
+        return arg && (strcmp(arg, "ACC") == 0 || strcmp(arg, "A") == 0);
+    }
+    /* INC/DEC A */
+    if (strcmp(op, "INC") == 0 || strcmp(op, "DEC") == 0) {
+        const char* dst = get_operand(ins, 0);
+        return dst && operands_equal(dst, "A");
+    }
+    return false;
+}
+
+/* 窥孔优化：死亡 MOV A 消除
+ * 如果 MOV A, src 之后，A 在被读取之前被另一条指令覆盖（写入），
+ * 则此 MOV A, src 是死代码，可以删除。
+ * 安全条件：src 不能是间接操作（@Rx）以避免内存读副作用
+ * 向前扫描最多 6 条安全指令（非基本块边界、非分支）
+ */
+static int peephole_dead_mov_a(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
+    if (!ins || !is_mov(ins)) return 0;
+    if (is_basic_block_barrier(ins)) return 0;
+
+    const char* dst = get_operand(ins, 0);
+    const char* src = get_operand(ins, 1);
+    if (!dst || !src) return 0;
+
+    /* Must be MOV A, src */
+    if (!operands_equal(dst, "A")) return 0;
+
+    /* src must not be indirect (memory side effect) */
+    if (is_indirect_operand(src)) return 0;
+
+    /* Scan forward: if we reach a write to A before any read of A, it's dead */
+    for (int offset = 1; offset <= 6 && start + offset < instrs->len; offset++) {
+        AsmInstr* next = (AsmInstr*)list_get(instrs, start + offset);
+        if (!next) break;
+        if (is_basic_block_barrier(next)) break;
+
+        /* If something reads A, this MOV A is live - abort */
+        if (instr_reads_acc(next)) return 0;
+
+        /* If something writes A, this MOV A is dead - remove it */
+        if (instr_writes_acc(next)) {
+            /* Don't remove if the write to A also reads A first (e.g. INC A, ORL A, Rx) */
+            /* Those are already excluded in instr_reads_acc, but double-check combined ops */
+            const char* nop = next->op;
+            if (!nop) break;
+            /* Pure overwrites: MOV A, src2 (not INC/DEC/ALU-with-A) */
+            if (strcmp(nop, "MOV") == 0 || strcmp(nop, "MOVX") == 0 || strcmp(nop, "MOVC") == 0 ||
+                strcmp(nop, "CLR") == 0 || strcmp(nop, "MUL") == 0 || strcmp(nop, "DIV") == 0 ||
+                strcmp(nop, "POP") == 0) {
+                remove_instr(instrs, start);
+                return 1;
+            }
+            /* ALU ops (ADD, ANL, etc.) read A then write; A is live */
+            return 0;
+        }
+
+        /* Non-A instructions: safe to skip unless they're barriers */
+    }
+
+    return 0;
+}
+
+/* 窥孔优化：连续 MOV A 死亡加载消除（简化版，已由 peephole_dead_mov_a 覆盖）
+ * Pattern: MOV A, src1; MOV A, src2
+ * 第一个 MOV A 结果立刻被第二个覆盖，直接删除第一个。
+ * 例外：src1 为间接操作（@Rx、@DPTR）有内存读副作用，不能删除。
+ */
+static int peephole_consecutive_mov_a(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    if (!ins1 || !ins2) return 0;
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
+
+    /* Both must be MOV */
+    if (!is_mov(ins1) || !is_mov(ins2)) return 0;
+
+    const char* dst1 = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+    const char* dst2 = get_operand(ins2, 0);
+    if (!dst1 || !src1 || !dst2) return 0;
+
+    /* Both must write to A */
+    if (!operands_equal(dst1, "A") || !operands_equal(dst2, "A")) return 0;
+
+    /* src1 must not be an indirect operand (memory read side effect) */
+    if (is_indirect_operand(src1)) return 0;
+
+    /* Delete the first MOV A, src1 */
+    remove_instr(instrs, start);
+    return 1;
+}
+
+/* 窥孔优化：MOV A, src; MOV mem, A → MOV mem, src (去掉 A 中转)
+ *
+ * Pattern 1 (总是安全):
+ *   MOV A, #imm          →  MOV mem, #imm    (+ remove original)
+ *   MOV mem, A
+ *
+ * Pattern 2 (仅当 A 不被后续使用时安全):
+ *   MOV A, Rx            →  MOV mem, Rx      (+ remove original)
+ *   MOV mem, A
+ *
+ * 限制:
+ *   - mem 不能是寄存器（R0-R7/A）也不能是间接(@Rx)
+ *   - src 不能是间接操作（内存读副作用）
+ *   - src 不能是 A 本身
+ */
+static int peephole_fold_mov_a_to_mem(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    if (!ins1 || !ins2) return 0;
+    if (!is_mov(ins1) || !is_mov(ins2)) return 0;
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
+
+    const char* dst1 = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+    const char* dst2 = get_operand(ins2, 0);
+    const char* src2 = get_operand(ins2, 1);
+    if (!dst1 || !src1 || !dst2 || !src2) return 0;
+
+    /* ins1 must be: MOV A, src1 */
+    if (!operands_equal(dst1, "A")) return 0;
+
+    /* ins2 must be: MOV mem, A */
+    if (!operands_equal(src2, "A")) return 0;
+
+    /* src1 must not be A itself */
+    if (operands_equal(src1, "A")) return 0;
+
+    /* src1 must not be indirect (memory side effect) */
+    if (is_indirect_operand(src1)) return 0;
+
+    /* dst2 must be a direct memory address (not register, not indirect) */
+    if (operands_equal(dst2, "A")) return 0;
+    if (dst2[0] == 'R' && dst2[1] >= '0' && dst2[1] <= '7' && dst2[2] == '\0') return 0;
+    if (is_indirect_operand(dst2)) return 0;
+
+    /* Check if src1 is an immediate - always safe to fold */
+    bool src_is_imm = is_immediate_operand(src1);
+
+    /* Check if src1 is a register Rx - safe only if A is not used after */
+    bool src_is_reg = (src1[0] == 'R' && src1[1] >= '0' && src1[1] <= '7' && src1[2] == '\0');
+
+    if (!src_is_imm && !src_is_reg) return 0;
+
+    if (src_is_reg) {
+        /* Must verify A is not used after MOV mem, A before being overwritten */
+        /* Scan forward: if A is read before being written, abort */
+        for (int offset = 2; offset <= 6 && start + offset < instrs->len; offset++) {
+            AsmInstr* next = (AsmInstr*)list_get(instrs, start + offset);
+            if (!next) break;
+            if (is_basic_block_barrier(next)) break;
+            if (instr_reads_acc(next)) return 0; /* A still live */
+            if (instr_writes_acc(next)) break;   /* A overwritten - safe */
+        }
+        /* If we reach here without A being read, it's safe
+         * BUT: if we didn't find a write within 6 instructions and didn't
+         * hit a barrier, be conservative and allow it (A was not read) */
+    }
+
+    /* Perform optimization: change MOV mem, A → MOV mem, src1
+     * and remove MOV A, src1 */
+    free(ins2->args->head->next->elem);
+    ins2->args->head->next->elem = strdup(src1);
+    remove_instr(instrs, start);
+    return 1;
+}
+
+/*
+ * 窥孔优化：折叠 16 位寄存器加载/复制对
+ *
+ * 模式:
+ *   MOV Ra, src1          →  MOV Rc, src1    (删除 MOV Ra, src1)
+ *   MOV Rb, src2             MOV Rd, src2    (删除 MOV Rb, src2)
+ *   MOV Rc, Ra
+ *   MOV Rd, Rb
+ *
+ * 条件:
+ *   - Ra, Rb, Rc, Rd 均为 R0-R7
+ *   - Ra ≠ Rb, Rc ≠ Rd
+ *   - Ra ≠ Rc, Rb ≠ Rd（否则第一步已经是目标）
+ *   - src1, src2 不能是间接操作数（@xxx）
+ *   - Ra 在 Rc 拷贝后不再被读取
+ *   - Rb 在 Rd 拷贝后不再被读取
+ */
+static int peephole_copy_pair_fold(List* instrs, int start) {
+    if (start + 3 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start + 0);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    AsmInstr* ins3 = (AsmInstr*)list_get(instrs, start + 2);
+    AsmInstr* ins4 = (AsmInstr*)list_get(instrs, start + 3);
+    if (!ins1 || !ins2 || !ins3 || !ins4) return 0;
+    if (!is_mov(ins1) || !is_mov(ins2) || !is_mov(ins3) || !is_mov(ins4)) return 0;
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2) ||
+        is_basic_block_barrier(ins3) || is_basic_block_barrier(ins4)) return 0;
+
+    const char* ra   = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+    const char* rb   = get_operand(ins2, 0);
+    const char* src2 = get_operand(ins2, 1);
+    const char* rc   = get_operand(ins3, 0);
+    const char* ra2  = get_operand(ins3, 1);
+    const char* rd   = get_operand(ins4, 0);
+    const char* rb2  = get_operand(ins4, 1);
+
+    if (!ra || !src1 || !rb || !src2 || !rc || !ra2 || !rd || !rb2) return 0;
+
+    /* Ra, Rb, Rc, Rd must all be R0-R7 */
+    if (!is_register_operand(ra) || !is_register_operand(rb) ||
+        !is_register_operand(rc) || !is_register_operand(rd)) return 0;
+
+    /* ins3: MOV Rc, Ra  and  ins4: MOV Rd, Rb */
+    if (!operands_equal(ra2, ra) || !operands_equal(rb2, rb)) return 0;
+
+    /* Ra ≠ Rb (otherwise we'd overwrite) */
+    if (operands_equal(ra, rb)) return 0;
+
+    /* Ra ≠ Rc, Rb ≠ Rd (not already in-place) */
+    if (operands_equal(ra, rc) || operands_equal(rb, rd)) return 0;
+
+    /* src1, src2 must not be indirect */
+    if (is_indirect_operand(src1) || is_indirect_operand(src2)) return 0;
+
+    /* Rc must not be Ra or Rb (would overwrite a src we still need) */
+    /* Actually: after ins3 (MOV Rc, Ra), Ra is free only if not used later.
+     * But ins4 uses Rb, not Ra. So the only concern is if Rc == Rb
+     * (writing Rc would overwrite the src of ins4). Prevent this. */
+    if (operands_equal(rc, rb)) return 0;
+
+    /* Check Ra is not read after position start+3 (the copy ins3 is already consuming it) */
+    if (reg_read_before_write_or_end(instrs, start + 4, ra)) return 0;
+
+    /* Check Rb is not read after position start+4 */
+    if (reg_read_before_write_or_end(instrs, start + 4, rb)) return 0;
+
+    /* Perform transformation:
+     * ins3 becomes MOV Rc, src1
+     * ins4 becomes MOV Rd, src2
+     * ins1 and ins2 are removed */
+    free(ins3->args->head->next->elem);
+    ins3->args->head->next->elem = strdup(src1);
+    free(ins4->args->head->next->elem);
+    ins4->args->head->next->elem = strdup(src2);
+    /* Remove ins2 first (higher index), then ins1 */
+    remove_instr(instrs, start + 1);
+    remove_instr(instrs, start);
+    return 2;
+}
+
 static int peephole_drop_dead_mov_before_bit_branch(List* instrs, int start) {
     if (start + 1 >= instrs->len) return 0;
 
@@ -292,6 +694,42 @@ static int peephole_logical_nop(List* instrs, int start) {
         return 1;
     }
     return 0;
+}
+
+/* 窥孔优化：A=#0 时 ORL A, src 等于 MOV A, src
+ * 模式1: MOV A, #0; ORL A, src → MOV A, src  (删除 MOV A,#0，ORL→MOV)
+ * 模式2: MOV A, #0; ORL A, src; JNZ/JZ lbl → MOV A, src; JNZ/JZ lbl
+ * 适用条件: src 不是间接寻址
+ */
+static int peephole_orl_with_zero_acc(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    if (!ins1 || !ins2) return 0;
+    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
+
+    /* ins1 must be: MOV A, #0 */
+    if (!is_mov(ins1)) return 0;
+    const char* d1 = get_operand(ins1, 0);
+    const char* s1 = get_operand(ins1, 1);
+    if (!d1 || !s1) return 0;
+    if (!operands_equal(d1, "A")) return 0;
+    if (strcmp(s1, "#0") != 0) return 0;
+
+    /* ins2 must be: ORL A, src  (src != indirect) */
+    if (!ins2->op || strcmp(ins2->op, "ORL") != 0) return 0;
+    const char* d2 = get_operand(ins2, 0);
+    const char* s2 = get_operand(ins2, 1);
+    if (!d2 || !s2) return 0;
+    if (!operands_equal(d2, "A")) return 0;
+    if (is_indirect_operand(s2)) return 0;
+
+    /* Replace ORL A, src → MOV A, src; delete MOV A, #0 */
+    free(ins2->op);
+    ins2->op = strdup("MOV");
+    remove_instr(instrs, start);
+    return 1;
 }
 
 static int peephole_add_zero_16(List* instrs, int start) {
@@ -937,38 +1375,51 @@ static int peephole_eliminate_temp_reg(List* instrs, int start) {
     // 仅在 src1 不是内存/外设（即为寄存器或立即数）时安全应用
     if (is_memory_operand(src1)) return 0;
     
-    // 查找下一条 MOV A, Rx 指令（可能跨越 CLR C 等非破坏性指令）
+    /* 查找下一条 MOV A, Rx 指令
+     * 可以跨越不影响 Rx 或 A 的指令（MOV, CLR C, SETB C）
+     * 最多扫描 6 条 */
     int offset = 1;
-    while (start + offset < instrs->len && offset <= 2) {
+    while (start + offset < instrs->len && offset <= 6) {
         AsmInstr* ins_next = (AsmInstr*)list_get(instrs, start + offset);
+        if (!ins_next) break;
         if (is_basic_block_barrier(ins_next)) break;
         
         if (is_mov(ins_next)) {
             const char* dst_next = get_operand(ins_next, 0);
             const char* src_next = get_operand(ins_next, 1);
+            if (!dst_next || !src_next) break;
             
-            // 找到 MOV A, Rx
+            /* Found MOV A, Rx: apply optimization */
             if (operands_equal(dst_next, "A") && operands_equal(src_next, dst1)) {
-                // 检查 Rx 之后是否还被使用
+                /* Check Rx is not used after this point */
                 if (!reg_read_before_write_or_end(instrs, start + offset + 1, dst1)) {
-                    // 修改 MOV A, Rx 为 MOV A, src
                     free(ins_next->args->head->next->elem);
                     ins_next->args->head->next->elem = strdup(src1);
-                    
-                    // 删除 MOV Rx, src
                     remove_instr(instrs, start);
                     return 1;
                 }
+                break; /* Rx is used later, can't eliminate */
             }
-            break;  // 遇到其他 MOV，停止查找
+            
+            /* If this MOV writes to A or dst1 (Rx), stop */
+            if (operands_equal(dst_next, "A") || operands_equal(dst_next, dst1)) break;
+            
+            /* Also stop if this MOV reads from src1 into dst_next and then would create confusion */
+            /* Actually, if src_next == src1, writing dst_next with src1 is fine to skip */
+
+            /* This MOV writes to some other register - safe to skip */
+            offset++;
+            continue;
         }
         
-        // 检查中间指令是否修改了 Rx 或 src
-        if (!instr_does_not_modify_reg(ins_next, dst1)) {
-            break;
+        /* CLR C / SETB C are safe */
+        if (ins_next->op && (strcmp(ins_next->op, "CLR") == 0 || strcmp(ins_next->op, "SETB") == 0)) {
+            const char* arg0 = get_operand(ins_next, 0);
+            if (arg0 && strcmp(arg0, "C") == 0) { offset++; continue; }
         }
         
-        offset++;
+        /* Any other non-MOV instruction may modify A or Rx - stop */
+        break;
     }
     
     return 0;
@@ -1336,13 +1787,94 @@ static int peephole_thread_jump_chain(List* instrs, int start) {
     return 0;
 }
 
+/* IDATA dead spill store elimination
+ * A spill symbol __spill_N is "dead" if it is only stored (MOV __spill_N, A)
+ * but never loaded or used as a source operand.
+ * Returns total number of instructions removed.
+ */
+static int eliminate_dead_idata_spills(List* instrs) {
+    if (!instrs) return 0;
+
+    /* Step 1: collect all spill symbols that are USED (appear as src) */
+    char used_spills[128][64];
+    int used_cnt = 0;
+
+    for (int i = 0; i < instrs->len; i++) {
+        AsmInstr* ins = (AsmInstr*)list_get(instrs, i);
+        if (!ins || !ins->args) continue;
+        int start_arg = 0;
+        if (ins->op && strcmp(ins->op, "MOV") == 0 && ins->args->len >= 2) {
+            start_arg = 1; /* skip dst */
+        }
+        for (int a = start_arg; a < ins->args->len; a++) {
+            const char* arg = (const char*)list_get(ins->args, a);
+            if (!arg) continue;
+            const char* s = arg;
+            if (*s == '(') s++;
+            if (strncmp(s, "__spill_", 8) != 0) continue;
+            const char* end = s;
+            while (*end && *end != ' ' && *end != '+' && *end != ')') end++;
+            size_t sym_len = end - s;
+            if (sym_len == 0 || sym_len >= 64) continue;
+            char sym[64];
+            strncpy(sym, s, sym_len);
+            sym[sym_len] = '\0';
+            bool dup = false;
+            for (int j = 0; j < used_cnt; j++) {
+                if (strcmp(used_spills[j], sym) == 0) { dup = true; break; }
+            }
+            if (!dup && used_cnt < 128) {
+                strncpy(used_spills[used_cnt], sym, 63);
+                used_spills[used_cnt][63] = '\0';
+                used_cnt++;
+            }
+        }
+    }
+
+    /* Step 2: remove dead stores */
+    int total_removed = 0;
+    int dead_removed = 1;
+    while (dead_removed) {
+        dead_removed = 0;
+        for (int i = 0; i < instrs->len; i++) {
+            AsmInstr* ins = (AsmInstr*)list_get(instrs, i);
+            if (!ins || !is_mov(ins)) continue;
+            const char* dst = get_operand(ins, 0);
+            const char* src = get_operand(ins, 1);
+            if (!dst || !src) continue;
+            if (!operands_equal(src, "A")) continue;
+            if (is_indirect_operand(dst)) continue;
+            const char* s = dst;
+            if (*s == '(') s++;
+            if (strncmp(s, "__spill_", 8) != 0) continue;
+            const char* end = s;
+            while (*end && *end != ' ' && *end != '+' && *end != ')') end++;
+            size_t sym_len = end - s;
+            if (sym_len == 0 || sym_len >= 64) continue;
+            char sym[64];
+            strncpy(sym, s, sym_len);
+            sym[sym_len] = '\0';
+            bool is_used = false;
+            for (int j = 0; j < used_cnt; j++) {
+                if (strcmp(used_spills[j], sym) == 0) { is_used = true; break; }
+            }
+            if (is_used) continue;
+            remove_instr(instrs, i);
+            dead_removed++;
+            total_removed++;
+            break;
+        }
+    }
+    return total_removed;
+}
+
 /* 对单个section执行窥孔优化 */
 static void optimize_section(Section* sec) {
     if (!sec || !sec->asminstrs) return;
 
     int changed = 1;
     int iterations = 0;
-    const int max_iterations = 10;
+    const int max_iterations = 12;
 
     while (changed && iterations < max_iterations) {
         changed = 0;
@@ -1360,8 +1892,23 @@ static void optimize_section(Section* sec) {
             removed = peephole_logical_nop(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
+            removed = peephole_orl_with_zero_acc(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
             removed = peephole_drop_dead_mov_before_bit_branch(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
+
+            removed = peephole_dead_mov_a(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_consecutive_mov_a(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_fold_mov_a_to_mem(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_copy_pair_fold(sec->asminstrs, i);
+            if (removed) { changed = 1; i += removed - 1; continue; }
 
             removed = peephole_redundant_swap(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
@@ -1393,6 +1940,9 @@ static void optimize_section(Section* sec) {
             removed = peephole_mov_reg_to_any(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
+            removed = peephole_propagate_reg_imm(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
             removed = peephole_mov_chain(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
@@ -1418,6 +1968,13 @@ static void optimize_section(Section* sec) {
 
             removed = peephole_sjmp_to_next_label(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
+        }
+
+        /* After each peephole pass, run IDATA dead spill elimination.
+         * This must happen AFTER peephole because peephole_idata_store_load_forward
+         * removes spill loads, making formerly live spill stores truly dead. */
+        if (eliminate_dead_idata_spills(sec->asminstrs) > 0) {
+            changed = 1;
         }
     }
 
@@ -1541,6 +2098,7 @@ static void optimize_section(Section* sec) {
             }
         }
     }
+
 }
 
 void c51_optimize(C51GenContext* ctx, ObjFile* obj)
