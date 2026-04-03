@@ -48,7 +48,7 @@ static bool value_is_zero_extended_byte_in_func(Func* func, ValueName value, Val
     return false;
 }
 
-void emit_const(ISelContext* isel, Instr* ins) {
+void emit_const(ISelContext* isel, Instr* ins, Instr* next) {
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int val = (int)(ins->imm.ival & 0xFFFF);
 
@@ -62,7 +62,10 @@ void emit_const(ISelContext* isel, Instr* ins) {
         return;
     }
 
-    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    /* Try to bind to PHI target if the next instruction is a JMP,
+     * so that no extra MOV copies are needed at the loop back edge.
+     * alloc_dest_reg internally calls alloc_reg_for_value as fallback. */
+    int reg = alloc_dest_reg(isel, ins, next, size, true);
     /* reg == -1 means this CONST is rematerializable (no physical register assigned).
      * It will be inlined as an immediate operand wherever it is used. Skip materializing. */
     if (reg == -1) return;
@@ -114,7 +117,11 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         int dst_begin = dst_reg;
         int dst_end = dst_reg + size - 1;
         bool overlaps = !(dst_end < src1_begin || dst_begin > src1_end);
-        if (overlaps) {
+        /* For INC-like operations (src2 == +1 immediate), in-place update is safe
+         * because we read src1 lo before writing dst lo, and read src1 hi after.
+         * Avoid reallocating to a different register which would cause PHI copies. */
+        bool is_inc_inplace = (src2_is_imm && imm_val == 1 && dst_reg == src1_base_reg);
+        if (overlaps && !is_inc_inplace) {
             int alt_reg = alloc_temp_reg(isel, ins->dest, size);
             if (alt_reg >= 0) {
                 dst_reg = alt_reg;
@@ -685,11 +692,10 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
     ValueName a = get_src1_value(ins);
     ValueName b = get_src2_value(ins);
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
-    int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
-    const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
-    const char* dst_hi = isel_reg_name(dst_reg);
 
     if (size == 1) {
+        int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
+        const char* dst_lo = isel_reg_name(dst_reg);
         emit_mov(isel, dst_lo, "#0", ins);
         int t = alloc_temp_reg(isel, -1, 1);
         const char* t_lo = (t >= 0) ? isel_reg_name(t) : "B";
@@ -706,44 +712,43 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
         store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
         return;
     } else if (size == 2) {
-        // compute low 16 bits of 16x16 multiply using three 8x8 MULs
-        const char* alo = isel_get_lo_reg(isel, a);
-        const char* ahi = isel_get_hi_reg(isel, a);
-        const char* blo = isel_get_lo_reg(isel, b);
-        const char* bhi = isel_get_hi_reg(isel, b);
+        // Use Keil runtime ?C?IMUL: arg0 in R6:R7, arg1 in R4:R5 -> result in R6:R7
+        // Low 16 bits of product are the same for signed/unsigned.
 
-        int t_acc = alloc_temp_reg(isel, -1, 1); // accumulator for high byte
-        int t_tmp = alloc_temp_reg(isel, -1, 1); // temp for p1/p2 low
-        const char* acc = (t_acc >= 0) ? isel_reg_name(t_acc) : "R0";
-        const char* tpp = (t_tmp >= 0) ? isel_reg_name(t_tmp) : "R1";
+        // Reload operands first (before allocating dst, to avoid register pressure issues)
+        int a_reg = isel_get_value_reg(isel, a);
+        int b_reg = (b == a) ? a_reg : isel_get_value_reg(isel, b);
 
-        // p0 = alo * blo
-        emit_mov(isel, "B", blo, NULL);
-        emit_mov(isel, "A", alo, ins);
-        isel_emit(isel, "MUL", "AB", NULL, NULL); // A=p0_low, B=p0_high
-        emit_mov(isel, dst_lo, "A", ins);
-        emit_mov(isel, acc, "B", NULL); // acc = p0_high
+        if (a_reg < 0) {
+            a_reg = isel_reload_spill(isel, a, 2, ins);
+            if (a_reg < 0) a_reg = 0;
+        }
+        if (b_reg < 0) {
+            b_reg = (b == a) ? a_reg : isel_reload_spill(isel, b, 2, ins);
+            if (b_reg < 0) b_reg = a_reg;
+        }
 
-        // p1 = ahi * blo
-        emit_mov(isel, "B", blo, NULL);
-        emit_mov(isel, "A", ahi, NULL);
-        isel_emit(isel, "MUL", "AB", NULL, NULL); // A=p1_low
-        emit_mov(isel, tpp, "A", NULL); // tpp = p1_low
-        emit_mov(isel, "A", acc, NULL);
-        isel_emit(isel, "ADD", "A", tpp, NULL);
-        emit_mov(isel, acc, "A", NULL);
+        // Now allocate dst (result lands in R6:R7 after LCALL, move to dst if different)
+        int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
+        // alloc_dest_reg may return a single-byte reg index; ensure it's the hi byte of a pair
+        if (dst_reg > 6) dst_reg = 6;  // clamp to valid 16-bit pair start
 
-        // p2 = alo * bhi
-        emit_mov(isel, "B", bhi, NULL);
-        emit_mov(isel, "A", alo, NULL);
-        isel_emit(isel, "MUL", "AB", NULL, NULL); // A=p2_low
-        emit_mov(isel, tpp, "A", NULL); // tpp = p2_low
-        emit_mov(isel, "A", acc, NULL);
-        isel_emit(isel, "ADD", "A", tpp, NULL);
-        emit_mov(isel, dst_hi, "A", NULL);
+        // Parallel move: a->R6:R7, b->R4:R5
+        RegMove moves[4] = {
+            {.dst = 6, .src = a_reg},
+            {.dst = 7, .src = a_reg + 1},
+            {.dst = 4, .src = b_reg},
+            {.dst = 5, .src = b_reg + 1},
+        };
+        emit_parallel_reg_moves(isel, moves, 4, ins);
 
-        if (t_acc >= 0) free_temp_reg(isel, t_acc, 1);
-        if (t_tmp >= 0) free_temp_reg(isel, t_tmp, 1);
+        isel_emit(isel, "LCALL", "?C?IMUL", NULL, instr_to_ssa_str(ins));
+
+        // Result in R6:R7 -> dst
+        if (dst_reg != 6) {
+            RegMove rmov[2] = {{.dst = dst_reg, .src = 6}, {.dst = dst_reg + 1, .src = 7}};
+            emit_parallel_reg_moves(isel, rmov, 2, ins);
+        }
         store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
         return;
     }
@@ -867,11 +872,55 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
         free(l_num_pos); free(l_den_pos); free(l_no_negq); free(l_no_rem_neg);
         return;
     } else if (size == 2) {
-        // 16-bit division/mod: implement simple unsigned long division via repeated subtraction
-        // temps: rem (2), den_tmp (2), quotient in dst, flags for signs if signed
+        if (!is_unsigned) {
+            // signed 16-bit div/mod: use Keil runtime ?C?SIDIV
+            // num -> R6:R7, den -> R4:R5; quotient R6:R7, remainder R4:R5
+            int num_reg = isel_get_value_reg(isel, num);
+            int den_reg = (den == num) ? num_reg : isel_get_value_reg(isel, den);
+
+            // Reload spilled operands
+            if (num_reg < 0) {
+                num_reg = isel_reload_spill(isel, num, 2, ins);
+                if (num_reg < 0) num_reg = 0;
+            }
+            if (den_reg < 0) {
+                den_reg = (den == num) ? num_reg : isel_reload_spill(isel, den, 2, ins);
+                if (den_reg < 0) den_reg = num_reg;
+            }
+
+            // Parallel move: num->R6:R7, den->R4:R5
+            RegMove moves[4] = {
+                {.dst = 6, .src = num_reg},
+                {.dst = 7, .src = num_reg + 1},
+                {.dst = 4, .src = den_reg},
+                {.dst = 5, .src = den_reg + 1},
+            };
+            emit_parallel_reg_moves(isel, moves, 4, ins);
+
+            isel_emit(isel, "LCALL", "?C?SIDIV", NULL, instr_to_ssa_str(ins));
+
+            // quotient in R6:R7, remainder in R4:R5
+            if (!want_mod) {
+                // quotient -> dst
+                if (dst_reg != 6) {
+                    RegMove rmov[2] = {{.dst = dst_reg, .src = 6}, {.dst = dst_reg + 1, .src = 7}};
+                    emit_parallel_reg_moves(isel, rmov, 2, ins);
+                }
+            } else {
+                // remainder -> dst
+                if (dst_reg != 4) {
+                    RegMove rmov[2] = {{.dst = dst_reg, .src = 4}, {.dst = dst_reg + 1, .src = 5}};
+                    emit_parallel_reg_moves(isel, rmov, 2, ins);
+                }
+            }
+            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+            return;
+        }
+
+        // unsigned 16-bit division/mod: implement via repeated subtraction
+        {
         int tr  = alloc_temp_reg(isel, -1, 2); // rem
         int td  = alloc_temp_reg(isel, -1, 2); // den_tmp
-        int tsn = -1, tsd = -1;
         const char* rem_lo = (tr >= 0) ? isel_reg_name(tr + 1) : "R1";
         const char* rem_hi = (tr >= 0) ? isel_reg_name(tr)     : "R2";
         const char* den_lo = (td >= 0) ? isel_reg_name(td + 1) : "R3";
@@ -949,159 +998,8 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
             if (tr >= 0) free_temp_reg(isel, tr, 2);
             if (td >= 0) free_temp_reg(isel, td, 2);
             return;
-        } else {
-            // signed 16-bit: take abs of operands into rem/den_tmp, record signs
-            tsn = alloc_temp_reg(isel, -1, 1);
-            tsd = alloc_temp_reg(isel, -1, 1);
-            const char* s_num = (tsn >= 0) ? isel_reg_name(tsn) : "R5";
-            const char* s_den = (tsd >= 0) ? isel_reg_name(tsd) : "R6";
-            char* l_num_pos = isel_new_label(isel, "Lnum_pos16");
-            char* l_den_pos = isel_new_label(isel, "Lden_pos16");
-            char lb_tmp[64];
-
-            emit_mov(isel, s_num, "#0", NULL);
-            emit_mov(isel, s_den, "#0", NULL);
-
-            // load num into rem
-            emit_mov(isel, rem_lo, isel_get_lo_reg(isel, num), NULL);
-            emit_mov(isel, rem_hi, isel_get_hi_reg(isel, num), NULL);
-            // test sign: check rem_hi & 0x80
-            emit_mov(isel, "A", rem_hi, NULL);
-            isel_emit(isel, "ANL", "A", "#128", NULL);
-            isel_emit(isel, "JZ", l_num_pos, NULL, NULL);
-            // negative: rem = -rem (two's complement 16)
-            emit_mov(isel, "A", rem_lo, NULL);
-            isel_emit(isel, "CPL", "A", NULL, NULL);
-            emit_mov(isel, rem_lo, "A", NULL);
-            emit_mov(isel, "A", rem_hi, NULL);
-            isel_emit(isel, "CPL", "A", NULL, NULL);
-            emit_mov(isel, rem_hi, "A", NULL);
-            // add 1 to low, propagate
-            emit_mov(isel, "A", rem_lo, NULL);
-            isel_emit(isel, "ADD", "A", "#1", NULL);
-            emit_mov(isel, rem_lo, "A", NULL);
-            emit_mov(isel, "A", rem_hi, NULL);
-            isel_emit(isel, "ADDC", "A", "#0", NULL);
-            emit_mov(isel, rem_hi, "A", NULL);
-            isel_emit(isel, "MOV", s_num, "#1", NULL);
-            isel_emit(isel, l_num_pos, NULL, NULL, NULL);
-
-            // load den into den_tmp
-            emit_mov(isel, den_lo, isel_get_lo_reg(isel, den), NULL);
-            emit_mov(isel, den_hi, isel_get_hi_reg(isel, den), NULL);
-            emit_mov(isel, "A", den_hi, NULL);
-            isel_emit(isel, "ANL", "A", "#128", NULL);
-            isel_emit(isel, "JZ", l_den_pos, NULL, NULL);
-            emit_mov(isel, "A", den_lo, NULL);
-            isel_emit(isel, "CPL", "A", NULL, NULL);
-            emit_mov(isel, den_lo, "A", NULL);
-            emit_mov(isel, "A", den_hi, NULL);
-            isel_emit(isel, "CPL", "A", NULL, NULL);
-            emit_mov(isel, den_hi, "A", NULL);
-            emit_mov(isel, "A", den_lo, NULL);
-            isel_emit(isel, "ADD", "A", "#1", NULL);
-            emit_mov(isel, den_lo, "A", NULL);
-            emit_mov(isel, "A", den_hi, NULL);
-            isel_emit(isel, "ADDC", "A", "#0", NULL);
-            emit_mov(isel, den_hi, "A", NULL);
-            isel_emit(isel, "MOV", s_den, "#1", NULL);
-            isel_emit(isel, l_den_pos, NULL, NULL, NULL);
-
-            // perform unsigned division on rem/den_tmp into q
-            emit_mov(isel, q_lo, "#0", NULL);
-            emit_mov(isel, q_hi, "#0", NULL);
-
-            char* l_check = isel_new_label(isel, "Ldiv_check16");
-            char* l_done  = isel_new_label(isel, "Ldiv_done16");
-            char lb_check[64], lb_done[64];
-            snprintf(lb_check, sizeof(lb_check), "%s:", l_check);
-            snprintf(lb_done, sizeof(lb_done), "%s:", l_done);
-
-            isel_emit(isel, lb_check, NULL, NULL, NULL);
-            // compare rem and den (unsigned): if rem < den -> done
-            emit_mov(isel, "A", rem_hi, NULL);
-            isel_emit(isel, "CLR", "C", NULL, NULL);
-            isel_emit(isel, "SUBB", "A", den_hi, NULL);
-            isel_emit(isel, "JC", l_done, NULL, NULL);
-            char* l_eq_high2 = isel_new_label(isel, "Ldiv_eq_high2");
-            isel_emit(isel, "JZ", l_eq_high2, NULL, NULL);
-
-            // subtract den from rem
-            emit_mov(isel, "A", rem_lo, NULL);
-            isel_emit(isel, "CLR", "C", NULL, NULL);
-            isel_emit(isel, "SUBB", "A", den_lo, NULL);
-            emit_mov(isel, rem_lo, "A", NULL);
-            emit_mov(isel, "A", rem_hi, NULL);
-            isel_emit(isel, "SUBB", "A", den_hi, NULL);
-            emit_mov(isel, rem_hi, "A", NULL);
-
-            // inc quotient
-            emit_mov(isel, "A", q_lo, NULL);
-            isel_emit(isel, "ADD", "A", "#1", NULL);
-            emit_mov(isel, q_lo, "A", NULL);
-            emit_mov(isel, "A", q_hi, NULL);
-            isel_emit(isel, "ADDC", "A", "#0", NULL);
-            emit_mov(isel, q_hi, "A", NULL);
-
-            isel_emit_label(isel, l_eq_high2);
-            isel_emit(isel, "SJMP", l_check, NULL, NULL);
-            isel_emit(isel, lb_done, NULL, NULL, NULL);
-
-            if (want_mod) {
-                // remainder in rem; if original numerator negative, negate rem
-                char* l_rem_pos = isel_new_label(isel, "Lrem_pos16");
-                emit_mov(isel, "A", s_num, NULL);
-                isel_emit(isel, "JZ", l_rem_pos, NULL, NULL);
-                // negate rem
-                emit_mov(isel, "A", rem_lo, NULL);
-                isel_emit(isel, "CPL", "A", NULL, NULL);
-                emit_mov(isel, rem_lo, "A", NULL);
-                emit_mov(isel, "A", rem_hi, NULL);
-                isel_emit(isel, "CPL", "A", NULL, NULL);
-                emit_mov(isel, rem_hi, "A", NULL);
-                emit_mov(isel, "A", rem_lo, NULL);
-                isel_emit(isel, "ADD", "A", "#1", NULL);
-                emit_mov(isel, rem_lo, "A", NULL);
-                emit_mov(isel, "A", rem_hi, NULL);
-                isel_emit(isel, "ADDC", "A", "#0", NULL);
-                emit_mov(isel, rem_hi, "A", NULL);
-                isel_emit(isel, l_rem_pos, NULL, NULL, NULL);
-                emit_mov(isel, dst_lo, rem_lo, ins);
-                emit_mov(isel, dst_hi, rem_hi, NULL);
-            } else {
-                // quotient in q; if signs xor, negate quotient
-                char* l_q_pos = isel_new_label(isel, "Lq_pos16");
-                emit_mov(isel, "A", s_num, NULL);
-                isel_emit(isel, "XRL", "A", s_den, NULL);
-                isel_emit(isel, "JZ", l_q_pos, NULL, NULL);
-                // negate q
-                emit_mov(isel, "A", q_lo, NULL);
-                isel_emit(isel, "CPL", "A", NULL, NULL);
-                emit_mov(isel, q_lo, "A", NULL);
-                emit_mov(isel, "A", q_hi, NULL);
-                isel_emit(isel, "CPL", "A", NULL, NULL);
-                emit_mov(isel, q_hi, "A", NULL);
-                emit_mov(isel, "A", q_lo, NULL);
-                isel_emit(isel, "ADD", "A", "#1", NULL);
-                emit_mov(isel, q_lo, "A", NULL);
-                emit_mov(isel, "A", q_hi, NULL);
-                isel_emit(isel, "ADDC", "A", "#0", NULL);
-                emit_mov(isel, q_hi, "A", NULL);
-                isel_emit(isel, l_q_pos, NULL, NULL, NULL);
-                emit_mov(isel, dst_lo, q_lo, ins);
-                emit_mov(isel, dst_hi, q_hi, NULL);
-            }
-
-            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
-
-            if (tr >= 0) free_temp_reg(isel, tr, 2);
-            if (td >= 0) free_temp_reg(isel, td, 2);
-            if (tsn >= 0) free_temp_reg(isel, tsn, 1);
-            if (tsd >= 0) free_temp_reg(isel, tsd, 1);
-            free(l_check); free(l_done);
-            free(l_num_pos); free(l_den_pos);
-            return;
         }
+        } // end unsigned block
     }
 
     fprintf(stderr, "c51 backend: only 8/16-bit DIV/MOD supported\n");

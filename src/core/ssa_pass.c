@@ -1231,14 +1231,78 @@ static bool pass_global_load(Func *f, Stats *s) {
             Instr *i = iter_next(&jt);
             if (!i || i->op != IROP_LOAD || is_volatile_mem(i)) continue;
             Instr *addr = find_def_instr(f, get_arg(i, 0));
-            if (!addr || addr->op != IROP_ADDR) continue;
-            const char *name = (const char *)list_get(addr->labels, 0);
-            GlobalVar *g = name ? find_global(name) : NULL;
-            if (!is_const_global(g)) continue;
-            i->op = IROP_CONST; i->imm.ival = g->init_value;
-            i->type = g->type; i->mem_type = NULL;
-            list_clear(i->args); list_clear(i->labels);
-            ++s->fold; changed = true;
+            if (!addr) continue;
+
+            /* 情况1: load(addr @global) — 直接加载全局变量 */
+            if (addr->op == IROP_ADDR) {
+                const char *name = (const char *)list_get(addr->labels, 0);
+                GlobalVar *g = name ? find_global(name) : NULL;
+                if (!is_const_global(g)) continue;
+                i->op = IROP_CONST; i->imm.ival = g->init_value;
+                i->type = g->type; i->mem_type = NULL;
+                list_clear(i->args); list_clear(i->labels);
+                ++s->fold; changed = true;
+                continue;
+            }
+
+            /* 情况2: load(offset(addr @global, idx, #elem_sz)) — 常量数组元素访问 */
+            if (addr->op == IROP_OFFSET && addr->args && addr->args->len >= 2) {
+                Instr *base = find_def_instr(f, get_arg(addr, 0));
+                if (!base || base->op != IROP_ADDR) continue;
+                const char *name = (const char *)list_get(base->labels, 0);
+                GlobalVar *g = name ? find_global(name) : NULL;
+                /* 字符串字面量和 code 段常量数组：g->is_static 且 g->has_init 且 !g->is_extern
+                 * 注意：C字符串字面量类型是 char[]（非 const char[]），但实际不可修改；
+                 * 因此这里不严格要求 ctype_const，只需是静态初始化的非extern全局即可。
+                 * 同时要求类型在 code 段（ctype_data==6，只读ROM），防止折叠可变全局数组。 */
+                if (!g || !g->has_init || g->is_extern || !g->is_static) continue;
+                {
+                    CtypeAttr ga = get_attr(g->type ? g->type->attr : 0);
+                    bool in_code = (ga.ctype_data == 6);            /* CODE 段 = 只读ROM */
+                    bool is_const = ga.ctype_const && !ga.ctype_volatile;
+                    if (!in_code && !is_const) continue;            /* 可变全局数组不折叠 */
+                }
+                /* 必须有 blob 初始化数据 */
+                if (!g->init_instr) continue;
+                Instr *init = g->init_instr;
+                if (!init || !init->imm.blob.bytes || init->imm.blob.len <= 0) continue;
+                /* 获取索引值（必须是常量） */
+                int64_t idx = 0;
+                if (!get_const_value(f, get_arg(addr, 1), &idx)) continue;
+                /* 获取元素大小（来自 imm.ival 或 labels "elem_size=N"） */
+                int64_t elem_sz = 1;
+                if (addr->imm.ival > 0) {
+                    elem_sz = addr->imm.ival;
+                } else if (addr->labels) {
+                    for (Iter lt = list_iter(addr->labels); !iter_end(lt);) {
+                        char *lbl = iter_next(&lt);
+                        if (lbl && strncmp(lbl, "elem_size=", 10) == 0) {
+                            elem_sz = strtoll(lbl + 10, NULL, 10);
+                            break;
+                        }
+                    }
+                }
+                int64_t byte_off = idx * elem_sz;
+                if (byte_off < 0 || byte_off >= init->imm.blob.len) continue;
+                /* 读取 elem_sz 个字节（小端序组合） */
+                int load_sz = elem_sz > 0 ? (int)elem_sz : 1;
+                if (load_sz > 8) continue; /* 只处理基本类型 */
+                int64_t val = 0;
+                for (int b = 0; b < load_sz && (byte_off + b) < init->imm.blob.len; b++) {
+                    val |= ((int64_t)(unsigned char)init->imm.blob.bytes[byte_off + b]) << (8 * b);
+                }
+                /* 符号扩展（如果加载类型是有符号的） */
+                if (i->type && !is_unsigned_type(i->type) && load_sz < 8) {
+                    int bits = load_sz * 8;
+                    int64_t sign_bit = (int64_t)1 << (bits - 1);
+                    if (val & sign_bit) val |= ~((sign_bit << 1) - 1);
+                }
+                i->op = IROP_CONST; i->imm.ival = val;
+                i->type = i->type; i->mem_type = NULL;
+                list_clear(i->args); list_clear(i->labels);
+                ++s->fold; changed = true;
+                continue;
+            }
         }
     }
     return changed;
@@ -1331,6 +1395,41 @@ static bool pass_local_opts(Func *f, Stats *s) {
                     bool is_eq = (i->op == IROP_EQ);
                     i->op = IROP_CONST;
                     i->imm.ival = is_eq ? (ca == cb) : (ca != cb);
+                    list_clear(i->args);
+                    ++s->fold; changed = true; continue;
+                }
+            }
+
+            /* 地址与 null 指针比较折叠:
+             *   addr_of_global == null  =>  0  (false, 全局地址不可能为 null)
+             *   addr_of_global != null  =>  1  (true)
+             * 其中 null 来自 inttoptr(0) 或 const 0 */
+            if ((i->op == IROP_EQ || i->op == IROP_NE) && i->args->len >= 2) {
+                /* 判断某个操作数是否是 IROP_ADDR（取地址，非 null） */
+                Instr *ia = find_def_instr(f, a);
+                Instr *ib = find_def_instr(f, bv);
+                bool a_is_addr = ia && ia->op == IROP_ADDR;
+                bool b_is_addr = ib && ib->op == IROP_ADDR;
+                /* 判断某个操作数是否是 null：inttoptr(0) 或 const 0 */
+                bool a_is_null = false, b_is_null = false;
+                {
+                    int64_t cv = 0;
+                    if (ia && ia->op == IROP_INTTOPTR && ia->args && ia->args->len >= 1) {
+                        a_is_null = get_const_value(f, get_arg(ia, 0), &cv) && cv == 0;
+                    } else if (ia && ia->op == IROP_CONST) {
+                        a_is_null = (ia->imm.ival == 0);
+                    }
+                    if (ib && ib->op == IROP_INTTOPTR && ib->args && ib->args->len >= 1) {
+                        b_is_null = get_const_value(f, get_arg(ib, 0), &cv) && cv == 0;
+                    } else if (ib && ib->op == IROP_CONST) {
+                        b_is_null = (ib->imm.ival == 0);
+                    }
+                }
+                if ((a_is_addr && b_is_null) || (b_is_addr && a_is_null)) {
+                    /* 全局地址永不为 null */
+                    bool is_eq = (i->op == IROP_EQ);
+                    i->op = IROP_CONST;
+                    i->imm.ival = is_eq ? 0 : 1;
                     list_clear(i->args);
                     ++s->fold; changed = true; continue;
                 }

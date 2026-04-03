@@ -644,6 +644,15 @@ void emit_offset(ISelContext* isel, Instr* ins) {
                         return;
                     }
                 }
+                /* CODE segment with constant offset ≤ 255: emit_load handles this via
+                 * MOV DPTR,#sym; MOV A,#off; MOVC A,@A+DPTR directly, so no register
+                 * materialization is needed. */
+                if (osec == SEC_CODE) {
+                    int total = (int)(idx_imm * (int)(ins->imm.ival ? ins->imm.ival : 1));
+                    if (total >= 0 && total <= 255 && !addr_value_needs_materialization(isel, ins->dest)) {
+                        return;
+                    }
+                }
             }
         }
     }
@@ -733,15 +742,37 @@ void emit_offset(ISelContext* isel, Instr* ins) {
 
     if (idx_is_imm) {
         int total = (int)(idx_imm * scale);
-        char imm_lo[32], imm_hi[32];
-        snprintf(imm_lo, sizeof(imm_lo), "#%d", total & 0xFF);
-        snprintf(imm_hi, sizeof(imm_hi), "#%d", (total >> 8) & 0xFF);
-        emit_mov(isel, "A", dst_lo, NULL);
-        isel_emit(isel, "ADD", "A", imm_lo, NULL);
-        emit_mov(isel, dst_lo, "A", NULL);
-        emit_mov(isel, "A", dst_hi, NULL);
-        isel_emit(isel, "ADDC", "A", imm_hi, NULL);
-        emit_mov(isel, dst_hi, "A", NULL);
+        if (total != 0) {
+            char imm_lo[32], imm_hi[32];
+            snprintf(imm_lo, sizeof(imm_lo), "#%d", total & 0xFF);
+            snprintf(imm_hi, sizeof(imm_hi), "#%d", (total >> 8) & 0xFF);
+            if ((total & 0xFF) != 0) {
+                /* low byte: MOV A, dst_lo; ADD A, #lo; MOV dst_lo, A */
+                emit_mov(isel, "A", dst_lo, NULL);
+                isel_emit(isel, "ADD", "A", imm_lo, NULL);
+                emit_mov(isel, dst_lo, "A", NULL);
+            }
+            /* high byte: MOV A, dst_hi; ADDC A, #hi; MOV dst_hi, A
+             * When low byte was 0 we skipped the ADD, so carry is clear →
+             * use ADD instead of ADDC to avoid spurious carry dependency. */
+            int hi_byte = (total >> 8) & 0xFF;
+            bool low_was_skipped = ((total & 0xFF) == 0);
+            if (hi_byte != 0) {
+                emit_mov(isel, "A", dst_hi, NULL);
+                if (low_was_skipped) {
+                    isel_emit(isel, "ADD", "A", imm_hi, NULL);
+                } else {
+                    isel_emit(isel, "ADDC", "A", imm_hi, NULL);
+                }
+                emit_mov(isel, dst_hi, "A", NULL);
+            } else if (!low_was_skipped) {
+                /* hi imm == 0 but low was non-zero: still need ADDC A, #0 to
+                 * propagate carry into the high byte */
+                emit_mov(isel, "A", dst_hi, NULL);
+                isel_emit(isel, "ADDC", "A", "#0", NULL);
+                emit_mov(isel, dst_hi, "A", NULL);
+            }
+        }
     } else {
         emit_mov(isel, "A", dst_lo, NULL);
         isel_emit(isel, "ADD", "A", preserve_offset_operand(isel, scaled_lo), NULL);
@@ -923,12 +954,12 @@ void emit_addr(ISelContext* isel, Instr* ins) {
     }
 
     if (!addr_value_needs_materialization(isel, ins->dest)) {
-        /* Only skip materialization for DATA/IDATA/XDATA symbols.
-           CODE segment symbols always need DPTR materialization for MOVC. */
-        SectionKind sym_sec = var_name ? get_symbol_section_kind(isel, var_name) : SEC_DATA;
-        if (sym_sec == SEC_DATA || sym_sec == SEC_IDATA || sym_sec == SEC_XDATA) {
-            return;
-        }
+        /* Skip materialization for symbols whose address is only used as a
+           base in OFFSET(addr, const) chains → downstream emit_load/emit_store
+           already fold those patterns directly.
+           For CODE symbols this holds too, since emit_offset now skips
+           CODE-segment OFFSET materialization and emit_load handles it. */
+        return;
     }
 
     int ptr_size = ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
@@ -1076,6 +1107,36 @@ void emit_load(ISelContext* isel, Instr* ins) {
                             store_spilled_mem_result(isel, ins, reg, size);
                             if (temp_r) free_temp_reg(isel, reg, size);
                             return;
+                        }
+                        /* CODE segment: use MOV DPTR, #sym; MOV A, #off; MOVC A, @A+DPTR
+                         * This avoids materializing the pointer into Rx:Ry and then
+                         * MOV DPL/DPH back from those registers. */
+                        if (osec == SEC_CODE && ooff >= 0 && ooff <= 255) {
+                            int size = ins->type ? c51_abi_type_size(ins->type) : 1;
+                            if (size < 1) size = 1;
+                            /* Only single-byte CODE loads are handled here (MOVC reads 1 byte) */
+                            if (size == 1) {
+                                char dptr_val[256];
+                                snprintf(dptr_val, sizeof(dptr_val), "#%s", osym);
+                                isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+                                char* ssa_str = instr_to_ssa_str(ins);
+                                if (ooff == 0) {
+                                    isel_emit(isel, "CLR", "A", NULL, ssa_str);
+                                } else {
+                                    char offstr[16];
+                                    snprintf(offstr, sizeof(offstr), "#%d", ooff);
+                                    isel_emit(isel, "MOV", "A", offstr, ssa_str);
+                                }
+                                free(ssa_str);
+                                isel_emit(isel, "MOVC", "A", "@A+DPTR", NULL);
+                                int reg = safe_alloc_reg_for_value(isel, ins->dest, 1);
+                                const char* dst_r = (reg >= 0) ? isel_reg_name(reg) : "A";
+                                if (dst_r && strcmp(dst_r, "A") != 0) {
+                                    isel_emit(isel, "MOV", dst_r, "A", NULL);
+                                }
+                                store_spilled_mem_result(isel, ins, reg >= 0 ? reg : 0, 1);
+                                return;
+                            }
                         }
                     }
                 }

@@ -25,7 +25,7 @@ static inline void *make_dict(void *parent)
     return r;
 }
 
-static inline void *dict_get(Dict *dict, char *key)
+static inline void *dict_get(Dict *dict, const char *key)
 {
     for (; dict; dict = dict->parent) {
         void *found = NULL;

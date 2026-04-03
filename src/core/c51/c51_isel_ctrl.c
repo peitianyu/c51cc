@@ -77,6 +77,12 @@ int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, in
             int phi_dst_reg = isel_get_value_reg(isel, phi->dest);
             int phi_size = phi->type ? c51_abi_type_size(phi->type) : get_value_size(isel, phi->dest);
             if (phi_size < size) phi_size = size;
+            /* If PHI target not yet allocated, eagerly allocate it now so that
+               the init value can be placed directly in the PHI target register.
+               This avoids the MOV copy at the entry edge of a loop. */
+            if (phi_dst_reg < 0) {
+                phi_dst_reg = alloc_reg_for_value(isel, phi->dest, phi_size);
+            }
             if (phi_dst_reg >= 0 && phi_dst_reg + phi_size - 1 < 8) {
                 if (isel->ctx && isel->ctx->value_to_reg) {
                     int* reg_num = malloc(sizeof(int));

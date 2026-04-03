@@ -84,7 +84,7 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
 void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n);
 void precompute_br_simplify(ISelContext* isel, Instr** instrs, int n);
 
-void emit_const(ISelContext* isel, Instr* ins);
+void emit_const(ISelContext* isel, Instr* ins, Instr* next);
 void emit_add(ISelContext* isel, Instr* ins, Instr* next);
 void emit_sub(ISelContext* isel, Instr* ins, Instr* next);
 void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mnem);

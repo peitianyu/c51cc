@@ -171,11 +171,13 @@ static void prepare_reg_state_for_instr(ISelContext* isel, Instr* ins, Instr* ne
 }
 
 int alloc_dest_reg(ISelContext* isel, Instr* ins, Instr* next, int size, bool try_bind) {
-    int reg = alloc_reg_for_value(isel, ins->dest, size);
+    /* First try to bind to a PHI target register (avoids copies at loop edges).
+     * If successful, allocate ins->dest directly to that register. */
     if (try_bind && next) {
         int bound = try_bind_result_to_phi_target(isel, ins, next, size);
-        if (bound >= 0) reg = bound;
+        if (bound >= 0) return bound;
     }
+    int reg = alloc_reg_for_value(isel, ins->dest, size);
     return reg;
 }
 
@@ -699,7 +701,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             if (const_used_only_as_add_rhs(isel, ins)) {
                 break;
             }
-            emit_const(isel, ins);
+            emit_const(isel, ins, next);
             break;
         case IROP_PARAM:
             break;
