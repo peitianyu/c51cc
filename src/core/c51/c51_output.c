@@ -2,12 +2,10 @@
 #include <string.h>
 #include <stdlib.h>
 
-static bool is_unused_local_spill_symbol(const ObjFile *obj, const Symbol *sym)
+/* 检查 name 是否在任意 CODE 段的指令参数中出现 */
+static bool symbol_is_referenced(const ObjFile *obj, const char *name)
 {
-    if (!obj || !sym || !sym->name) return false;
-    if (!(sym->flags & SYM_FLAG_LOCAL)) return false;
-    if (strncmp(sym->name, "__spill_", 8) != 0) return false;
-
+    if (!obj || !name) return false;
     for (Iter sit = list_iter(obj->sections); !iter_end(sit);) {
         Section *sec = iter_next(&sit);
         if (!sec || sec->kind != SEC_CODE || !sec->asminstrs) continue;
@@ -16,12 +14,19 @@ static bool is_unused_local_spill_symbol(const ObjFile *obj, const Symbol *sym)
             if (!ins || !ins->args) continue;
             for (Iter argit = list_iter(ins->args); !iter_end(argit);) {
                 const char *arg = iter_next(&argit);
-                if (arg && strstr(arg, sym->name)) return false;
+                if (arg && strstr(arg, name)) return true;
             }
         }
     }
+    return false;
+}
 
-    return true;
+static bool is_unused_local_spill_symbol(const ObjFile *obj, const Symbol *sym)
+{
+    if (!obj || !sym || !sym->name) return false;
+    if (!(sym->flags & SYM_FLAG_LOCAL)) return false;
+    if (strncmp(sym->name, "__spill_", 8) != 0) return false;
+    return !symbol_is_referenced(obj, sym->name);
 }
 
 static const char* section_kind_name(SectionKind kind)
@@ -235,23 +240,22 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
         }
     }
     fprintf(fp, "\n");
-    
+
+    /* 一次遍历所有 section：先输出非代码段，再输出代码段 */
     int sec_idx = 0;
     for (Iter it = list_iter(obj->sections); !iter_end(it); sec_idx++) {
         Section *sec = iter_next(&it);
         if (!sec || sec->kind == SEC_CODE) continue;
-
         print_section_with_symbols(fp, sec, obj, sec_idx);
     }
-    
-    int sec_idx2 = 0;
-    for (Iter it = list_iter(obj->sections); !iter_end(it); sec_idx2++) {
+
+    sec_idx = 0;
+    for (Iter it = list_iter(obj->sections); !iter_end(it); sec_idx++) {
         Section *sec = iter_next(&it);
         if (!sec || sec->kind != SEC_CODE) continue;
 
-        if (sec->bytes_len > 0) {
-            print_section_with_symbols(fp, sec, obj, sec_idx2);
-        }
+        if (sec->bytes_len > 0)
+            print_section_with_symbols(fp, sec, obj, sec_idx);
 
         if (sec->asminstrs) {
             for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {

@@ -386,11 +386,11 @@ void emit_br(ISelContext* isel, Instr* ins) {
                     free(ssa);
                     isel_emit(isel, "ORL", "A", s1_hi, NULL);
 
-                    /* NE: JNZ → true, fall → false
-                     * EQ: JNZ → false, fall → true (JNZ goes to l_ne, then false path) */
+                    /* NE: JNZ �?true, fall �?false
+                     * EQ: JNZ �?false, fall �?true (JNZ goes to l_ne, then false path) */
                     char* l_skip_true_fuse = isel_new_label(isel, "Lbr_skip_true");
                     if (cond_def->op == IROP_NE) {
-                        /* JNZ → true (NE = true means not-equal) */
+                        /* JNZ �?true (NE = true means not-equal) */
                         isel_emit(isel, "JZ", l_skip_true_fuse, NULL, instr_to_ssa_str(ins));
                         emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                         isel_emit(isel, "LJMP", target_t, NULL, NULL);
@@ -398,7 +398,7 @@ void emit_br(ISelContext* isel, Instr* ins) {
                         emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
                         isel_emit(isel, "LJMP", target_f, NULL, NULL);
                     } else {
-                        /* EQ: JNZ → false (not equal means EQ=false) */
+                        /* EQ: JNZ �?false (not equal means EQ=false) */
                         isel_emit(isel, "JNZ", l_skip_true_fuse, NULL, instr_to_ssa_str(ins));
                         emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
                         isel_emit(isel, "LJMP", target_t, NULL, NULL);
@@ -653,7 +653,7 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
                 return;
             }
             const char* src_sym = lookup_value_addr_symbol(isel, v);
-            if (src_sym && isel_get_value_reg(isel, v) == -3) {
+            if (src_sym && isel_get_value_reg(isel, v) == SPILL_REG) {
                 emit_load_symbol_byte(isel, src_sym, 0, "A", ins);
                 emit_store_symbol_byte(isel, sym, 0, "A", NULL);
                 return;
@@ -673,13 +673,13 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
         return;
     }
     const char* src_sym = lookup_value_addr_symbol(isel, v);
-    if (src_sym && isel_get_value_reg(isel, v) == -3) {
+    if (src_sym && isel_get_value_reg(isel, v) == SPILL_REG) {
         emit_load_symbol_byte(isel, src_sym, 0, dst, ins);
         return;
     }
     const char* src_lo = isel_get_lo_reg(isel, v);
 
-    if (isel_get_value_reg(isel, v) == -3) {
+    if (isel_get_value_reg(isel, v) == SPILL_REG) {
         int r = isel_reload_spill(isel, v, 1, ins);
         if (r >= 0) src_lo = isel_reg_name(r);
         else src_lo = "A";
@@ -702,7 +702,7 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
             src_reg = r;
         } else {
             src_lo = "A";
-            src_reg = -2;
+            src_reg = ACC_REG;
         }
     }
 
@@ -764,8 +764,8 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
         } else {
             src_hi = "A";
             src_lo = "A";
-            src_hi_reg = -2;
-            src_lo_reg = -2;
+            src_hi_reg = ACC_REG;
+            src_lo_reg = ACC_REG;
         }
     }
 
@@ -824,7 +824,7 @@ static void setup_call_param_u24(ISelContext* isel, Instr* ins, const char* call
         return;
     }
 
-    if (base == -3) {
+    if (base == SPILL_REG) {
         int r = isel_reload_spill(isel, v, 3, ins);
         if (r >= 0 && r + 2 < 8) {
             if (*move_count < 64) moves[(*move_count)++] = (RegMove){.dst = 1, .src = r};

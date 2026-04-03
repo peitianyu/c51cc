@@ -674,9 +674,8 @@ static const OperandEncoding *find_operand_encoding(const OperandEncoding *table
 {
 	const OperandEncoding *entry;
 	if (!table || !op) return NULL;
-	for (entry = table; entry->op; entry++) {
+	for (entry = table; entry->op; entry++)
 		if (strcmp(op, entry->op) == 0) return entry;
-	}
 	return NULL;
 }
 
@@ -684,9 +683,8 @@ static const BitUnaryEncoding *find_bit_unary_encoding(const char *op)
 {
 	const BitUnaryEncoding *entry;
 	if (!op) return NULL;
-	for (entry = bit_unary_encodings; entry->op; entry++) {
+	for (entry = bit_unary_encodings; entry->op; entry++)
 		if (strcmp(op, entry->op) == 0) return entry;
-	}
 	return NULL;
 }
 
@@ -694,9 +692,8 @@ static const IncDecEncoding *find_inc_dec_encoding(const char *op)
 {
 	const IncDecEncoding *entry;
 	if (!op) return NULL;
-	for (entry = inc_dec_encodings; entry->op; entry++) {
+	for (entry = inc_dec_encodings; entry->op; entry++)
 		if (strcmp(op, entry->op) == 0) return entry;
-	}
 	return NULL;
 }
 
@@ -704,9 +701,8 @@ static const AluEncoding *find_alu_encoding(const char *op)
 {
 	const AluEncoding *entry;
 	if (!op) return NULL;
-	for (entry = alu_encodings; entry->op; entry++) {
+	for (entry = alu_encodings; entry->op; entry++)
 		if (strcmp(op, entry->op) == 0) return entry;
-	}
 	return NULL;
 }
 
@@ -786,7 +782,6 @@ static int size_bit_op_view(const InstrView *view)
 	if (!entry || !view->arg1 || view->arg2) return 0;
 	if (is_acc(view->arg1) || is_carry(view->arg1)) return 1;
 	return 2;
-	return 0;
 }
 
 static int size_inc_dec_view(const InstrView *view)
@@ -798,7 +793,6 @@ static int size_inc_dec_view(const InstrView *view)
 	if (is_acc(view->arg1) || reg_index(view->arg1) >= 0) return 1;
 	if (entry->supports_dptr && is_dptr(view->arg1)) return 1;
 	return 2;
-	return 0;
 }
 
 static int size_movx_movc_view(const InstrView *view)
@@ -841,7 +835,6 @@ static int size_mov_view(const InstrView *view)
 		return 2;
 	}
 	if (view->arg1 && view->arg2) {
-		if (is_indirect_reg(view->arg2)) return 2;
 		if (is_acc(view->arg2) || reg_index(view->arg2) >= 0 || is_indirect_reg(view->arg2)) return 2;
 		if (is_immediate(view->arg2)) return 3;
 		return 3;
@@ -1360,8 +1353,8 @@ static int encode_alu(EncodeState *state, const InstrView *view, unsigned char *
 			return view->size;
 		case OPERAND_KIND_OTHER:
 			out[view->pc - state->start_offset] = entry->direct_opcode;
-		if (!eval_direct(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
-		return view->size;
+			if (!eval_direct(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
 		default:
 			return -1;
 		}

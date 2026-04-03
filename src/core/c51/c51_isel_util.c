@@ -32,9 +32,9 @@ void br_invert_put(ISelContext* isel, Instr* br, bool invert) {
 
 bool br_invert_get(ISelContext* isel, Instr* br, bool* out_invert) {
     if (!isel || !isel->br_invert || !br) return false;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%p", (const void*)br);
-    bool* v = (bool*)dict_get(isel->br_invert, buf);
+    char* key = instr_ptr_key(br);
+    bool* v = (bool*)dict_get(isel->br_invert, key);
+    free(key);
     if (!v) return false;
     if (out_invert) *out_invert = *v;
     return true;
@@ -66,7 +66,7 @@ int reg_index_from_name(const char* s) {
 }
 
 int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
-    if (!isel) return -2;
+    if (!isel) return ACC_REG;
     for (int r = C51_ALLOCATABLE_REG_MIN; r <= C51_ALLOCATABLE_REG_MAX; r++) {
         if (r + size - 1 > C51_ALLOCATABLE_REG_MAX) continue;
         bool ok = true;
@@ -78,10 +78,9 @@ int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
             isel->reg_busy[r + j] = true;
             isel->reg_val[r + j] = val;
         }
-        /* temp allocation recorded */
         return r;
     }
-    return -2;
+    return ACC_REG;
 }
 
 void free_temp_reg(ISelContext* isel, int reg, int size) {
@@ -92,7 +91,6 @@ void free_temp_reg(ISelContext* isel, int reg, int size) {
             isel->reg_val[reg + j] = -1;
         }
     }
-    /* free recorded */
 }
 
 void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, bool one) {
@@ -312,7 +310,7 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
         char* k = int_to_key(val);
         int* existing = (int*)dict_get(isel->ctx->value_to_reg, k);
         free(k);
-        if (existing && *existing != -3) return *existing;
+        if (existing && *existing != SPILL_REG) return *existing;
     }
 
     int reg = alloc_temp_reg(isel, val, size);
@@ -348,7 +346,7 @@ bool isel_value_is_spilled(ISelContext* isel, ValueName val) {
     char* key = int_to_key(val);
     int* reg_ptr = (int*)dict_get(isel->ctx->value_to_reg, key);
     free(key);
-    return reg_ptr && *reg_ptr == -3;
+    return reg_ptr && *reg_ptr == SPILL_REG;
 }
 
 void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int size, Instr* ins) {
@@ -454,7 +452,7 @@ void emit_parallel_reg_moves(ISelContext* isel, RegMove* moves, int n, Instr* in
 
             if (!dst_used_as_src) {
                 const char* dst = isel_reg_name(moves[i].dst);
-                const char* src = (moves[i].src == -2) ? "A" : isel_reg_name(moves[i].src);
+                const char* src = (moves[i].src == ACC_REG) ? "A" : isel_reg_name(moves[i].src);
                 emit_mov(isel, dst, src, ins);
                 done[i] = true;
                 remaining--;
@@ -498,8 +496,8 @@ const char* isel_get_extended_lo_reg(ISelContext* isel, ValueName val, int width
     if (width <= 1 || actual_size <= 1) return isel_get_lo_reg(isel, val);
 
     int base_reg = isel_get_value_reg(isel, val);
-    if (base_reg == -2) return "A";
-    if (base_reg == -3) {
+    if (base_reg == ACC_REG) return "A";
+    if (base_reg == SPILL_REG) {
         int reg = isel_reload_spill(isel, val, width, NULL);
         if (reg >= 0) return isel_reg_name(reg + 1);
         {
@@ -529,8 +527,8 @@ const char* isel_get_extended_hi_reg(ISelContext* isel, ValueName val, int width
     }
 
     int base_reg = isel_get_value_reg(isel, val);
-    if (base_reg == -2) return "A";
-    if (base_reg == -3) {
+    if (base_reg == ACC_REG) return "A";
+    if (base_reg == SPILL_REG) {
         int reg = isel_reload_spill(isel, val, width, NULL);
         if (reg >= 0) return isel_reg_name(reg);
         {

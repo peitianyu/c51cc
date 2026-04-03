@@ -7,7 +7,7 @@
 
 #include "c51_isel_regalloc.h"
 
-/* open_memstream 兼容层：Windows 上使用 tmpfile 模拟 */
+/* open_memstream 兼容层：Windows 上使�?tmpfile 模拟 */
 #ifdef _WIN32
 #include <io.h>
 #endif
@@ -18,13 +18,16 @@ char* int_to_key(int n) {
     return strdup(buf);
 }
 
+/* 默认推断的整型类型（用于比较类指令） */
+static const Ctype g_inferred_int_type = {0, CTYPE_INT, 2, NULL};
+
 char* instr_to_ssa_str(Instr *ins) {
     if (!ins) return strdup("");
 
     char *buf = NULL;
     size_t len = 0;
 #ifdef _WIN32
-    /* Windows: 用 tmpfile() 模拟 open_memstream */
+    /* Windows: �?tmpfile() 模拟 open_memstream */
     FILE *f = tmpfile();
 #else
     FILE *f = open_memstream(&buf, &len);
@@ -64,7 +67,7 @@ int isel_get_value_reg(ISelContext* isel, ValueName val) {
     int* reg_ptr = (int*)dict_get(isel->ctx->value_to_reg, key);
     free(key);
     if (reg_ptr && *reg_ptr >= 0) return *reg_ptr;
-    if (reg_ptr && *reg_ptr == -2) return *reg_ptr;
+    if (reg_ptr && *reg_ptr == ACC_REG) return *reg_ptr;
     if (isel) {
         for (int reg = 0; reg < 8; reg++) {
             if (isel->reg_val[reg] == val) return reg;
@@ -76,7 +79,7 @@ int isel_get_value_reg(ISelContext* isel, ValueName val) {
 
 const char* isel_get_value_reg_at(ISelContext* isel, ValueName val, int offset) {
     int base_reg = isel_get_value_reg(isel, val);
-    if (base_reg == -2) return "A";
+    if (base_reg == ACC_REG) return "A";
     if (base_reg < 0) {
         if (offset == 0) return "R6";
         else return "R7";
@@ -89,9 +92,9 @@ const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
     int size = get_value_size(isel, val);
     int base_reg = isel_get_value_reg(isel, val);
 
-    if (base_reg == -2) return "A";
+    if (base_reg == ACC_REG) return "A";
     if (base_reg < 0) {
-        if (base_reg == -3) {
+        if (base_reg == SPILL_REG) {
             int r = isel_reload_spill(isel, val, size, NULL);
             if (r >= 0) {
                 if (size == 2) return isel_reg_name(r + 1);
@@ -119,7 +122,7 @@ const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
 const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
     int base_reg = isel_get_value_reg(isel, val);
     int size = get_value_size(isel, val);
-    if (base_reg == -3) {
+    if (base_reg == SPILL_REG) {
         int r = isel_reload_spill(isel, val, size, NULL);
         if (r >= 0) {
             if (size == 2) return isel_reg_name(r);
@@ -354,137 +357,7 @@ bool isel_can_keep_in_acc(ISelContext* isel, Instr* ins, Instr* next) {
     return false;
 }
 
-static bool detect_simple_counter_loop(Func* f, int *out_count) {
-    if (!f || !out_count) return false;
-    int phi_count = 0;
-    for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
-        Block* b = iter_next(&bit);
-        if (b && b->phis) phi_count += b->phis->len;
-    }
-    if (phi_count != 1) return false;
-
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block* hdr = iter_next(&it);
-        if (!hdr || !hdr->phis || hdr->phis->len == 0) continue;
-
-        for (Iter pit = list_iter(hdr->phis); !iter_end(pit);) {
-            Instr* phi = iter_next(&pit);
-            if (!phi || phi->op != IROP_PHI) continue;
-            ValueName phi_dest = phi->dest;
-
-            Instr* lt = NULL; Instr* br = NULL;
-            for (Iter iit = list_iter(hdr->instrs); !iter_end(iit);) {
-                Instr* ins = iter_next(&iit);
-                if (!ins) continue;
-                if (ins->op == IROP_LT) {
-                    if (!ins->args || ins->args->len < 2) continue;
-                    ValueName a0 = *(ValueName*)list_get(ins->args, 0);
-                    if (a0 != phi_dest) continue;
-                    lt = ins;
-                    break;
-                }
-            }
-            if (!lt) continue;
-
-            bool found_br = false;
-            for (Iter iit = list_iter(hdr->instrs); !iter_end(iit);) {
-                Instr* ins = iter_next(&iit);
-                if (ins == lt) {
-                    Instr* next = iter_next(&iit);
-                    if (next && next->op == IROP_BR) { br = next; found_br = true; }
-                    break;
-                }
-            }
-            if (!found_br || !br) continue;
-
-            ValueName cmp_rhs = *(ValueName*)list_get(lt->args, 1);
-            Instr* const_k = find_def_instr_in_func(f, cmp_rhs);
-            if (!const_k || const_k->op != IROP_CONST) continue;
-            int K = (int)const_k->imm.ival;
-            if (K <= 0) continue;
-
-            if (!br->labels || br->labels->len < 1) continue;
-            const char* lbl_t = (const char*)list_get(br->labels, 0);
-            int id_t = parse_block_id(lbl_t);
-            if (id_t < 0) continue;
-            Block* body = find_block_by_id(f, id_t);
-            if (!body) continue;
-
-            if (!body->instrs || body->instrs->len == 0) continue;
-            Instr* last = (Instr*)list_get(body->instrs, body->instrs->len - 1);
-            if (!last || last->op != IROP_JMP || !last->labels || last->labels->len < 1) continue;
-            int jmp_target = parse_block_id((const char*)list_get(last->labels, 0));
-            if (jmp_target != (int)hdr->id) continue;
-
-            bool found_add = false;
-            for (Iter iit = list_iter(body->instrs); !iter_end(iit);) {
-                Instr* ins = iter_next(&iit);
-                if (!ins || ins->op != IROP_ADD) continue;
-                if (!ins->args || ins->args->len < 2) continue;
-                ValueName a0 = *(ValueName*)list_get(ins->args, 0);
-                ValueName a1 = *(ValueName*)list_get(ins->args, 1);
-                if (a0 != phi_dest) continue;
-                Instr* const1 = find_def_instr_in_func(f, a1);
-                if (!const1 || const1->op != IROP_CONST) continue;
-                if ((int)const1->imm.ival != 1) continue;
-                found_add = true;
-                break;
-            }
-            if (!found_add) continue;
-
-            bool found_init0 = false;
-            for (int i = 0; i < phi->labels->len && i < phi->args->len; i++) {
-                ValueName arg = *(ValueName*)list_get(phi->args, i);
-                Instr* def = find_def_instr_in_func(f, arg);
-                if (def && def->op == IROP_CONST && (int)def->imm.ival == 0) { found_init0 = true; break; }
-            }
-            if (!found_init0) continue;
-
-            *out_count = K;
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool detect_two_counter_loops(Func* f, int *out_outer, int *out_inner) {
-    if (!f || !out_outer || !out_inner) return false;
-    int found = 0;
-    int vals[2] = {0, 0};
-
-    for (Iter bit = list_iter(f->blocks); !iter_end(bit);) {
-        Block* b = iter_next(&bit);
-        if (!b || !b->instrs) continue;
-        for (Iter iit = list_iter(b->instrs); !iter_end(iit);) {
-            Instr* ins = iter_next(&iit);
-            if (!ins) continue;
-            if (ins->op == IROP_LT && ins->args && ins->args->len >= 2) {
-                ValueName rhs = *(ValueName*)list_get(ins->args, 1);
-                Instr* def = find_def_instr_in_func(f, rhs);
-                if (def && def->op == IROP_CONST) {
-                    int K = (int)def->imm.ival;
-                    if (K > 0) {
-                        bool dup = false;
-                        for (int j = 0; j < found; j++) if (vals[j] == K) { dup = true; break; }
-                        if (!dup && found < 2) vals[found++] = K;
-                    }
-                }
-            }
-            if (found >= 2) break;
-        }
-        if (found >= 2) break;
-    }
-
-    if (found >= 2) {
-        if (vals[0] >= vals[1]) { *out_outer = vals[0]; *out_inner = vals[1]; }
-        else { *out_outer = vals[1]; *out_inner = vals[0]; }
-        return true;
-    }
-    return false;
-}
-
 static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
-    static Ctype inferred_int_type = {0, CTYPE_INT, 2, NULL};
     if (!isel || !ins) return NULL;
     if (ins->type) return ins->type;
 
@@ -527,7 +400,7 @@ static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
             case IROP_GT:
             case IROP_GE:
             case IROP_LNOT:
-                return &inferred_int_type;
+                return (Ctype*)&g_inferred_int_type;
             default:
                 break;
         }
@@ -552,8 +425,9 @@ static void seed_value_types_for_func(C51GenContext* ctx, Func* func) {
     ISelContext probe = {0};
     probe.ctx = ctx;
 
-    for (int pass = 0; pass < 4; pass++) {
-        bool changed = false;
+    bool changed;
+    do {
+        changed = false;
 
         for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
             Block* block = iter_next(&bit);
@@ -577,9 +451,7 @@ static void seed_value_types_for_func(C51GenContext* ctx, Func* func) {
                 }
             }
         }
-
-        if (!changed) break;
-    }
+    } while (changed);
 }
 
 static Ctype* clone_type_with_attr_for_isel(Ctype* type, int attr) {
@@ -840,7 +712,7 @@ void isel_block(ISelContext* isel, Block* block) {
     precompute_br_simplify(isel, instrs, num_instrs);
 
     for (int i = 0; i < num_instrs; i++) {
-        /* 寻找下一条有意义的指令（跳过CONST/NOP，它们不产生代码，不阻断BR-aware路径） */
+        /* 寻找下一条有意义的指令（跳过CONST/NOP，它们不产生代码，不阻断BR-aware路径�?*/
         Instr* next = NULL;
         for (int j = i + 1; j < num_instrs; j++) {
             Instr* cand = instrs[j];
@@ -927,7 +799,4 @@ void isel_function(C51GenContext* ctx, Func* func) {
     }
 
     linscan_destroy(lsc);
-
-    (void)detect_simple_counter_loop;
-    (void)detect_two_counter_loops;
 }

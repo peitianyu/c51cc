@@ -140,15 +140,19 @@ ObjFile *c51_gen(SSAUnit *unit) {
 static char *dup_dirname(const char *path)
 {
     const char *slash;
+    const char *bslash;
+    const char *sep;
     size_t len;
     char *dir;
 
     if (!path) return NULL;
-    slash = strrchr(path, '/');
-    if (!slash) slash = strrchr(path, '\\');
-    if (!slash) return strdup(".");
+    slash  = strrchr(path, '/');
+    bslash = strrchr(path, '\\');
+    /* 选最靠右的分隔符（兼容 Windows 和 Unix 路径） */
+    sep = (bslash && (!slash || bslash > slash)) ? bslash : slash;
+    if (!sep) return strdup(".");
 
-    len = (size_t)(slash - path);
+    len = (size_t)(sep - path);
     dir = calloc(len + 1, 1);
     if (!dir) return NULL;
     memcpy(dir, path, len);

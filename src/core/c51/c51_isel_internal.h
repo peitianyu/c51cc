@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include "c51_isel.h"
 
+/* 特殊寄存器编号约定（非真实寄存器索引） */
+#define ACC_REG   (-2)  /* 值当前在累加器 A 中 */
+#define SPILL_REG (-3)  /* 值已溢出到内存 */
+
 typedef struct BrBitInfo {
     char *bit;
     bool invert;

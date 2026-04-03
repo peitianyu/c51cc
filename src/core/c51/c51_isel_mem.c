@@ -50,7 +50,7 @@ static bool addr_value_needs_materialization(ISelContext* isel, ValueName value)
                         int64_t dummy = 0;
                         bool idx_const = try_get_value_const(isel, offidx, &dummy);
                         if (idx_const && !addr_value_needs_materialization(isel, user->dest)) {
-                            /* OFFSET result only used by load/store â†’ foldable */
+                            /* OFFSET result only used by load/store â†?foldable */
                         } else {
                             return true;
                         }
@@ -121,7 +121,7 @@ static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueNam
     int ptr_abi_size = c51_abi_type_size(ptr_type);
     int load_size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int ptr_reg = isel_get_value_reg(isel, ptr);
-    if (ptr_reg == -3) {
+    if (ptr_reg == SPILL_REG) {
         ptr_reg = isel_reload_spill(isel, ptr, ptr_abi_size, ins);
     }
     if (ptr_reg < 0 || load_size < 1 || load_size > 2) return false;
@@ -158,7 +158,7 @@ static bool emit_load_from_pointer_value(ISelContext* isel, Instr* ins, ValueNam
         }
         dst_reg = phys_dst_reg;
     }
-    if (dst_reg < 0 && dst_reg != -3 && isel && isel->ctx && isel->ctx->value_to_reg) {
+    if (dst_reg < 0 && dst_reg != SPILL_REG && isel && isel->ctx && isel->ctx->value_to_reg) {
         int* reg_num = malloc(sizeof(int));
         *reg_num = phys_dst_reg;
         char* key = int_to_key(ins->dest);
@@ -434,7 +434,7 @@ static bool emit_store_to_pointer_value(ISelContext* isel, Instr* ins, ValueName
     if (store_size > 2) store_size = 2;
 
     int ptr_reg = isel_get_value_reg(isel, ptr);
-    if (ptr_reg == -3) {
+    if (ptr_reg == SPILL_REG) {
         ptr_reg = isel_reload_spill(isel, ptr, ptr_abi_size, ins);
     }
     if (ptr_reg < 0) return false;
@@ -605,7 +605,7 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     ValueName idx = *(ValueName*)list_get(ins->args, 1);
 
     /* Optimization: OFFSET(ADDR(sym)/direct-DATA-sym, const) where result only
-       used as ptr in LOAD/STORE â†’ skip code generation entirely.
+       used as ptr in LOAD/STORE â†?skip code generation entirely.
        emit_load/emit_store already handle OFFSET(ADDR(sym), const) via their
        look-through logic, so the pointer value never needs to be in a register. */
     if (isel && isel->ctx && isel->ctx->current_func) {
@@ -639,12 +639,12 @@ void emit_offset(ISelContext* isel, Instr* ins) {
             if (osym) {
                 SectionKind osec = get_symbol_section_kind(isel, osym);
                 if (osec == SEC_DATA || osec == SEC_IDATA || osec == SEC_XDATA) {
-                    /* Result value only used as LOAD/STORE pointer â†’ no register needed */
+                    /* Result value only used as LOAD/STORE pointer â†?no register needed */
                     if (!addr_value_needs_materialization(isel, ins->dest)) {
                         return;
                     }
                 }
-                /* CODE segment with constant offset â‰¤ 255: emit_load handles this via
+                /* CODE segment with constant offset â‰?255: emit_load handles this via
                  * MOV DPTR,#sym; MOV A,#off; MOVC A,@A+DPTR directly, so no register
                  * materialization is needed. */
                 if (osec == SEC_CODE) {
@@ -718,7 +718,7 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     }
 
     int base_reg = isel_get_value_reg(isel, base);
-    if (base_reg == -3) {
+    if (base_reg == SPILL_REG) {
         base_reg = isel_reload_spill(isel, base, ptr_size, ins);
     }
     if (base_reg >= 0) {
@@ -753,7 +753,7 @@ void emit_offset(ISelContext* isel, Instr* ins) {
                 emit_mov(isel, dst_lo, "A", NULL);
             }
             /* high byte: MOV A, dst_hi; ADDC A, #hi; MOV dst_hi, A
-             * When low byte was 0 we skipped the ADD, so carry is clear â†’
+             * When low byte was 0 we skipped the ADD, so carry is clear â†?
              * use ADD instead of ADDC to avoid spurious carry dependency. */
             int hi_byte = (total >> 8) & 0xFF;
             bool low_was_skipped = ((total & 0xFF) == 0);
@@ -823,7 +823,7 @@ void emit_store(ISelContext* isel, Instr* ins) {
             if (def && def->op == IROP_ADDR) {
                 allow_pointer_store = false;
             }
-            /* Optimization: STORE through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) â†’ direct sym+off store */
+            /* Optimization: STORE through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) â†?direct sym+off store */
             if (allow_pointer_store && def && def->op == IROP_OFFSET
                     && def->args && def->args->len >= 2) {
                 ValueName base = *(ValueName*)list_get(def->args, 0);
@@ -955,7 +955,7 @@ void emit_addr(ISelContext* isel, Instr* ins) {
 
     if (!addr_value_needs_materialization(isel, ins->dest)) {
         /* Skip materialization for symbols whose address is only used as a
-           base in OFFSET(addr, const) chains â†’ downstream emit_load/emit_store
+           base in OFFSET(addr, const) chains â†?downstream emit_load/emit_store
            already fold those patterns directly.
            For CODE symbols this holds too, since emit_offset now skips
            CODE-segment OFFSET materialization and emit_load handles it. */
@@ -998,7 +998,7 @@ void emit_load(ISelContext* isel, Instr* ins) {
                 allow_pointer_deref = false;
                 /* Optimization: load(addr(sym)) where result only used as base in
                    offset(result, const, scale) and all those offsets are only used
-                   by load/store â†’ skip emitting this load entirely.
+                   by load/store â†?skip emitting this load entirely.
                    emit_load/emit_store already look through LOAD(ADDR(sym)) chains. */
                 if (ins->dest > 0) {
                     const char *sym_early = NULL;
@@ -1053,7 +1053,7 @@ void emit_load(ISelContext* isel, Instr* ins) {
                     }
                 }
             }
-            /* Optimization: LOAD through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) â†’ direct sym+off load */
+            /* Optimization: LOAD through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) â†?direct sym+off load */
             if (allow_pointer_deref && def && def->op == IROP_OFFSET
                     && def->args && def->args->len >= 2) {
                 ValueName obase = *(ValueName*)list_get(def->args, 0);

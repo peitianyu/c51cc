@@ -107,7 +107,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     }
     if (src2_is_imm) src2 = -1;
     const char* src2_sym = (!src2_is_imm) ? lookup_value_addr_symbol(isel, src2) : NULL;
-    bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == -3;
+    bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == SPILL_REG;
 
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
     int src1_base_reg = isel_get_value_reg(isel, src1);
@@ -213,7 +213,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     int src1_hi_tmp = -1;
     int src2_hi_tmp = -1;
     int src2_size = (!src2_is_imm) ? get_value_size(isel, src2) : 0;
-    /* 检查 src2 是否是 IDATA spill: 如果是，可以直接用 ADD A, sym 避免中转 B */
+    /* 检�?src2 是否�?IDATA spill: 如果是，可以直接�?ADD A, sym 避免中转 B */
     bool src2_idata_direct = false;
     if (src2_spilled_mem && src2_sym) {
         SectionKind src2_sec = get_symbol_section_kind(isel, src2_sym);
@@ -306,7 +306,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
     } else {
         if (src2_spilled_mem) {
             if (src2_idata_direct) {
-                /* IDATA 直接地址：ADD A, sym  (节省通过 B 的中转) */
+                /* IDATA 直接地址：ADD A, sym  (节省通过 B 的中�? */
                 isel_emit(isel, "ADD", "A", src2_sym, NULL);
             } else {
                 isel_emit(isel, "ADD", "A", "B", NULL);
@@ -337,7 +337,7 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
             if (src2_size == 2) {
                 if (src2_spilled_mem) {
                     if (src2_idata_direct) {
-                        /* IDATA 直接：ADDC A, (sym+1) — 节省 save/load/B 中转共 4 条指令 */
+                        /* IDATA 直接：ADDC A, (sym+1) �?节省 save/load/B 中转�?4 条指�?*/
                         char ref[256];
                         snprintf(ref, sizeof(ref), "(%s + 1)", src2_sym);
                         isel_emit(isel, "ADDC", "A", ref, NULL);
@@ -428,8 +428,8 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
     int phys_dst_reg = dst_reg;
     bool temp_result = false;
 
-    /* 如果下一条指令是 RET，且结果寄存器不是 R6/R7，
-     * 直接将结果写入返回寄存器，避免移位后再 MOV R7/R6, Rx 的冗余拷贝 */
+    /* 如果下一条指令是 RET，且结果寄存器不�?R6/R7�?
+     * 直接将结果写入返回寄存器，避免移位后�?MOV R7/R6, Rx 的冗余拷�?*/
     if (next && next->op == IROP_RET && size == 2) {
         int ret_base = 6; /* R6:R7 */
         int src_base = isel_get_value_reg(isel, src);
@@ -469,10 +469,10 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
                 is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
             }
             if (cnt >= 8) {
-                /* 移位量 >= 8: 结果为 0 (无符号 / 左移) 或符号扩展 (有符号右移) */
+                /* 移位�?>= 8: 结果�?0 (无符�?/ 左移) 或符号扩�?(有符号右�? */
                 emit_mov(isel, "A", dst_lo, ins);
                 if (is_shr && !is_unsigned) {
-                    /* 算术右移 >=8: 结果为 0x00 或 0xFF */
+                    /* 算术右移 >=8: 结果�?0x00 �?0xFF */
                     isel_emit(isel, "MOV", "C", "ACC.7", NULL);
                     isel_emit(isel, "MOV", "A", "#0", NULL);
                     isel_emit(isel, "SUBB", "A", "#0", NULL); /* A = 0 or 0xFF */
@@ -486,11 +486,11 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
                 /* shr x, 7: 取最高位 */
                 emit_mov(isel, "A", dst_lo, ins);
                 if (is_unsigned) {
-                    /* 逻辑右移7: A = (old_A >> 7) = bit7 → RL A; ANL A, #1 */
+                    /* 逻辑右移7: A = (old_A >> 7) = bit7 �?RL A; ANL A, #1 */
                     isel_emit(isel, "RL", "A", NULL, NULL);
                     isel_emit(isel, "ANL", "A", "#1", NULL);
                 } else {
-                    /* 算术右移7: 结果 0x00 或 0xFF */
+                    /* 算术右移7: 结果 0x00 �?0xFF */
                     isel_emit(isel, "MOV", "C", "ACC.7", NULL);
                     isel_emit(isel, "MOV", "A", "#0", NULL);
                     isel_emit(isel, "SUBB", "A", "#0", NULL);
@@ -499,7 +499,7 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
                 return;
             }
             if (!is_shr && cnt == 7) {
-                /* shl x, 7: 取最低位放到 bit7 → RR A; ANL A, #0x80 */
+                /* shl x, 7: 取最低位放到 bit7 �?RR A; ANL A, #0x80 */
                 emit_mov(isel, "A", dst_lo, ins);
                 isel_emit(isel, "RR", "A", NULL, NULL);
                 isel_emit(isel, "ANL", "A", "#128", NULL);
@@ -507,7 +507,7 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
                 return;
             }
             if (cnt == 4) {
-                /* 移位4: 用 SWAP + 掩码 */
+                /* 移位4: �?SWAP + 掩码 */
                 emit_mov(isel, "A", dst_lo, ins);
                 isel_emit(isel, "SWAP", "A", NULL, NULL);
                 if (is_shr) {
@@ -531,7 +531,7 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
                 return;
             }
             if (is_shr && is_unsigned && cnt >= 5) {
-                /* 无符号右移5-6: 用左旋转 (8-cnt) 次 + 掩码更高效 */
+                /* 无符号右�?-6: 用左旋转 (8-cnt) �?+ 掩码更高�?*/
                 int rot = 8 - cnt;
                 emit_mov(isel, "A", dst_lo, ins);
                 for (int i = 0; i < rot; i++) {
@@ -544,7 +544,7 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
                 return;
             }
             if (!is_shr && cnt >= 5) {
-                /* 左移5-6: 用右旋转 (8-cnt) 次 + 掩码更高效 */
+                /* 左移5-6: 用右旋转 (8-cnt) �?+ 掩码更高�?*/
                 int rot = 8 - cnt;
                 emit_mov(isel, "A", dst_lo, ins);
                 for (int i = 0; i < rot; i++) {
@@ -556,7 +556,7 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
                 emit_mov(isel, dst_lo, "A", NULL);
                 return;
             }
-            /* 一般情况: 1-3 次移位，逐次生成 */
+            /* 一般情�? 1-3 次移位，逐次生成 */
             for (int i = 0; i < cnt; i++) {
                 emit_mov(isel, "A", dst_lo, ins);
                 if (is_shr) {
@@ -1066,15 +1066,15 @@ void emit_select(ISelContext* isel, Instr* ins, Instr* next) {
     }
     if (phys_dst_reg < 0) phys_dst_reg = 0;
 
-    /* 当 select 结果直接被 RET 使用时，强制分配到 R6/R7，避免 RET 前额外拷贝 */
+    /* �?select 结果直接�?RET 使用时，强制分配�?R6/R7，避�?RET 前额外拷�?*/
     if (next && next->op == IROP_RET && size == 2 && phys_dst_reg != 6) {
         int tv_reg = isel_get_value_reg(isel, tv);
         int fv_reg = isel_get_value_reg(isel, fv);
-        /* 确保 tv/fv 的源寄存器不在 R6/R7 范围内（避免覆盖源） */
+        /* 确保 tv/fv 的源寄存器不�?R6/R7 范围内（避免覆盖源） */
         bool tv_safe = (tv_reg < 0) || (tv_reg + size - 1 < 6);
         bool fv_safe = (fv_reg < 0) || (fv_reg + size - 1 < 6);
         if (tv_safe && fv_safe) {
-            /* 释放旧分配，重新绑定到 R6 */
+            /* 释放旧分配，重新绑定�?R6 */
             if (phys_dst_reg >= 0 && phys_dst_reg <= 7) {
                 for (int j = 0; j < size; j++) {
                     if (isel->reg_val[phys_dst_reg + j] == ins->dest)
@@ -1110,7 +1110,7 @@ void emit_select(ISelContext* isel, Instr* ins, Instr* next) {
         int cond_lo_tmp = -1;
         const char* cond_lo_safe;
         if (strcmp(cond_lo_raw, "A") == 0) {
-            /* lo在A中，需先保存到临时寄存器 */
+            /* lo在A中，需先保存到临时寄存�?*/
             int tr = alloc_temp_reg(isel, -1, 1);
             if (tr >= 0) {
                 emit_mov(isel, isel_reg_name(tr), "A", NULL);
@@ -1231,7 +1231,7 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
     ValueName src2 = src2_is_imm ? -1 : get_src2_value(ins);
     const char* src2_sym = (!src2_is_imm) ? lookup_value_addr_symbol(isel, src2) : NULL;
-    bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == -3;
+    bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == SPILL_REG;
 
     const char* src1_lo = isel_get_lo_reg(isel, src1);
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
@@ -1289,16 +1289,12 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         }
     }
 
-    /* 检查 src2 是否是 IDATA spill: 如果是，可以直接用 SUBB A, sym 避免中转 B */
+    /* 检�?src2 是否�?IDATA spill: 如果是，可以直接�?SUBB A, sym 避免中转 B */
     bool src2_idata_direct_sub = false;
     if (src2_spilled_mem && src2_sym) {
         SectionKind src2_sec_sub = get_symbol_section_kind(isel, src2_sym);
         src2_idata_direct_sub = (src2_sec_sub == SEC_IDATA);
     }
-    if (src2_spilled_mem && !src2_idata_direct_sub) {
-        emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
-    }
-
     /* 16-bit sub-1 special case: use DEC Rlo; JNZ skip; DEC Rhi; skip:
      * This matches the compact pattern keil generates and avoids CLR C + SUBB pair. */
     if (size == 2 && src2_is_imm && imm_val == 1 && src1_size == 2 && !src2_spilled_mem) {
@@ -1321,8 +1317,8 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         /* DEC low byte */
         isel_emit(isel, "DEC", dst_lo, NULL, ssa);
         free(ssa);
-        /* If dst_lo wrapped from 0x00 to 0xFF, borrow occurred → DEC high byte
-         * CJNE Rlo, #255, skip  — jumps to skip if Rlo != 0xFF, falls through if Rlo == 0xFF */
+        /* If dst_lo wrapped from 0x00 to 0xFF, borrow occurred �?DEC high byte
+         * CJNE Rlo, #255, skip  �?jumps to skip if Rlo != 0xFF, falls through if Rlo == 0xFF */
         {
             char cjne_arg2[64];
             snprintf(cjne_arg2, sizeof(cjne_arg2), "#255,%s", l_skip);
@@ -1354,7 +1350,7 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         return;
     }
 
-    /* src2_spilled_mem 且非 IDATA 直接：预加载 B (IDATA 直接时在 SUBB 指令中使用 sym 字面量) */
+    /* src2_spilled_mem 且非 IDATA 直接：预加载 B (IDATA 直接时在 SUBB 指令中使�?sym 字面�? */
     if (src2_spilled_mem && !src2_idata_direct_sub) {
         emit_load_symbol_byte(isel, src2_sym, 0, "B", NULL);
     }
@@ -1550,9 +1546,9 @@ void emit_trunc(ISelContext* isel, Instr* ins) {
                 isel->reg_busy[lo_reg] = true;
                 isel->reg_val[lo_reg] = ins->dest;
             }
-        } else if (src_base == -2) {
+        } else if (src_base == ACC_REG) {
             int* reg_num = malloc(sizeof(int));
-            *reg_num = -2;
+            *reg_num = ACC_REG;
             char* key = int_to_key(ins->dest);
             dict_put(isel->ctx->value_to_reg, key, reg_num);
         } else {

@@ -3,19 +3,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* 检查两个操作数是否相同 */
+/* ============================================================
+ * 基本操作数/指令类型判断
+ * ============================================================ */
+
+/* R0-R7 寄存器快速检查 */
+#define IS_RX(op) ((op) && (op)[0]=='R' && (op)[1]>='0' && (op)[1]<='7' && (op)[2]=='\0')
+
 static bool operands_equal(const char* op1, const char* op2) {
     if (!op1 || !op2) return false;
     return strcmp(op1, op2) == 0;
 }
 
-/* 获取指令的操作数 */
 static const char* get_operand(AsmInstr* ins, int index) {
     if (!ins || !ins->args || index >= ins->args->len) return NULL;
     return (const char*)list_get(ins->args, index);
 }
 
-/* 检查指令是否是 MOV */
 static bool is_mov(AsmInstr* ins) {
     return ins && ins->op && strcmp(ins->op, "MOV") == 0;
 }
@@ -26,26 +30,25 @@ static bool is_label_instr(AsmInstr* ins) {
     return len > 0 && ins->op[len - 1] == ':';
 }
 
+/* 编译器生成的本地标签：L 开头 + ':' 结尾（合并原 is_local_numeric_label 和 is_compiler_local_label） */
+static bool is_local_label(const char* op) {
+    if (!op) return false;
+    size_t len = strlen(op);
+    return len >= 2 && op[0] == 'L' && op[len - 1] == ':';
+}
+
 static bool is_control_transfer_instr(AsmInstr* ins) {
     if (!ins || !ins->op) return false;
-    return strcmp(ins->op, "SJMP") == 0 ||
-           strcmp(ins->op, "AJMP") == 0 ||
-           strcmp(ins->op, "LJMP") == 0 ||
-           strcmp(ins->op, "JMP") == 0 ||
-           strcmp(ins->op, "JC") == 0 ||
-           strcmp(ins->op, "JNC") == 0 ||
-           strcmp(ins->op, "JZ") == 0 ||
-           strcmp(ins->op, "JNZ") == 0 ||
-           strcmp(ins->op, "CJNE") == 0 ||
-           strcmp(ins->op, "DJNZ") == 0 ||
-           strcmp(ins->op, "JB") == 0 ||
-           strcmp(ins->op, "JNB") == 0 ||
-           strcmp(ins->op, "JBC") == 0 ||
-           strcmp(ins->op, "RET") == 0 ||
-           strcmp(ins->op, "RETI") == 0 ||
-           strcmp(ins->op, "ACALL") == 0 ||
-           strcmp(ins->op, "LCALL") == 0 ||
-           strcmp(ins->op, "CALL") == 0;
+    const char* op = ins->op;
+    return strcmp(op, "SJMP") == 0 || strcmp(op, "AJMP") == 0 ||
+           strcmp(op, "LJMP") == 0 || strcmp(op, "JMP")  == 0 ||
+           strcmp(op, "JC")   == 0 || strcmp(op, "JNC")  == 0 ||
+           strcmp(op, "JZ")   == 0 || strcmp(op, "JNZ")  == 0 ||
+           strcmp(op, "CJNE") == 0 || strcmp(op, "DJNZ") == 0 ||
+           strcmp(op, "JB")   == 0 || strcmp(op, "JNB")  == 0 ||
+           strcmp(op, "JBC")  == 0 || strcmp(op, "RET")  == 0 ||
+           strcmp(op, "RETI") == 0 || strcmp(op, "ACALL")== 0 ||
+           strcmp(op, "LCALL")== 0 || strcmp(op, "CALL") == 0;
 }
 
 static bool is_basic_block_barrier(AsmInstr* ins) {
@@ -57,14 +60,11 @@ static bool is_register_operand(const char* op);
 static bool is_immediate_operand(const char* op);
 static bool is_memory_operand(const char* op);
 
-/* 检查寄存器是否在指令中被使用 */
 static bool reg_used_in_instr(AsmInstr* ins, const char* reg) {
-    if (!ins || !reg) return false;
-    if (ins->args) {
-        for (int i = 0; i < ins->args->len; i++) {
-            const char* arg = (const char*)list_get(ins->args, i);
-            if (arg && strcmp(arg, reg) == 0) return true;
-        }
+    if (!ins || !reg || !ins->args) return false;
+    for (int i = 0; i < ins->args->len; i++) {
+        const char* arg = (const char*)list_get(ins->args, i);
+        if (arg && strcmp(arg, reg) == 0) return true;
     }
     return false;
 }
@@ -72,33 +72,21 @@ static bool reg_used_in_instr(AsmInstr* ins, const char* reg) {
 static bool operand_reads_reg(const char* arg, const char* reg) {
     if (!arg || !reg) return false;
     if (operands_equal(arg, reg)) return true;
-    if (arg[0] == '@' && operands_equal(arg + 1, reg)) return true;
+    if (arg[0] == '@') return operands_equal(arg + 1, reg);
     return false;
 }
 
 static bool is_indirect_operand(const char* op) {
-    if (!op) return false;
-    return op[0] == '@';
+    return op && op[0] == '@';
 }
 
-static bool is_local_numeric_label(const char* op) {
-    if (!op) return false;
-    size_t len = strlen(op);
-    if (len < 3 || op[len - 1] != ':') return false;
-    if (op[0] != 'L') return false;
-    for (size_t i = 1; i + 1 < len; i++) {
-        if (op[i] < '0' || op[i] > '9') return false;
-    }
-    return true;
-}
-
-static bool is_compiler_local_label(const char* op) {
-    size_t len;
-
-    if (!op) return false;
-    len = strlen(op);
-    if (len < 2 || op[len - 1] != ':') return false;
-    if (op[0] != 'L') return false;
+/* 将 "Lxxx:" 指令的操作码转为裸标签名写入 buf，成功返回 true */
+static bool get_label_name(AsmInstr* ins, char* buf, size_t buf_size) {
+    if (!ins || !ins->op || !buf || buf_size == 0) return false;
+    size_t len = strlen(ins->op);
+    if (len == 0 || ins->op[len - 1] != ':' || len >= buf_size) return false;
+    memcpy(buf, ins->op, len - 1);
+    buf[len - 1] = '\0';
     return true;
 }
 
@@ -132,29 +120,15 @@ static bool label_is_referenced(List* instrs, const char* label) {
 /* 删除指令 */
 static void remove_instr(List* instrs, int index) {
     if (!instrs || index < 0 || index >= instrs->len) return;
-    
-    // 从列表中移除（不释放内存，因为可能有其他引用）
     ListNode* node = instrs->head;
-    ListNode* prev = NULL;
-    int i = 0;
-    
-    while (node && i < index) {
-        prev = node;
-        node = node->next;
-        i++;
-    }
-    
-    if (node) {
-        if (prev) {
-            prev->next = node->next;
-        } else {
-            instrs->head = node->next;
-        }
-        if (node->next) node->next->prev = prev;
-        else instrs->tail = prev;
-        instrs->len--;
-        free(node);
-    }
+    for (int i = 0; i < index; i++) node = node->next;
+    if (!node) return;
+    if (node->prev) node->prev->next = node->next;
+    else            instrs->head     = node->next;
+    if (node->next) node->next->prev = node->prev;
+    else            instrs->tail     = node->prev;
+    instrs->len--;
+    free(node);
 }
 
 /* 窥孔优化：MOV A, x; MOV y, A -> MOV y, x (如果之后不立即使用A) */
@@ -440,53 +414,8 @@ static int peephole_dead_mov_a(List* instrs, int start) {
     return 0;
 }
 
-/* 窥孔优化：连续 MOV A 死亡加载消除（简化版，已由 peephole_dead_mov_a 覆盖）
- * Pattern: MOV A, src1; MOV A, src2
- * 第一个 MOV A 结果立刻被第二个覆盖，直接删除第一个。
- * 例外：src1 为间接操作（@Rx、@DPTR）有内存读副作用，不能删除。
- */
-static int peephole_consecutive_mov_a(List* instrs, int start) {
-    if (start + 1 >= instrs->len) return 0;
-
-    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
-    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
-    if (!ins1 || !ins2) return 0;
-    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
-
-    /* Both must be MOV */
-    if (!is_mov(ins1) || !is_mov(ins2)) return 0;
-
-    const char* dst1 = get_operand(ins1, 0);
-    const char* src1 = get_operand(ins1, 1);
-    const char* dst2 = get_operand(ins2, 0);
-    if (!dst1 || !src1 || !dst2) return 0;
-
-    /* Both must write to A */
-    if (!operands_equal(dst1, "A") || !operands_equal(dst2, "A")) return 0;
-
-    /* src1 must not be an indirect operand (memory read side effect) */
-    if (is_indirect_operand(src1)) return 0;
-
-    /* Delete the first MOV A, src1 */
-    remove_instr(instrs, start);
-    return 1;
-}
-
-/* 窥孔优化：MOV A, src; MOV mem, A → MOV mem, src (去掉 A 中转)
- *
- * Pattern 1 (总是安全):
- *   MOV A, #imm          →  MOV mem, #imm    (+ remove original)
- *   MOV mem, A
- *
- * Pattern 2 (仅当 A 不被后续使用时安全):
- *   MOV A, Rx            →  MOV mem, Rx      (+ remove original)
- *   MOV mem, A
- *
- * 限制:
- *   - mem 不能是寄存器（R0-R7/A）也不能是间接(@Rx)
- *   - src 不能是间接操作（内存读副作用）
- *   - src 不能是 A 本身
- */
+/* --- MOV A, src; MOV mem, A → MOV mem, src（去掉 A 中转） ---
+ * src 为立即数时始终安全；为寄存器/内存时需确认 A 之后不被读取 */
 static int peephole_fold_mov_a_to_mem(List* instrs, int start) {
     if (start + 1 >= instrs->len) return 0;
 
@@ -657,14 +586,10 @@ static int peephole_drop_dead_mov_before_bit_branch(List* instrs, int start) {
 static int peephole_remove_empty_local_label(List* instrs, int start) {
     AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
     if (!ins || !ins->op) return 0;
-    if (!is_local_numeric_label(ins->op) && !is_compiler_local_label(ins->op)) return 0;
+    if (!is_local_label(ins->op)) return 0;
 
     char label[64];
-    size_t len = strlen(ins->op);
-    if (len >= sizeof(label)) return 0;
-    strncpy(label, ins->op, len - 1);
-    label[len - 1] = '\0';
-
+    if (!get_label_name(ins, label, sizeof(label))) return 0;
     if (label_is_referenced(instrs, label)) return 0;
     remove_instr(instrs, start);
     return 1;
@@ -1626,77 +1551,9 @@ static int peephole_forward_copy_to_dest(List* instrs, int start) {
     return 0;
 }
 
-/* 窥孔优化：MOV x, A; MOV y, x -> MOV y, A; MOV x, A */
-static int peephole_mov_propagate(List* instrs, int start) {
-    if (start + 1 >= instrs->len) return 0;
-    
-    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
-    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
-
-    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
-    
-    if (!is_mov(ins1) || !is_mov(ins2)) return 0;
-    
-    const char* dst1 = get_operand(ins1, 0);
-    const char* src1 = get_operand(ins1, 1);
-    const char* dst2 = get_operand(ins2, 0);
-    const char* src2 = get_operand(ins2, 1);
-    
-    // MOV Rx, A; MOV Ry, Rx -> MOV Ry, A; MOV Rx, A
-    if (is_register_operand(dst1) && operands_equal(src1, "A") && operands_equal(src2, dst1) &&
-        is_register_operand(dst2) && !operands_equal(dst2, "A")) {
-        
-        // 修改第二条指令的源操作数
-        free(ins2->args->head->next->elem);
-        ins2->args->head->next->elem = strdup("A");
-        return 1;
-    }
-    
-    return 0;
-}
-
-/* 窥孔优化：MOV mem, A; MOV Rx, mem -> MOV Rx, A; MOV mem, A */
-static int peephole_mem_to_reg(List* instrs, int start) {
-    if (start + 1 >= instrs->len) return 0;
-    
-    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
-    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
-
-    if (is_basic_block_barrier(ins1) || is_basic_block_barrier(ins2)) return 0;
-    
-    if (!is_mov(ins1) || !is_mov(ins2)) return 0;
-    
-    const char* dst1 = get_operand(ins1, 0);
-    const char* src1 = get_operand(ins1, 1);
-    const char* dst2 = get_operand(ins2, 0);
-    const char* src2 = get_operand(ins2, 1);
-    
-    // MOV mem, A; MOV Rx, mem -> MOV Rx, A; MOV mem, A
-    if (operands_equal(src1, "A") && operands_equal(src2, dst1) &&
-        dst2 && dst2[0] == 'R' && dst1 && !is_indirect_operand(dst1) && is_memory_operand(dst1)) {
-        
-        // 交换两条指令：修改第二条为 MOV Rx, A
-        free(ins2->args->head->next->elem);
-        ins2->args->head->next->elem = strdup("A");
-        
-        // 交换指令顺序
-        ListNode* node1 = instrs->head;
-        for (int i = 0; i < start; i++) {
-            node1 = node1->next;
-        }
-        ListNode* node2 = node1->next;
-        
-        void* temp = node1->elem;
-        node1->elem = node2->elem;
-        node2->elem = temp;
-        
-        return 1;
-    }
-    
-    return 0;
-}
-
-/* 检查寄存器是否在指令序列中被读取（不包括作为目标） */
+/* 从 start 向后扫描，判断 reg 是否在被覆盖前被读取。
+ * 遇到 RET：R6/R7 视为活跃（返回值寄存器）。
+ * 遇到 label/分支：保守返回 true。 */
 static bool reg_read_before_write_or_end(List* instrs, int start, const char* reg) {
     if (!reg || !instrs) return false;
     
@@ -1704,99 +1561,38 @@ static bool reg_read_before_write_or_end(List* instrs, int start, const char* re
         AsmInstr* ins = (AsmInstr*)list_get(instrs, i);
         if (!ins) continue;
 
-        if (is_basic_block_barrier(ins)) {
-            if (ins->op && strcmp(ins->op, "RET") == 0) {
-                if (operands_equal(reg, "R7") || operands_equal(reg, "R6")) {
-                    return true;
-                }
-                return false;
-            }
-            return true;
-        }
+        if (ins->op && strcmp(ins->op, "RET") == 0)
+            return operands_equal(reg, "R7") || operands_equal(reg, "R6");
+
+        if (is_basic_block_barrier(ins)) return true;
         
-        // 检查是否是 RET 指令
-        if (ins->op && strcmp(ins->op, "RET") == 0) {
-            // 检查是否是返回值寄存器 R7 或 R6
-            if (operands_equal(reg, "R7") || operands_equal(reg, "R6")) {
-                return true;
-            }
-            return false;
-        }
-        
-        // 检查该寄存器是否被重新赋值（作为目标）
         if (is_mov(ins)) {
             const char* dst = get_operand(ins, 0);
-            if (is_indirect_operand(dst) && operand_reads_reg(dst, reg)) {
-                return true;
-            }
-            if (operands_equal(dst, reg)) {
-                return false; // 被重新赋值前没有被读取
-            }
+            if (is_indirect_operand(dst) && operand_reads_reg(dst, reg)) return true;
+            if (operands_equal(dst, reg)) return false;
         }
         
-        // 检查是否被作为源操作数读取
-        if (ins->args && ins->args->len > 0) {
-            // 第一个参数是目标，从第二个开始检查
-            for (int j = (is_mov(ins) ? 1 : 0); j < ins->args->len; j++) {
+        if (ins->args) {
+            int start_arg = is_mov(ins) ? 1 : 0;
+            for (int j = start_arg; j < ins->args->len; j++) {
                 const char* arg = (const char*)list_get(ins->args, j);
-                if (operand_reads_reg(arg, reg)) {
-                    return true; // 被读取了
-                }
+                if (operand_reads_reg(arg, reg)) return true;
             }
         }
     }
-    
     return false;
 }
 
-/* 窥孔优化：删除死代码 - MOV Rx, src 如果 Rx 之后没有被使用 */
+/* 死代码删除：MOV Rx, src，Rx 后续不被读取则删除 */
 static int peephole_dead_code(List* instrs, int start) {
     AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
-    
     if (!is_mov(ins)) return 0;
-    
     const char* dst = get_operand(ins, 0);
-    
-    // 只处理寄存器目标（R0-R7）
-    if (!dst || dst[0] != 'R' || dst[1] < '0' || dst[1] > '7') {
-        return 0;
-    }
-    
-    // 检查该寄存器在之后是否被读取
+    if (!IS_RX(dst)) return 0;
     if (!reg_read_before_write_or_end(instrs, start + 1, dst)) {
         remove_instr(instrs, start);
         return 1;
     }
-    
-    return 0;
-}
-
-/* 窥孔优化：SJMP L; L: -> 删除无效跳转 */
-static int peephole_sjmp_to_next_label(List* instrs, int start) {
-    if (start + 1 >= instrs->len) return 0;
-
-    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
-    AsmInstr* next = (AsmInstr*)list_get(instrs, start + 1);
-    if (!ins || !next || !ins->op || !next->op) return 0;
-
-    if (strcmp(ins->op, "SJMP") != 0) return 0;
-    if (!ins->args || ins->args->len < 1) return 0;
-    const char* target = (const char*)list_get(ins->args, 0);
-    if (!target) return 0;
-
-    size_t len = strlen(next->op);
-    if (len == 0 || next->op[len - 1] != ':') return 0;
-
-    char label[64];
-    if (len >= sizeof(label)) return 0;
-    strncpy(label, next->op, len - 1);
-    label[len - 1] = '\0';
-
-    if (strcmp(target, label) == 0) {
-        remove_instr(instrs, start);
-        return 1;
-    }
-
     return 0;
 }
 
@@ -1888,18 +1684,6 @@ static int peephole_self_mov(List* instrs, int start) {
     return 0;
 }
 
-static bool get_next_label_name(AsmInstr* ins, char* label, size_t label_size) {
-    size_t len;
-
-    if (!ins || !ins->op || !label || label_size == 0) return false;
-    len = strlen(ins->op);
-    if (len == 0 || ins->op[len - 1] != ':') return false;
-    if (len >= label_size) return false;
-    strncpy(label, ins->op, len - 1);
-    label[len - 1] = '\0';
-    return true;
-}
-
 static int peephole_jump_to_next_label(List* instrs, int start) {
     AsmInstr* ins;
     AsmInstr* next;
@@ -1915,7 +1699,7 @@ static int peephole_jump_to_next_label(List* instrs, int start) {
     if (!ins->args || ins->args->len < 1) return 0;
     target = (const char*)list_get(ins->args, 0);
     if (!target) return 0;
-    if (!get_next_label_name(next, label, sizeof(label))) return 0;
+    if (!get_label_name(next, label, sizeof(label))) return 0;
 
     if (strcmp(target, label) == 0) {
         remove_instr(instrs, start);
@@ -1942,8 +1726,8 @@ static int peephole_jump_to_following_label_cluster(List* instrs, int start) {
         AsmInstr* next = (AsmInstr*)list_get(instrs, i);
         char label[64];
 
-        if (!next || !next->op) return 0;
-        if (!get_next_label_name(next, label, sizeof(label))) return 0;
+        if (!next || !next->op) break;
+        if (!get_label_name(next, label, sizeof(label))) break;
         if (strcmp(target, label) == 0) {
             remove_instr(instrs, start);
             return 1;
@@ -1972,7 +1756,7 @@ static int peephole_thread_jump_chain(List* instrs, int start) {
         char label[64];
         const char* chained_target;
 
-        if (!get_next_label_name(label_ins, label, sizeof(label))) continue;
+        if (!get_label_name(label_ins, label, sizeof(label))) continue;
         if (strcmp(label, target) != 0) continue;
         if (!jump_ins || !jump_ins->op) return 0;
         if (!(strcmp(jump_ins->op, "SJMP") == 0 || strcmp(jump_ins->op, "LJMP") == 0 || strcmp(jump_ins->op, "AJMP") == 0)) return 0;
@@ -2069,6 +1853,75 @@ static int eliminate_dead_idata_spills(List* instrs) {
     return total_removed;
 }
 
+/* XDATA 死存储消除：6条 store 序列且对应地址从不被加载时删除 */
+static void eliminate_dead_xdata_stores(List* instrs) {
+    /* 收集所有被加载的 XDATA 地址基名 */
+    char loaded[64][128];
+    int loaded_cnt = 0;
+    for (int i = 0; i + 1 < instrs->len && loaded_cnt < 64; i++) {
+        AsmInstr* a = (AsmInstr*)list_get(instrs, i);
+        AsmInstr* b = (AsmInstr*)list_get(instrs, i + 1);
+        if (!a || !b || !is_mov(a)) continue;
+        if (!operands_equal(get_operand(a, 0), "DPTR")) continue;
+        const char* addr = get_operand(a, 1);
+        if (!addr || addr[0] != '#') continue;
+        if (!b->op || strcmp(b->op, "MOVX") != 0) continue;
+        if (!operands_equal(get_operand(b, 0), "A")) continue;
+
+        const char* s = addr + 1;
+        if (*s == '(') s++;
+        const char* end = s;
+        while (*end && *end != ' ' && *end != '+' && *end != ')') end++;
+        size_t sym_len = end - s;
+        if (!sym_len || sym_len >= 128) continue;
+        char sym[128]; memcpy(sym, s, sym_len); sym[sym_len] = '\0';
+        bool dup = false;
+        for (int j = 0; j < loaded_cnt; j++) if (strcmp(loaded[j], sym)==0) { dup=true; break; }
+        if (!dup) { strncpy(loaded[loaded_cnt], sym, 127); loaded[loaded_cnt++][127]='\0'; }
+    }
+
+    int dead_removed;
+    do {
+        dead_removed = 0;
+        for (int i = 0; i + 5 < instrs->len; i++) {
+            AsmInstr* i0 = (AsmInstr*)list_get(instrs, i);
+            AsmInstr* i1 = (AsmInstr*)list_get(instrs, i + 1);
+            AsmInstr* i2 = (AsmInstr*)list_get(instrs, i + 2);
+            AsmInstr* i3 = (AsmInstr*)list_get(instrs, i + 3);
+            AsmInstr* i4 = (AsmInstr*)list_get(instrs, i + 4);
+            AsmInstr* i5 = (AsmInstr*)list_get(instrs, i + 5);
+            if (!i0||!i1||!i2||!i3||!i4||!i5) continue;
+            if (!is_mov(i0) || !operands_equal(get_operand(i0,0),"DPTR")) continue;
+            const char* a0 = get_operand(i0, 1);
+            if (!a0 || a0[0] != '#') continue;
+            if (!is_mov(i1) || !operands_equal(get_operand(i1,0),"A")) continue;
+            if (!i2->op || strcmp(i2->op,"MOVX")!=0 ||
+                !operands_equal(get_operand(i2,0),"@DPTR")) continue;
+            if (!is_mov(i3) || !operands_equal(get_operand(i3,0),"DPTR")) continue;
+            if (!is_mov(i4) || !operands_equal(get_operand(i4,0),"A")) continue;
+            if (!i5->op || strcmp(i5->op,"MOVX")!=0 ||
+                !operands_equal(get_operand(i5,0),"@DPTR")) continue;
+
+            const char* s = a0 + 1;
+            if (*s == '(') s++;
+            const char* end = s;
+            while (*end && *end != ' ' && *end != '+' && *end != ')') end++;
+            size_t sym_len = end - s;
+            if (!sym_len || sym_len >= 128) continue;
+            char sym[128]; memcpy(sym, s, sym_len); sym[sym_len] = '\0';
+
+            bool is_loaded = false;
+            for (int j = 0; j < loaded_cnt; j++)
+                if (strcmp(loaded[j], sym)==0) { is_loaded=true; break; }
+            if (is_loaded) continue;
+
+            for (int k = 5; k >= 0; k--) remove_instr(instrs, i + k);
+            dead_removed++;
+            break;
+        }
+    } while (dead_removed);
+}
+
 /* 对单个section执行窥孔优化 */
 static void optimize_section(Section* sec) {
     if (!sec || !sec->asminstrs) return;
@@ -2106,9 +1959,6 @@ static void optimize_section(Section* sec) {
             removed = peephole_dead_mov_a(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
-            removed = peephole_consecutive_mov_a(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
             removed = peephole_fold_mov_a_to_mem(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
@@ -2118,24 +1968,16 @@ static void optimize_section(Section* sec) {
             removed = peephole_redundant_swap(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
-            // FIXME: 此优化会错误地删除需要的MOV A, Rx指令
-            // 启用更安全的 redundant_load（仅寄存器场景）
             removed = peephole_redundant_load(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
-            // 启用在 src 非内存时的 temp reg 消除优化
             removed = peephole_eliminate_temp_reg(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
-            // 复制传播：MOV Ra, src; ...; MOV Rb, Ra → MOV Rb, src; 删除 MOV Ra, src
             removed = peephole_copy_propagate(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
-            // 前向目标替换：MOV Rd, A; [中间]; MOV Rf, Rd → MOV Rf, A; [中间]; 删除 MOV Rf, Rd
             removed = peephole_forward_copy_to_dest(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
-            removed = peephole_mem_to_reg(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_idata_store_load_forward(sec->asminstrs, i);
@@ -2147,9 +1989,6 @@ static void optimize_section(Section* sec) {
             removed = peephole_xdata_store_load_forward(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
-            removed = peephole_mov_propagate(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
             removed = peephole_mov_reg_to_any(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
@@ -2159,8 +1998,6 @@ static void optimize_section(Section* sec) {
             removed = peephole_mov_chain(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
-            // FIXME: 该规则在当前寄存器分配/调用约定下仍可能误删关键MOV
-            // 启用死代码删除（仅寄存器目标，且未被后续读取）
             removed = peephole_dead_code(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
@@ -2178,140 +2015,12 @@ static void optimize_section(Section* sec) {
 
             removed = peephole_jump_to_following_label_cluster(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
-
-            removed = peephole_sjmp_to_next_label(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
         }
 
-        /* After each peephole pass, run IDATA dead spill elimination.
-         * This must happen AFTER peephole because peephole_idata_store_load_forward
-         * removes spill loads, making formerly live spill stores truly dead. */
-        if (eliminate_dead_idata_spills(sec->asminstrs) > 0) {
-            changed = 1;
-        }
+        if (eliminate_dead_idata_spills(sec->asminstrs) > 0) changed = 1;
     }
 
-    /* XDATA dead-store elimination pass (run AFTER peephole so that
-     * store-load-forward has already eliminated redundant loads, making
-     * formerly live stores truly dead):
-     * Pattern: 6 consecutive instructions:
-     *  [0] MOV DPTR, #sym
-     *  [1] MOV A, src   (any source: register or immediate)
-     *  [2] MOVX @DPTR, A
-     *  [3] MOV DPTR, #(sym + 1)
-     *  [4] MOV A, src2
-     *  [5] MOVX @DPTR, A
-     * where sym is not LOADED (no "MOV DPTR,#sym; MOVX A,@DPTR" anywhere in section)
-     */
-    {
-        List* instrs = sec->asminstrs;
-        /* Collect all XDATA addresses that are LOADED (MOVX A,@DPTR pattern) */
-        char loaded_addrs[64][128];
-        int loaded_cnt = 0;
-        for (int i = 0; i + 1 < instrs->len && loaded_cnt < 64; i++) {
-            AsmInstr* a = (AsmInstr*)list_get(instrs, i);
-            AsmInstr* b = (AsmInstr*)list_get(instrs, i + 1);
-            if (!a || !b) continue;
-            /* MOV DPTR, #addr */
-            if (!is_mov(a)) continue;
-            const char* dst_a = get_operand(a, 0);
-            const char* addr  = get_operand(a, 1);
-            if (!dst_a || strcmp(dst_a, "DPTR") != 0) continue;
-            if (!addr || addr[0] != '#') continue;
-            /* MOVX A, @DPTR  (load) */
-            if (!b->op || strcmp(b->op, "MOVX") != 0) continue;
-            const char* movx_dst = get_operand(b, 0);
-            if (!movx_dst || strcmp(movx_dst, "A") != 0) continue;
-            /* Record the base address (strip "+1" suffix for matching) */
-            const char* sym_start = addr + 1; /* skip '#' */
-            if (*sym_start == '(') sym_start++; /* skip optional '(' */
-            const char* sym_end = sym_start;
-            while (*sym_end && *sym_end != ' ' && *sym_end != '+' && *sym_end != ')') sym_end++;
-            size_t sym_len = sym_end - sym_start;
-            if (sym_len == 0 || sym_len >= 128) continue;
-            char sym[128];
-            strncpy(sym, sym_start, sym_len);
-            sym[sym_len] = '\0';
-            bool dup = false;
-            for (int j = 0; j < loaded_cnt; j++) {
-                if (strcmp(loaded_addrs[j], sym) == 0) { dup = true; break; }
-            }
-            if (!dup) {
-                strncpy(loaded_addrs[loaded_cnt], sym, 127);
-                loaded_addrs[loaded_cnt][127] = '\0';
-                loaded_cnt++;
-            }
-        }
-
-        int dead_removed = 1;
-        while (dead_removed) {
-            dead_removed = 0;
-            for (int i = 0; i + 5 < instrs->len; i++) {
-                AsmInstr* i0 = (AsmInstr*)list_get(instrs, i);
-                AsmInstr* i1 = (AsmInstr*)list_get(instrs, i + 1);
-                AsmInstr* i2 = (AsmInstr*)list_get(instrs, i + 2);
-                AsmInstr* i3 = (AsmInstr*)list_get(instrs, i + 3);
-                AsmInstr* i4 = (AsmInstr*)list_get(instrs, i + 4);
-                AsmInstr* i5 = (AsmInstr*)list_get(instrs, i + 5);
-                if (!i0||!i1||!i2||!i3||!i4||!i5) continue;
-                /* [0] MOV DPTR, #sym */
-                if (!is_mov(i0)) continue;
-                const char* d0 = get_operand(i0, 0);
-                const char* a0 = get_operand(i0, 1);
-                if (!d0 || strcmp(d0, "DPTR") != 0) continue;
-                if (!a0 || a0[0] != '#') continue;
-                /* [1] MOV A, <any src> */
-                if (!is_mov(i1)) continue;
-                const char* d1 = get_operand(i1, 0);
-                if (!d1 || strcmp(d1, "A") != 0) continue;
-                /* [2] MOVX @DPTR, A */
-                if (!i2->op || strcmp(i2->op, "MOVX") != 0) continue;
-                const char* d2 = get_operand(i2, 0);
-                if (!d2 || strcmp(d2, "@DPTR") != 0) continue;
-                /* [3] MOV DPTR, #(sym+1) */
-                if (!is_mov(i3)) continue;
-                const char* d3 = get_operand(i3, 0);
-                if (!d3 || strcmp(d3, "DPTR") != 0) continue;
-                /* [4] MOV A, <any src> */
-                if (!is_mov(i4)) continue;
-                const char* d4 = get_operand(i4, 0);
-                if (!d4 || strcmp(d4, "A") != 0) continue;
-                /* [5] MOVX @DPTR, A */
-                if (!i5->op || strcmp(i5->op, "MOVX") != 0) continue;
-                const char* d5 = get_operand(i5, 0);
-                if (!d5 || strcmp(d5, "@DPTR") != 0) continue;
-
-                /* Extract symbol name from a0 */
-                const char* sym_start2 = a0 + 1;
-                if (*sym_start2 == '(') sym_start2++;
-                const char* sym_end2 = sym_start2;
-                while (*sym_end2 && *sym_end2 != ' ' && *sym_end2 != '+' && *sym_end2 != ')') sym_end2++;
-                size_t sym_len2 = sym_end2 - sym_start2;
-                if (sym_len2 == 0 || sym_len2 >= 128) continue;
-                char sym2[128];
-                strncpy(sym2, sym_start2, sym_len2);
-                sym2[sym_len2] = '\0';
-
-                /* Skip if this address is ever loaded */
-                bool is_loaded = false;
-                for (int j = 0; j < loaded_cnt; j++) {
-                    if (strcmp(loaded_addrs[j], sym2) == 0) { is_loaded = true; break; }
-                }
-                if (is_loaded) continue;
-
-                /* Dead store: remove all 6 instructions */
-                remove_instr(instrs, i + 5);
-                remove_instr(instrs, i + 4);
-                remove_instr(instrs, i + 3);
-                remove_instr(instrs, i + 2);
-                remove_instr(instrs, i + 1);
-                remove_instr(instrs, i);
-                dead_removed++;
-                break;
-            }
-        }
-    }
-
+    eliminate_dead_xdata_stores(sec->asminstrs);
 }
 
 void c51_optimize(C51GenContext* ctx, ObjFile* obj)

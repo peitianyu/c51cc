@@ -1,4 +1,4 @@
-#include "c51_isel_regalloc.h"
+﻿#include "c51_isel_regalloc.h"
 #include "c51_isel_internal.h"
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +35,7 @@ int c51_abi_type_size(const Ctype* type) {
  * 线性扫描寄存器分配实现
  * ============================================================ */
 
-/* 全局线性扫描上下文（在函数处理期间使用） */
+/* 全局线性扫描上下文（在函数处理期间使用�?*/
 static LinearScanContext* g_linscan_ctx = NULL;
 static C51GenContext* g_gen_ctx = NULL;
 
@@ -48,15 +48,12 @@ typedef struct {
 } SpillSlotInfo;
 
 /* Keil约定下，R6/R7主要承担返回值与参数传递，
- * 临时值优先使用 R0-R5，避免与ABI关键寄存器冲突。 */
+ * 临时值优先使�?R0-R5，避免与ABI关键寄存器冲突�?*/
 static const int k_temp_reg_min = C51_ALLOCATABLE_REG_MIN;
 static const int k_temp_reg_max = C51_ALLOCATABLE_REG_MAX;
 
 /* 比较函数：按start时间排序活跃区间 */
 static int compare_intervals(const void* a, const void* b) {
-    /* 统计信息（用于调试/性能分析） */
-    int peak_live = 0;
-    int spill_count = 0;
     int idx_a = *(const int*)a;
     int idx_b = *(const int*)b;
     
@@ -98,11 +95,11 @@ void linscan_destroy(LinearScanContext* lsc) {
     free(lsc);
 }
 
-/* 递归获取值定义的指令序号（用于PHI） */
+/* 递归获取值定义的指令序号（用于PHI�?*/
 static int get_value_def_idx(ValueName val, Func* func, int* idx_map) {
     if (!func) return 0;
     
-    /* 快速查询已计算的 */
+    /* 快速查询已计算�?*/
     if (idx_map && val > 0 && val < 1000000) {
         int cached = idx_map[val];
         if (cached >= 0) return cached;
@@ -156,7 +153,7 @@ static int get_value_interval_size(C51GenContext* genctx, Func* func, ValueName 
     return 1;
 }
 
-/* 为函数的所有指令计算活跃区间 */
+/* 为函数的所有指令计算活跃区�?*/
 void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext* genctx) {
     if (!lsc || !func) return;
     (void)genctx;
@@ -324,7 +321,7 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
     free(block_edge_idx);
 }
 
-/* 释放寄存器中过期的值 */
+/* 释放寄存器中过期的�?*/
 static void expire_old_intervals(LinearScanContext* lsc, int current_instr) {
     for (int r = 0; r < 8; r++) {
         if (lsc->active_regs[r] >= 0 && lsc->active_reg_end[r] <= current_instr) {
@@ -442,7 +439,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
     /* 按start时间排序 */
     qsort(lsc->sorted_intervals, lsc->interval_count, sizeof(int), compare_intervals);
     
-    /* 清除活跃寄存器列表 */
+    /* 清除活跃寄存器列�?*/
     for (int r = 0; r < 8; r++) {
         lsc->active_regs[r] = -1;
         lsc->active_reg_end[r] = -1;
@@ -451,7 +448,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
     SpillSlotInfo* spill_slots = NULL;
     int spill_slot_count = 0;
     int spill_slot_capacity = 0;
-    /* 统计信息（用于调试/性能分析） */
+    /* 统计信息（用于调�?性能分析�?*/
     int peak_live = 0;
     int spill_count = 0;
     
@@ -460,7 +457,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
         int idx = lsc->sorted_intervals[i];
         LiveInterval* interval = &lsc->intervals[idx];
 
-        /* 释放过期的值 */
+        /* 释放过期的�?*/
         expire_old_intervals(lsc, interval->start);
 
         /* 初始化寄存器为未分配 */
@@ -504,8 +501,8 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
             }
         }
 
-        /* 返回值寄存器保护：如果是函数返回值，生命周期内禁止分配R7/R6等 */
-        // TODO: 可根据函数返回类型进一步保护R7/R6/R5/R4等
+        /* 返回值寄存器保护：如果是函数返回值，生命周期内禁止分配R7/R6�?*/
+        // TODO: 可根据函数返回类型进一步保护R7/R6/R5/R4�?
 
         bool force_spill = false;
         if (genctx && genctx->current_func && interval->size <= 2) {
@@ -525,8 +522,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
 
         /* 如果没有空闲寄存器，直接spill，避免多字节值被部分抢占后破坏布局 */
         if (!allocated) {
-            if (!allocated) {
-                /* 无空寄存器可用：将此区间 spill 到内存（生成一个临时 spill 符号） */
+                /* 无空寄存器可用：将此区间 spill 到内存（生成一个临�?spill 符号�?*/
                 if (genctx) {
                     SectionKind use_kind = genctx->spill_section;
                     if (genctx->spill_use_xdata_for_large && interval->size > 1) {
@@ -570,14 +566,14 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                     char* key2 = int_to_key(interval->val);
                     dict_put(genctx->value_to_spill, key2, strdup(slot_name));
 
-                    /* 在 value_to_reg 中标记为已 spill（使用 -3 表示） */
+                    /* �?value_to_reg 中标记为�?spill（使�?-3 表示�?*/
                     int* rptr = malloc(sizeof(int));
-                    *rptr = -3;
+                    *rptr = SPILL_REG;
                     char* key3 = int_to_key(interval->val);
                     dict_put(genctx->value_to_reg, key3, rptr);
 
                     interval->spill_slot = sid;
-                    interval->reg = -3; /* 表示溢出 */
+                    interval->reg = SPILL_REG; /* 表示溢出 */
                     /* 统计溢出次数 */
                     spill_count++;
                     continue;
@@ -586,7 +582,6 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                 /* 兜底：避免返回负寄存器导致后续错误默认到R7 */
                 interval->reg = k_temp_reg_min;
                 occupy_interval_regs(lsc, interval, k_temp_reg_min);
-            }
         }
 
         /* 更新当前活跃寄存器数并记录峰值（每个区间处理后） */
@@ -600,7 +595,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
 
     }
 
-    /* 将分配结果存储到value_to_reg字典中 */
+    /* 将分配结果存储到value_to_reg字典�?*/
     if (genctx->value_to_reg) {
         for (int i = 0; i < lsc->interval_count; i++) {
             LiveInterval* iv = &lsc->intervals[i];
@@ -620,7 +615,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
             }
         }
 
-        /* 更新当前活跃寄存器数并记录峰值 */
+        /* 更新当前活跃寄存器数并记录峰�?*/
         int curr_active = 0;
         for (int rr = 0; rr < 8; rr++) {
             if (lsc->active_regs[rr] >= 0) curr_active++;
@@ -640,7 +635,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
             lsc->interval_count);
         for (int i = 0; i < lsc->interval_count; i++) {
             LiveInterval* iv = &lsc->intervals[i];
-            if (iv->reg == -3)
+            if (iv->reg == SPILL_REG)
                 fprintf(stderr, "  v%d: start=%d end=%d size=%d SPILL\n",
                     iv->val, iv->start, iv->end, iv->size);
             else
@@ -659,7 +654,7 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
     }
     /* -4 means rematerializable CONST: no physical register, skip dynamic alloc */
     if (existing == -4) return -1;
-    if (existing >= 0 || existing == -2 || existing == -3) {
+    if (existing >= 0 || existing == ACC_REG || existing == SPILL_REG) {
         /* If linear scan already assigned a register, ensure the
          * isel context marks those physical registers as busy so
          * temporaries won't clobber them. This prevents reusing a
@@ -679,7 +674,7 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
 
     /* 
      * 如果值还没被分配（existing < 0 且不等于 -2），
-     * 尝试在残留的未被占用的寄存器中分配
+     * 尝试在残留的未被占用的寄存器中分�?
      */
     for (int reg = k_temp_reg_min; reg <= k_temp_reg_max; reg++) {
         if (reg + size - 1 > k_temp_reg_max) continue;
@@ -699,14 +694,11 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
             *reg_num = reg;
             char* key = int_to_key(val);
             dict_put(isel->ctx->value_to_reg, key, reg_num);
-
-            /* allocation recorded */
-
             return reg;
         }
     }
 
-    /* 兜底：避免-1触发错误默认寄存器路径 */
+    /* 兜底：避�?1触发错误默认寄存器路�?*/
     {
         int fallback = k_temp_reg_min;
         for (int j = 0; j < size && (fallback + j) <= k_temp_reg_max; j++) {
@@ -717,25 +709,24 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
         *reg_num = fallback;
         char* key = int_to_key(val);
         dict_put(isel->ctx->value_to_reg, key, reg_num);
-        /* fallback allocation recorded */
         return fallback;
     }
 }
 
-// 参数寄存器映射表（按参数位置索引 0,1,2）
+// 参数寄存器映射表（按参数位置索引 0,1,2�?
 static const int regs_size1[] = {7, 5, 3};           // 1字节：R7, R5, R3
 static const int regs_size2_high[] = {6, 4, 2};      // 2字节高字节：R6, R4, R2
 static const int regs_size2_low[]  = {7, 5, 3};      // 2字节低字节：R7, R5, R3
-static const int regs_size3[] = {1, 2, 3};           // 3字节指针：R1,R2,R3（仅第1个参数可用）
-static const int regs_size4[] = {4, 5, 6, 7};        // 4字节long/float：R4-R7（仅第1个参数可用）
+static const int regs_size3[] = {1, 2, 3};           // 3字节指针：R1,R2,R3（仅�?个参数可用）
+static const int regs_size4[] = {4, 5, 6, 7};        // 4字节long/float：R4-R7（仅�?个参数可用）
 
 /**
  * 获取指定位置和大小参数的期望寄存器组
- * @param idx       参数位置（0表示第一个）
+ * @param idx       参数位置�?表示第一个）
  * @param size      参数大小（字节）
- * @param regs_out  输出寄存器数组（需至少能存4个int）
- * @param count_out 输出寄存器个数
- * @return          是否有期望的寄存器组（若位置超出或类型不支持返回false）
+ * @param regs_out  输出寄存器数组（需至少能存4个int�?
+ * @param count_out 输出寄存器个�?
+ * @return          是否有期望的寄存器组（若位置超出或类型不支持返回false�?
  */
 static bool get_param_register_set(int idx, int size, int* regs_out, int* count_out) {
     if (size == 1) {                     // char / 1字节指针
@@ -767,6 +758,46 @@ static bool get_param_register_set(int idx, int size, int* regs_out, int* count_
     return false;
 }
 
+/* 将参数降级为内存传递：创建 __param_F_N 符号并写入 value_to_addr/value_to_reg */
+static void spill_param_to_memory(C51GenContext* gen, Func* f,
+                                  const char* param_name, int param_pos, int size) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "__param_%s_%d", f->name, param_pos);
+    char* name = strdup(buf);
+
+    /* 找到对应 PARAM 指令 */
+    Instr* param_ins = NULL;
+    if (f->entry && f->entry->instrs) {
+        for (Iter it = list_iter(f->entry->instrs); !iter_end(it);) {
+            Instr* ii = iter_next(&it);
+            if (ii && ii->op == IROP_PARAM && ii->labels && ii->labels->len > 0) {
+                const char* nm = list_get(ii->labels, 0);
+                if (nm && strcmp(nm, param_name) == 0) { param_ins = ii; break; }
+            }
+        }
+    }
+    if (!param_ins) { free(name); return; }
+
+    char* key = int_to_key(param_ins->dest);
+    dict_put(gen->value_to_addr, key, name);
+    int* rptr = malloc(sizeof(int)); *rptr = SPILL_REG;
+    char* k2 = int_to_key(param_ins->dest);
+    dict_put(gen->value_to_reg, k2, rptr);
+
+    if (gen->obj) {
+        SectionKind use_kind = gen->spill_section;
+        if (gen->spill_use_xdata_for_large && size > 1) use_kind = SEC_XDATA;
+        const char* sec_name = "?DT?";
+        if (use_kind == SEC_IDATA) sec_name = "?ID?";
+        else if (use_kind == SEC_XDATA) sec_name = "?XD?";
+        int sec_idx = obj_add_section(gen->obj, sec_name, use_kind, 0, 1);
+        Section* sec = obj_get_section(gen->obj, sec_idx);
+        int offset = sec->size;
+        section_append_zeros(sec, size);
+        obj_add_symbol(gen->obj, name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_LOCAL);
+    }
+}
+
 /**
  * 为函数参数分配寄存器（遵循Keil C51约定）
  */
@@ -776,27 +807,27 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
     int n = list_len(f->params);
     if (n == 0) return;
 
-    bool used_regs[8] = {false};          // 跟踪已分配的寄存器
-    /* 为避免不同大小的参数互相“挤占”导致语义上首个 int 未落在 R6:R7，
-     * 我们按参数大小类别维护独立的索引：
-     *  - size1_idx: 第几个 1 字节参数
-     *  - size2_idx: 第几个 2 字节参数
-     *  - size3_idx: 第几个 3 字节参数
-     *  - size4_idx: 第几个 4 字节参数
-     * 这样分配时会保证 "第一个 2 字节参数" 始终使用 R6:R7（若可用）。
+    bool used_regs[8] = {false};          // 跟踪已分配的寄存�?
+    /* 为避免不同大小的参数互相“挤占”导致语义上首个 int 未落�?R6:R7�?
+     * 我们按参数大小类别维护独立的索引�?
+     *  - size1_idx: 第几�?1 字节参数
+     *  - size2_idx: 第几�?2 字节参数
+     *  - size3_idx: 第几�?3 字节参数
+     *  - size4_idx: 第几�?4 字节参数
+     * 这样分配时会保证 "第一�?2 字节参数" 始终使用 R6:R7（若可用）�?
      */
     int size1_idx = 0, size2_idx = 0, size3_idx = 0, size4_idx = 0;
     Iter pit = list_iter(f->params);
     Iter tit = list_iter(f->param_types);
 
-    // 遍历所有参数（按声明顺序），但为每个大小类别计算位置索引
+    // 遍历所有参数（按声明顺序），但为每个大小类别计算位置索�?
     int param_pos = 0;
     while (!iter_end(pit) && !iter_end(tit)) {
         char* param_name = iter_next(&pit);
         Ctype* param_type = iter_next(&tit);
         if (!param_name || !param_type) continue;
 
-        int size = c51_abi_type_size(param_type);  // ABI 视角下的参数字节数
+        int size = c51_abi_type_size(param_type);  // ABI 视角下的参数字节�?
         int expected_regs[4];
         int reg_count;
 
@@ -809,54 +840,14 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
         // 获取期望的寄存器组（按该大小类别的序号）
         bool has_regs = get_param_register_set(class_idx, size, expected_regs, &reg_count);
         if (!has_regs) {
-            /* 该大小类别的此序号没有可用寄存器组，
-             * 将该参数降级为内存传递：为其创建一个符号并记录到 value_to_addr，
-             * 同时在 value_to_reg 中标记为已 spill（-3），使被调函数从该符号加载。 */
-            if (isel && isel->ctx) {
-                C51GenContext* gen = isel->ctx;
-                char buf[128];
-                snprintf(buf, sizeof(buf), "__param_%s_%d", f->name, param_pos);
-                char* name = strdup(buf);
-                char* key = NULL;
-                Instr* param_ins_loc = NULL;
-                if (f->entry && f->entry->instrs) {
-                    for (Iter it2 = list_iter(f->entry->instrs); !iter_end(it2);) {
-                        Instr* ii = iter_next(&it2);
-                        if (ii && ii->op == IROP_PARAM && ii->labels && ii->labels->len > 0) {
-                            const char* nm = list_get(ii->labels, 0);
-                            if (nm && strcmp(nm, param_name) == 0) { param_ins_loc = ii; break; }
-                        }
-                    }
-                }
-                if (param_ins_loc) {
-                    key = int_to_key(param_ins_loc->dest);
-                    dict_put(gen->value_to_addr, key, name);
-                    int* rptr = malloc(sizeof(int)); *rptr = -3;
-                    char* k2 = int_to_key(param_ins_loc->dest);
-                    dict_put(gen->value_to_reg, k2, rptr);
-
-                    if (gen->obj) {
-                        int size_bytes = size;
-                        SectionKind use_kind = gen->spill_section;
-                        if (gen->spill_use_xdata_for_large && size_bytes > 1) use_kind = SEC_XDATA;
-                        const char* sec_name = "?DT?";
-                        if (use_kind == SEC_IDATA) sec_name = "?ID?";
-                        else if (use_kind == SEC_XDATA) sec_name = "?XD?";
-                        int sec_idx = obj_add_section(gen->obj, sec_name, use_kind, 0, 1);
-                        Section* sec = obj_get_section(gen->obj, sec_idx);
-                        int offset = sec->size;
-                        section_append_zeros(sec, size_bytes);
-                        obj_add_symbol(gen->obj, name, SYM_DATA, sec_idx, offset, size_bytes, SYM_FLAG_LOCAL);
-                    }
-                } else {
-                    free(name);
-                }
-            }
+            /* 该大小类别的此序号没有可用寄存器组，降级为内存传递 */
+            if (isel && isel->ctx)
+                spill_param_to_memory(isel->ctx, f, param_name, param_pos, size);
             param_pos++;
             continue;
         }
 
-        // 检查期望寄存器组是否全部空闲
+        // 检查期望寄存器组是否全部空�?
         bool all_free = true;
         for (int j = 0; j < reg_count; j++) {
             if (used_regs[expected_regs[j]]) {
@@ -866,45 +857,9 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
         }
 
         if (!all_free) {
-            /* 冲突：将该参数降级为内存传递（创建符号并记录），然后继续处理下一个参数 */
-            if (isel && isel->ctx) {
-                C51GenContext* gen = isel->ctx;
-                char buf[128];
-                snprintf(buf, sizeof(buf), "__param_%s_%d", f->name, param_pos);
-                char* name = strdup(buf);
-                Instr* param_ins_loc = NULL;
-                if (f->entry && f->entry->instrs) {
-                    for (Iter it2 = list_iter(f->entry->instrs); !iter_end(it2);) {
-                        Instr* ii = iter_next(&it2);
-                        if (ii && ii->op == IROP_PARAM && ii->labels && ii->labels->len > 0) {
-                            const char* nm = list_get(ii->labels, 0);
-                            if (nm && strcmp(nm, param_name) == 0) { param_ins_loc = ii; break; }
-                        }
-                    }
-                }
-                if (param_ins_loc) {
-                    char* key = int_to_key(param_ins_loc->dest);
-                    dict_put(gen->value_to_addr, key, name);
-                    int* rptr = malloc(sizeof(int)); *rptr = -3;
-                    char* k2 = int_to_key(param_ins_loc->dest);
-                    dict_put(gen->value_to_reg, k2, rptr);
-                    if (gen->obj) {
-                        int size_bytes = size;
-                        SectionKind use_kind = gen->spill_section;
-                        if (gen->spill_use_xdata_for_large && size_bytes > 1) use_kind = SEC_XDATA;
-                        const char* sec_name = "?DT?";
-                        if (use_kind == SEC_IDATA) sec_name = "?ID?";
-                        else if (use_kind == SEC_XDATA) sec_name = "?XD?";
-                        int sec_idx = obj_add_section(gen->obj, sec_name, use_kind, 0, 1);
-                        Section* sec = obj_get_section(gen->obj, sec_idx);
-                        int offset = sec->size;
-                        section_append_zeros(sec, size_bytes);
-                        obj_add_symbol(gen->obj, name, SYM_DATA, sec_idx, offset, size_bytes, SYM_FLAG_LOCAL);
-                    }
-                } else {
-                    free(name);
-                }
-            }
+            /* 冲突：将该参数降级为内存传递 */
+            if (isel && isel->ctx)
+                spill_param_to_memory(isel->ctx, f, param_name, param_pos, size);
             param_pos++;
             continue;
         }
@@ -925,7 +880,7 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
         }
 
         if (param_ins) {
-            // 分配寄存器：将期望组全部标记为占用
+            // 分配寄存器：将期望组全部标记为占�?
             for (int j = 0; j < reg_count; j++) {
                 int r = expected_regs[j];
                 used_regs[r] = true;
@@ -933,7 +888,7 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
 
             if (size <= 2 && isel && isel->ctx) {
                 /* Check if this parameter needs to be addressable (any ADDR @param_name used).
-                   If not, keep it in registers — no __arg_N memory slot needed. */
+                   If not, keep it in registers �?no __arg_N memory slot needed. */
                 bool param_needs_addr = false;
                 if (f->blocks) {
                     for (Iter bbit = list_iter(f->blocks); !iter_end(bbit) && !param_needs_addr;) {
@@ -965,7 +920,7 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
                     dict_put(gen->value_to_addr, addr_key, strdup(buf));
 
                     int* reg_num = malloc(sizeof(int));
-                    *reg_num = -3;
+                    *reg_num = SPILL_REG;
                     char* reg_key = int_to_key(param_ins->dest);
                     dict_put(gen->value_to_reg, reg_key, reg_num);
 
@@ -990,7 +945,7 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
             }
         }
 
-        // 增加对应大小类别的索引
+        // 增加对应大小类别的索�?
         if (size == 1) size1_idx++;
         else if (size == 2) size2_idx++;
         else if (size == 3) size3_idx++;
