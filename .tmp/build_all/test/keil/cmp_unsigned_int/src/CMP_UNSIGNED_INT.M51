@@ -1,0 +1,40 @@
+BL51 BANKED LINKER/LOCATER V6.22.2.0                                                    04/03/2026  11:40:45  PAGE 1
+
+
+BL51 BANKED LINKER/LOCATER V6.22.2.0, INVOKED BY:
+D:\WS\TEST\C51CC\_TOOLS\KEIL\C51\BIN\BL51.EXE CMP_UNSIGNED_INT.OBJ, STARTUP.OBJ, C51S.LIB TO CMP_UNSIGNED_INT.ABS
+
+
+INPUT MODULES INCLUDED:
+  CMP_UNSIGNED_INT.OBJ (CMP_UNSIGNED_INT)
+  STARTUP.OBJ (?C_STARTUP)
+
+
+LINK MAP OF MODULE:  CMP_UNSIGNED_INT.ABS (CMP_UNSIGNED_INT)
+
+
+            TYPE    BASE      LENGTH    RELOCATION   SEGMENT NAME
+            -----------------------------------------------------
+
+            * * * * * * *   D A T A   M E M O R Y   * * * * * * *
+            REG     0000H     0008H     ABSOLUTE     "REG BANK 0"
+            IDATA   0008H     0001H     UNIT         ?STACK
+
+            * * * * * * *   C O D E   M E M O R Y   * * * * * * *
+            CODE    0000H     0003H     ABSOLUTE     
+                    0003H     07FDH                  *** GAP ***
+            CODE    0800H     0012H     UNIT         ?PR?_CMP_UNSIGNED_EQ?CMP_UNSIGNED_INT
+            CODE    0812H     0010H     UNIT         ?PR?_CMP_UNSIGNED_NE?CMP_UNSIGNED_INT
+            CODE    0822H     000FH     UNIT         ?PR?_CMP_UNSIGNED_LT?CMP_UNSIGNED_INT
+            CODE    0831H     000FH     UNIT         ?PR?_CMP_UNSIGNED_LE?CMP_UNSIGNED_INT
+            CODE    0840H     000FH     UNIT         ?PR?_CMP_UNSIGNED_GT?CMP_UNSIGNED_INT
+            CODE    084FH     000FH     UNIT         ?PR?_CMP_UNSIGNED_GE?CMP_UNSIGNED_INT
+            CODE    085EH     000CH     UNIT         ?C_C51STARTUP
+            CODE    086AH     0004H     UNIT         ?PR?MAIN?CMP_UNSIGNED_INT
+
+******************************************************************************
+* RESTRICTED VERSION WITH 0800H BYTE CODE SIZE LIMIT; USED: 0071H BYTE ( 5%) *
+******************************************************************************
+
+Program Size: data=9.0 xdata=0 code=113
+LINK/LOCATE RUN COMPLETE.  0 WARNING(S),  0 ERROR(S)

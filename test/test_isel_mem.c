@@ -1,41 +1,41 @@
-// ============================================
-// 精简 C51 存储空间与 SFR 测试套件
-// ============================================
+/* ============================================ */
+/* 精简 C51 存储空间与 SFR 测试套件 */
+/* ============================================ */
 
-// ----- 1. 基础 SFR 定义 (仅保留实际使用的) -----
+/* ----- 1. 基础 SFR 定义 (仅保留实际使用的) ----- */
 register char  P1      = 0x90;
 register char  SCON    = 0x98;
 register char  SBUF    = 0x99;
 register char  IE      = 0xA8;
 register char  TCON    = 0x88;
 
-// ----- 2. SBIT 定义（位寻址）-----
-register bool  P1_0    = 0x90;  // P1.0
-register bool  P1_7    = 0x97;  // P1.7
-register bool  EA      = 0xAF;  // IE.7
-register bool  ES      = 0xAC;  // IE.4
-register bool  TR0     = 0x8C;  // TCON.4
-register bool  TI      = 0x99;  // SCON.1
+/* ----- 2. SBIT 定义（位寻址）----- */
+register bool  P1_0    = 0x90;  /* P1.0 */
+register bool  P1_7    = 0x97;  /* P1.7 */
+register bool  EA      = 0xAF;  /* IE.7 */
+register bool  ES      = 0xAC;  /* IE.4 */
+register bool  TR0     = 0x8C;  /* TCON.4 */
+register bool  TI      = 0x99;  /* SCON.1 */
 
-// ----- 3. 各存储区变量 -----
+/* ----- 3. 各存储区变量 ----- */
 unsigned char data   g_data   = 0x01;
 unsigned char idata  g_idata  = 0x02;
 unsigned char xdata  g_xdata  = 0x03;
 unsigned char code   g_code   = 0x04;
 
-// ----- 4. 位寻址区变量 -----
+/* ----- 4. 位寻址区变量 ----- */
 unsigned char  g_bdata  = 0x00;
 register bool  g_bit0 = 0x00;
 register bool  g_bit7 = 0x07;
 
-// // ----- 5. 指针测试 -----
+/* // ----- 5. 指针测试 ----- */
 unsigned data  char * ptr_data;
 unsigned idata char * ptr_idata;
 unsigned xdata char * ptr_xdata;
 unsigned code  char * ptr_code;
-// unsigned char *cod = "Hello, Code Space!";
+/* unsigned char *cod = "Hello, Code Space!"; */
 
-// ----- 6. 基础存储区访问测试 -----
+/* ----- 6. 基础存储区访问测试 ----- */
 char test_data_rw(char v) {
     g_data = v;
     g_data++;
@@ -51,15 +51,15 @@ int sub3(int a, int b, int c) {
 }
 
 int test_idata_rw(int v) {
-    g_idata = (unsigned char)v;
     unsigned char idata local = g_idata;
+    g_idata = (unsigned char)v;
     g_idata = local - 2;
     return g_idata;
 }
 
 char test_xdata_rw(char v) {
-    g_xdata = (unsigned char)v;
     unsigned char xdata local = g_xdata;
+    g_xdata = (unsigned char)v;
     g_xdata = local - 1;
     return g_xdata;
 }
@@ -68,7 +68,7 @@ int test_code_read(void) {
     return g_code + 1;
 }
 
-// ----- 7. 位操作测试 -----
+/* ----- 7. 位操作测试 ----- */
 int test_bit_operations(void) {
     int result = 0;
     
@@ -90,7 +90,7 @@ int test_bit_operations(void) {
     return result;
 }
 
-// ----- 8. SFR 复杂操作测试 -----
+/* ----- 8. SFR 复杂操作测试 ----- */
 int test_sfr_complex(int v) {
     int result = 0;
     
@@ -104,7 +104,7 @@ int test_sfr_complex(int v) {
     return result;
 }
 
-// ----- 9. 中断控制测试 -----
+/* ----- 9. 中断控制测试 ----- */
 int test_interrupt_control(int enable) {
     int old_state = EA;
     
@@ -120,7 +120,7 @@ int test_interrupt_control(int enable) {
     return old_state;
 }
 
-// ----- 10. 指针操作测试 -----
+/* ----- 10. 指针操作测试 ----- */
 int test_pointers(void) {
     int result = 0;
     
@@ -142,7 +142,7 @@ int test_pointers(void) {
     return result;
 }
 
-// ----- 11. 条件表达式与存储区 -----
+/* ----- 11. 条件表达式与存储区 ----- */
 int test_conditional_ops(int flag) {
     unsigned char data a = 0x10;
     unsigned char data b = 0x20;
@@ -162,7 +162,7 @@ int test_conditional_ops(int flag) {
     return g_bdata;
 }
 
-// ----- 12. 混合存储区运算 -----
+/* ----- 12. 混合存储区运算 ----- */
 int test_mixed_spaces(void) {
     unsigned char data  d = 5;
     unsigned char idata i = 10;
@@ -180,21 +180,21 @@ int test_mixed_spaces(void) {
     return (int)g_data + g_idata + g_xdata;
 }
 
-// ----- 13. 边界与别名测试 -----
+/* ----- 13. 边界与别名测试 ----- */
 int test_aliasing(void) {
     register char *p = 0x20;
+    unsigned char val = g_bdata;
+    unsigned char val2 = *p;
     g_bdata = 0xA5;
     
     g_bit0 = 0;
     g_bit7 = 0;
     
-    unsigned char val = g_bdata;
-    unsigned char val2 = *p;
     
     return (val == val2) ? val : -1;
 }
 
-// ----- 14. 压力测试：复杂控制流 -----
+/* ----- 14. 压力测试：复杂控制流 ----- */
 int test_control_flow(int n) {
     int sum = 0;
     int i;
@@ -237,7 +237,7 @@ void puts(char *s) {
     while (*s) putc(*s++);
 }
 
-// ===== 主函数：汇总测试 =====
+/* ===== 主函数：汇总测试 ===== */
 int main(void) {
     int result = 0;
     

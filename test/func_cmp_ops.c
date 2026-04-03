@@ -6,3 +6,8 @@ char cmp_ops(char a, char b) {
          + (a >  b) * 16
          + (a >= b) * 32;
 }
+
+int main()
+{
+    return 0;
+}

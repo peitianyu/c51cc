@@ -49,21 +49,21 @@ char irop_casts_and_ptrs(char a) {
 
     /* BITCAST: 通过 union 把 float 的位解释为 char */
     union { float f; char i; } ub;
-    ub.f = 1.5f;
     char bitcast_i = ub.i;                  /* BITCAST */
-
-    /* INTTOPTR / PTRTOINT */
     void *p = (void*)(int)0x4000;           /* INTTOPTR */
     int ip = (int)&a;                       /* PTRTOINT */
-
-    /* OFFSET / LOAD / STORE */
     char arr[4] = {1,2,3,4};
     char *ptr = &arr[1];                    /* ADDR */
     char load = ptr[0];                     /* LOAD / OFFSET */
+    char sel = (a > 0) ? a : -a;            /* SELECT */
+    ub.f = 1.5f;
+
+    /* INTTOPTR / PTRTOINT */
+
+    /* OFFSET / LOAD / STORE */
     ptr[0] = load + 7;                      /* STORE */
 
     /* SELECT (三元运算) */
-    char sel = (a > 0) ? a : -a;            /* SELECT */
 
     /* 将部分结果用于返回，保证变量不被优化掉 */
     return tc + (char)uz + ss + bitcast_i + load + sel;

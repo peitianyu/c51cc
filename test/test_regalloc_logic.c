@@ -20,3 +20,8 @@ int reg_logic(int a, int b, int c, int d) {
     return mix_logic_sink(c1 + c2, c3 + c4, c5 + c6, v1, v7, v8)
          + v2 + v3 + v4 + v5 + v6;
 }
+
+int main() 
+{
+    return 0;
+}

@@ -1,0 +1,381 @@
+; arith_ext_int.SRC generated from: arith_ext_int.c
+; COMPILER INVOKED BY:
+;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe arith_ext_int.c OBJECT(arith_ext_int.obj) SRC
+
+
+NAME	ARITH_EXT_INT
+
+?PR?_add_overflow_signed?ARITH_EXT_INT   SEGMENT CODE 
+?PR?_add_overflow_unsigned?ARITH_EXT_INT SEGMENT CODE 
+?PR?_add_with_const?ARITH_EXT_INT        SEGMENT CODE 
+?PR?_addu_with_const?ARITH_EXT_INT       SEGMENT CODE 
+?PR?_sub_borrow_signed?ARITH_EXT_INT     SEGMENT CODE 
+?PR?_sub_borrow_unsigned?ARITH_EXT_INT   SEGMENT CODE 
+?PR?_mul_signed?ARITH_EXT_INT            SEGMENT CODE 
+?PR?_mul_unsigned?ARITH_EXT_INT          SEGMENT CODE 
+?PR?_div_signed?ARITH_EXT_INT            SEGMENT CODE 
+?PR?_mod_signed?ARITH_EXT_INT            SEGMENT CODE 
+?PR?_div_unsigned?ARITH_EXT_INT          SEGMENT CODE 
+?PR?_mod_unsigned?ARITH_EXT_INT          SEGMENT CODE 
+?PR?_shl_int?ARITH_EXT_INT               SEGMENT CODE 
+?PR?_shr_signed?ARITH_EXT_INT            SEGMENT CODE 
+?PR?_shr_unsigned?ARITH_EXT_INT          SEGMENT CODE 
+?PR?_mixed_signed_unsigned?ARITH_EXT_INT SEGMENT CODE 
+?PR?_mixed_unsigned_signed?ARITH_EXT_INT SEGMENT CODE 
+?PR?add_min_max?ARITH_EXT_INT            SEGMENT CODE 
+?PR?sub_min_max?ARITH_EXT_INT            SEGMENT CODE 
+?PR?main?ARITH_EXT_INT                   SEGMENT CODE 
+	EXTRN	CODE (?C?IMUL)
+	EXTRN	CODE (?C?SIDIV)
+	EXTRN	CODE (?C?UIDIV)
+	EXTRN	CODE (?C_STARTUP)
+	PUBLIC	main
+	PUBLIC	sub_min_max
+	PUBLIC	add_min_max
+	PUBLIC	_mixed_unsigned_signed
+	PUBLIC	_mixed_signed_unsigned
+	PUBLIC	_shr_unsigned
+	PUBLIC	_shr_signed
+	PUBLIC	_shl_int
+	PUBLIC	_mod_unsigned
+	PUBLIC	_div_unsigned
+	PUBLIC	_mod_signed
+	PUBLIC	_div_signed
+	PUBLIC	_mul_unsigned
+	PUBLIC	_mul_signed
+	PUBLIC	_sub_borrow_unsigned
+	PUBLIC	_sub_borrow_signed
+	PUBLIC	_addu_with_const
+	PUBLIC	_add_with_const
+	PUBLIC	_add_overflow_unsigned
+	PUBLIC	_add_overflow_signed
+; int add_overflow_signed(int a,int b){ return a + b; }
+
+	RSEG  ?PR?_add_overflow_signed?ARITH_EXT_INT
+_add_overflow_signed:
+	USING	0
+			; SOURCE LINE # 1
+;---- Variable 'b?041' assigned to Register 'R4/R5' ----
+;---- Variable 'a?040' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	ADD  	A,R5
+	MOV  	R7,A
+	MOV  	A,R6
+	ADDC 	A,R4
+	MOV  	R6,A
+	RET  	
+; END OF _add_overflow_signed
+
+; unsigned int add_overflow_unsigned(unsigned int a,unsigned int b){ return a + b; }
+
+	RSEG  ?PR?_add_overflow_unsigned?ARITH_EXT_INT
+_add_overflow_unsigned:
+	USING	0
+			; SOURCE LINE # 2
+;---- Variable 'b?143' assigned to Register 'R4/R5' ----
+;---- Variable 'a?142' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	ADD  	A,R5
+	MOV  	R7,A
+	MOV  	A,R6
+	ADDC 	A,R4
+	MOV  	R6,A
+	RET  	
+; END OF _add_overflow_unsigned
+
+; 
+; int add_with_const(int a){ return a + 32767; }
+
+	RSEG  ?PR?_add_with_const?ARITH_EXT_INT
+_add_with_const:
+	USING	0
+			; SOURCE LINE # 4
+;---- Variable 'a?244' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	ADD  	A,#0FFH
+	MOV  	R7,A
+	MOV  	A,R6
+	ADDC 	A,#07FH
+	MOV  	R6,A
+	RET  	
+; END OF _add_with_const
+
+; unsigned int addu_with_const(unsigned int a){ return a + (unsigned int)65535; }
+
+	RSEG  ?PR?_addu_with_const?ARITH_EXT_INT
+_addu_with_const:
+	USING	0
+			; SOURCE LINE # 5
+;---- Variable 'a?345' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	ADD  	A,#0FFH
+	MOV  	R7,A
+	MOV  	A,R6
+	ADDC 	A,#0FFH
+	MOV  	R6,A
+	RET  	
+; END OF _addu_with_const
+
+; 
+; int sub_borrow_signed(int a,int b){ return a - b; }
+
+	RSEG  ?PR?_sub_borrow_signed?ARITH_EXT_INT
+_sub_borrow_signed:
+	USING	0
+			; SOURCE LINE # 7
+;---- Variable 'b?447' assigned to Register 'R4/R5' ----
+;---- Variable 'a?446' assigned to Register 'R6/R7' ----
+	CLR  	C
+	MOV  	A,R7
+	SUBB 	A,R5
+	MOV  	R7,A
+	MOV  	A,R6
+	SUBB 	A,R4
+	MOV  	R6,A
+	RET  	
+; END OF _sub_borrow_signed
+
+; unsigned int sub_borrow_unsigned(unsigned int a,unsigned int b){ return a - b; }
+
+	RSEG  ?PR?_sub_borrow_unsigned?ARITH_EXT_INT
+_sub_borrow_unsigned:
+	USING	0
+			; SOURCE LINE # 8
+;---- Variable 'b?549' assigned to Register 'R4/R5' ----
+;---- Variable 'a?548' assigned to Register 'R6/R7' ----
+	CLR  	C
+	MOV  	A,R7
+	SUBB 	A,R5
+	MOV  	R7,A
+	MOV  	A,R6
+	SUBB 	A,R4
+	MOV  	R6,A
+	RET  	
+; END OF _sub_borrow_unsigned
+
+; 
+; int mul_signed(int a,int b){ return a * b; }
+
+	RSEG  ?PR?_mul_signed?ARITH_EXT_INT
+_mul_signed:
+	USING	0
+			; SOURCE LINE # 10
+;---- Variable 'b?651' assigned to Register 'R4/R5' ----
+;---- Variable 'a?650' assigned to Register 'R6/R7' ----
+	LJMP 	?C?IMUL
+; END OF _mul_signed
+
+; unsigned int mul_unsigned(unsigned int a,unsigned int b){ return a * b; }
+
+	RSEG  ?PR?_mul_unsigned?ARITH_EXT_INT
+_mul_unsigned:
+	USING	0
+			; SOURCE LINE # 11
+;---- Variable 'b?753' assigned to Register 'R4/R5' ----
+;---- Variable 'a?752' assigned to Register 'R6/R7' ----
+	LJMP 	?C?IMUL
+; END OF _mul_unsigned
+
+; 
+; int div_signed(int a,int b){ return a / b; }
+
+	RSEG  ?PR?_div_signed?ARITH_EXT_INT
+_div_signed:
+	USING	0
+			; SOURCE LINE # 13
+;---- Variable 'b?855' assigned to Register 'R4/R5' ----
+;---- Variable 'a?854' assigned to Register 'R6/R7' ----
+	LJMP 	?C?SIDIV
+; END OF _div_signed
+
+; int mod_signed(int a,int b){ return a % b; }
+
+	RSEG  ?PR?_mod_signed?ARITH_EXT_INT
+_mod_signed:
+	USING	0
+			; SOURCE LINE # 14
+;---- Variable 'b?957' assigned to Register 'R4/R5' ----
+;---- Variable 'a?956' assigned to Register 'R6/R7' ----
+	LCALL	?C?SIDIV
+	MOV  	R6,AR4
+	MOV  	R7,AR5
+	RET  	
+; END OF _mod_signed
+
+; unsigned int div_unsigned(unsigned int a,unsigned int b){ return a / b; }
+
+	RSEG  ?PR?_div_unsigned?ARITH_EXT_INT
+_div_unsigned:
+	USING	0
+			; SOURCE LINE # 15
+;---- Variable 'b?1059' assigned to Register 'R4/R5' ----
+;---- Variable 'a?1058' assigned to Register 'R6/R7' ----
+	LJMP 	?C?UIDIV
+; END OF _div_unsigned
+
+; unsigned int mod_unsigned(unsigned int a,unsigned int b){ return a % b; }
+
+	RSEG  ?PR?_mod_unsigned?ARITH_EXT_INT
+_mod_unsigned:
+	USING	0
+			; SOURCE LINE # 16
+;---- Variable 'b?1161' assigned to Register 'R4/R5' ----
+;---- Variable 'a?1160' assigned to Register 'R6/R7' ----
+	LCALL	?C?UIDIV
+	MOV  	R6,AR4
+	MOV  	R7,AR5
+	RET  	
+; END OF _mod_unsigned
+
+; 
+; int shl_int(int a,int c){ return a << c; }
+
+	RSEG  ?PR?_shl_int?ARITH_EXT_INT
+_shl_int:
+	USING	0
+			; SOURCE LINE # 18
+;---- Variable 'c?1263' assigned to Register 'R4/R5' ----
+;---- Variable 'a?1262' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	MOV  	R0,AR5
+	INC  	R0
+	SJMP 	?C0022
+?C0021:
+	CLR  	C
+	RLC  	A
+	XCH  	A,R6
+	RLC  	A
+	XCH  	A,R6
+?C0022:
+	DJNZ 	R0,?C0021
+	MOV  	R7,A
+	RET  	
+; END OF _shl_int
+
+; int shr_signed(int a,int c){ return a >> c; }
+
+	RSEG  ?PR?_shr_signed?ARITH_EXT_INT
+_shr_signed:
+	USING	0
+			; SOURCE LINE # 19
+;---- Variable 'c?1365' assigned to Register 'R4/R5' ----
+;---- Variable 'a?1364' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	MOV  	R0,AR5
+	INC  	R0
+	SJMP 	?C0024
+?C0023:
+	XCH  	A,R6
+	MOV  	C,ACC.7
+	RRC  	A
+	XCH  	A,R6
+	RRC  	A
+?C0024:
+	DJNZ 	R0,?C0023
+	MOV  	R7,A
+	RET  	
+; END OF _shr_signed
+
+; unsigned int shr_unsigned(unsigned int a,int c){ return a >> c; }
+
+	RSEG  ?PR?_shr_unsigned?ARITH_EXT_INT
+_shr_unsigned:
+	USING	0
+			; SOURCE LINE # 20
+;---- Variable 'c?1467' assigned to Register 'R4/R5' ----
+;---- Variable 'a?1466' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	MOV  	R0,AR5
+	INC  	R0
+	SJMP 	?C0026
+?C0025:
+	XCH  	A,R6
+	CLR  	C
+	RRC  	A
+	XCH  	A,R6
+	RRC  	A
+?C0026:
+	DJNZ 	R0,?C0025
+	MOV  	R7,A
+	RET  	
+; END OF _shr_unsigned
+
+; 
+; int mixed_signed_unsigned(int a,unsigned int b){ return a + b; }
+
+	RSEG  ?PR?_mixed_signed_unsigned?ARITH_EXT_INT
+_mixed_signed_unsigned:
+	USING	0
+			; SOURCE LINE # 22
+;---- Variable 'b?1569' assigned to Register 'R4/R5' ----
+;---- Variable 'a?1568' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	ADD  	A,R5
+	MOV  	R7,A
+	MOV  	A,R6
+	ADDC 	A,R4
+	MOV  	R6,A
+	RET  	
+; END OF _mixed_signed_unsigned
+
+; unsigned int mixed_unsigned_signed(unsigned int a,int b){ return a + b; }
+
+	RSEG  ?PR?_mixed_unsigned_signed?ARITH_EXT_INT
+_mixed_unsigned_signed:
+	USING	0
+			; SOURCE LINE # 23
+;---- Variable 'b?1671' assigned to Register 'R4/R5' ----
+;---- Variable 'a?1670' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	ADD  	A,R5
+	MOV  	R7,A
+	MOV  	A,R6
+	ADDC 	A,R4
+	MOV  	R6,A
+	RET  	
+; END OF _mixed_unsigned_signed
+
+; 
+; int add_min_max(){ return 32767 + 1; }
+
+	RSEG  ?PR?add_min_max?ARITH_EXT_INT
+add_min_max:
+	USING	0
+			; SOURCE LINE # 25
+	MOV  	R6,#080H
+	MOV  	R7,#00H
+	RET  	
+; END OF add_min_max
+
+; int sub_min_max(){ return (-32768) - 1; }
+
+	RSEG  ?PR?sub_min_max?ARITH_EXT_INT
+sub_min_max:
+	USING	0
+			; SOURCE LINE # 26
+	MOV  	R6,#07FH
+	MOV  	R7,#0FFH
+	RET  	
+; END OF sub_min_max
+
+; 
+; 
+; int main()
+
+	RSEG  ?PR?main?ARITH_EXT_INT
+main:
+	USING	0
+			; SOURCE LINE # 29
+; {
+			; SOURCE LINE # 30
+;     return 0;
+			; SOURCE LINE # 31
+	CLR  	A
+	MOV  	R6,A
+	MOV  	R7,A
+; }
+			; SOURCE LINE # 32
+	RET  	
+; END OF main
+
+	END

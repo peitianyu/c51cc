@@ -16,3 +16,8 @@ int reg_mem(int x, int y) {
     int c4 = a7 >= a1;
     return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + c1 + c2 + c3 + c4;
 }
+
+int main() 
+{
+    return 0;
+}

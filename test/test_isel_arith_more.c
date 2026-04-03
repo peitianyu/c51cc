@@ -1,4 +1,4 @@
-// Additional arithmetic operator tests for instruction selection
+/* Additional arithmetic operator tests for instruction selection */
 
 char add_const(char a) {
     return a + 100;
@@ -35,10 +35,15 @@ char shifts(char a, char s) {
 }
 
 char big_mul(char a, char b) {
-    // force multiply path
+    /* force multiply path */
     return a * b;
 }
 
 char div_mod_combo(char a, char b) {
     return (a / b) + (a % b);
+}
+
+int main()
+{
+    return 0;
 }

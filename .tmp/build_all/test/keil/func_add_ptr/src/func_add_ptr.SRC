@@ -1,0 +1,50 @@
+; func_add_ptr.SRC generated from: func_add_ptr.c
+; COMPILER INVOKED BY:
+;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe func_add_ptr.c OBJECT(func_add_ptr.obj) SRC
+
+
+NAME	FUNC_ADD_PTR
+
+?PR?_add_ptr?FUNC_ADD_PTR                SEGMENT CODE 
+?PR?main?FUNC_ADD_PTR                    SEGMENT CODE 
+	EXTRN	CODE (?C?CLDPTR)
+	EXTRN	CODE (?C_STARTUP)
+	PUBLIC	main
+	PUBLIC	_add_ptr
+; char add_ptr(char *p, char x) {
+
+	RSEG  ?PR?_add_ptr?FUNC_ADD_PTR
+_add_ptr:
+	USING	0
+			; SOURCE LINE # 1
+;---- Variable 'x?041' assigned to Register 'R5' ----
+;---- Variable 'p?040' assigned to Register 'R1/R2/R3' ----
+;     return *p + x;
+			; SOURCE LINE # 2
+	LCALL	?C?CLDPTR
+	ADD  	A,R5
+	MOV  	R7,A
+; }
+			; SOURCE LINE # 3
+	RET  	
+; END OF _add_ptr
+
+; 
+; int main()
+
+	RSEG  ?PR?main?FUNC_ADD_PTR
+main:
+	USING	0
+			; SOURCE LINE # 5
+; {
+			; SOURCE LINE # 6
+;     return 0;
+			; SOURCE LINE # 7
+	CLR  	A
+	MOV  	R6,A
+	MOV  	R7,A
+; }			; SOURCE LINE # 8
+	RET  	
+; END OF main
+
+	END

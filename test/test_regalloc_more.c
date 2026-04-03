@@ -1,4 +1,4 @@
-// Register allocation stress test: many locals to create high register pressure
+/* Register allocation stress test: many locals to create high register pressure */
 
 int reg_more(int a) {
     int a1 = a + 1;
@@ -21,7 +21,12 @@ int reg_more(int a) {
     int sum = a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8
             + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16;
 
-    // Keep some variables live across a dummy computation
+    /* Keep some variables live across a dummy computation */
     sum += (a16 - a1) * (a8 + a4);
     return sum + a;
+}
+
+int main() 
+{
+    return 0;
 }

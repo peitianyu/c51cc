@@ -1,0 +1,54 @@
+; func_add_sub.SRC generated from: func_add_sub.c
+; COMPILER INVOKED BY:
+;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe func_add_sub.c OBJECT(func_add_sub.obj) SRC
+
+
+NAME	FUNC_ADD_SUB
+
+?PR?_add_sub?FUNC_ADD_SUB                SEGMENT CODE 
+?PR?main?FUNC_ADD_SUB                    SEGMENT CODE 
+	EXTRN	CODE (?C_STARTUP)
+	PUBLIC	main
+	PUBLIC	_add_sub
+; char add_sub(char a, char b) {
+
+	RSEG  ?PR?_add_sub?FUNC_ADD_SUB
+_add_sub:
+	USING	0
+			; SOURCE LINE # 1
+;---- Variable 'b?041' assigned to Register 'R5' ----
+;---- Variable 'a?040' assigned to Register 'R7' ----
+;     return (a + b) ^ (a - b);
+			; SOURCE LINE # 2
+	MOV  	A,R7
+	ADD  	A,R5
+	MOV  	R6,A
+	CLR  	C
+	MOV  	A,R7
+	SUBB 	A,R5
+	XRL  	A,R6
+	MOV  	R7,A
+; }
+			; SOURCE LINE # 3
+	RET  	
+; END OF _add_sub
+
+; 
+; int main()
+
+	RSEG  ?PR?main?FUNC_ADD_SUB
+main:
+	USING	0
+			; SOURCE LINE # 5
+; {
+			; SOURCE LINE # 6
+;     return 0;
+			; SOURCE LINE # 7
+	CLR  	A
+	MOV  	R6,A
+	MOV  	R7,A
+; }			; SOURCE LINE # 8
+	RET  	
+; END OF main
+
+	END

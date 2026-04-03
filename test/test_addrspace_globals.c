@@ -10,3 +10,8 @@ int addrspace_globals_read_all(void) {
 int addrspace_globals_main(void) {
     return addrspace_globals_read_all();
 }
+
+int main()
+{
+    return 0;
+}

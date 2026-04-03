@@ -9,3 +9,8 @@ u8 f_ne(u8 i) { return i != 3; }
 u16 f_sel(u8 c, u8 a, u8 b) {
     return c ? a : b;
 }
+
+int main()
+{
+    return 0;
+}

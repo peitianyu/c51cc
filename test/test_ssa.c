@@ -1,10 +1,10 @@
 int max(int a, int b) {
     int c = a;
+    int d = c + 1;
     if (c > 1)
         c = a + 1;
     else
         c = b - 1;
-    int d = c + 1;
     return d;
 }
 
@@ -16,7 +16,7 @@ int main() {
     return m;
 }
 
-// 测试循环结构
+/* 测试循环结构 */
 int sum_loop(int n) {
     int sum = 0;
     int i = 0;
@@ -27,7 +27,7 @@ int sum_loop(int n) {
     return sum;
 }
 
-// 测试嵌套条件
+/* 测试嵌套条件 */
 int nested_if(int x, int y) {
     int result = 0;
     if (x > 0) {
@@ -42,7 +42,7 @@ int nested_if(int x, int y) {
     return result;
 }
 
-// 测试for循环和break/continue
+/* 测试for循环和break/continue */
 int find_first_even(int arr[], int size) {
     int i;
     for (i = 0; i < size; i = i + 1) {
@@ -53,13 +53,13 @@ int find_first_even(int arr[], int size) {
     return i;
 }
 
-// 测试复杂表达式和类型转换
+/* 测试复杂表达式和类型转换 */
 int complex_expr(int a, int b, int c) {
     int result = (a > b) ? ((c > 0) ? a + c : b - c) : ((a + b) * c);
     return result;
 }
 
-// 测试指针和数组
+/* 测试指针和数组 */
 int array_sum(int arr[], int n) {
     int sum = 0;
     int i = 0;
@@ -70,7 +70,7 @@ int array_sum(int arr[], int n) {
     return sum;
 }
 
-// 测试位运算
+/* 测试位运算 */
 int bit_operations(int x, int y) {
     int and_result = x & y;
     int or_result = x | y;
@@ -80,7 +80,7 @@ int bit_operations(int x, int y) {
     return (and_result + or_result) ^ (xor_result | shift_left) & shift_right;
 }
 
-// 测试递归（简单阶乘）
+/* 测试递归（简单阶乘） */
 int factorial(int n) {
     if (n <= 1) {
         return 1;
@@ -89,7 +89,7 @@ int factorial(int n) {
     }
 }
 
-// 测试多个返回路径
+/* 测试多个返回路径 */
 int multi_return(int x) {
     if (x < 0) {
         return 0;
@@ -100,7 +100,7 @@ int multi_return(int x) {
     }
 }
 
-// 测试循环中的条件判断
+/* 测试循环中的条件判断 */
 int count_positives(int arr[], int n) {
     int count = 0;
     int i = 0;
@@ -113,7 +113,7 @@ int count_positives(int arr[], int n) {
     return count;
 }
 
-// 测试复杂控制流
+/* 测试复杂控制流 */
 int complex_control_flow(int x, int y) {
     int result = 0;
     int i = 0;

@@ -1,4 +1,4 @@
-// 测试全局变量初始化, 并折叠常量
+/* 测试全局变量初始化, 并折叠常量 */
 int g_a = 1;
 int g_a0 = 1+2/1*(1+3);
 int g_a1 = 1 | 2;
@@ -9,8 +9,8 @@ int g_a5 = 0 && 55;
 int g_a6 = 0 != 55;
 int g_arr[3] = {1, 2, 3};
 int g_arr1[] = {1, 2, 3};
-// char g_arr2[] = "123";
-// char* g_arr2 = "abc";
+/* char g_arr2[] = "123"; */
+/* char* g_arr2 = "abc"; */
 
 /* register 关键字用于映射 SFR/SBIT */
 register char P0 = 0x80;
@@ -21,7 +21,7 @@ struct A{
     int b;
 };
 
-// FIXME: 存在问题, 需要解一下 
+/* FIXME: 存在问题, 需要解一下 */
 union B {
     float c;
     int b;
@@ -36,7 +36,7 @@ void test_var_init()
 
 
 int test_basic_arith() {
-    // FIXME: 这部分应该在前端就做一下常量折叠
+    /* FIXME: 这部分应该在前端就做一下常量折叠 */
     int a = 1+2/3*(1+4);
 
     return a + 4;

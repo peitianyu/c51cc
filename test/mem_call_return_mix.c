@@ -36,3 +36,8 @@ u16 gep_store_then_load(u8 idx, u8 x) {
     arr16[idx] = x;
     return arr16[idx];
 }
+
+int main()
+{
+    return 0;
+}

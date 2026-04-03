@@ -1,0 +1,79 @@
+A51 MACRO ASSEMBLER  FUNC_ADD_OP                                                          04/03/2026 11:40:47 PAGE     1
+
+
+MACRO ASSEMBLER A51 V8.2.7.0
+OBJECT MODULE PLACED IN func_add_op.obj
+ASSEMBLER INVOKED BY: D:\ws\test\C51CC\_tools\keil\C51\BIN\A51.EXE func_add_op.SRC OBJECT(func_add_op.obj) 
+
+LOC  OBJ            LINE     SOURCE
+
+                       1     ; func_add_op.SRC generated from: func_add_op.c
+                       2     ; COMPILER INVOKED BY:
+                       3     ;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe func_add_op.c OBJECT(func_add_op.obj)
+                              SRC
+                       4     
+                       5     
+                       6     NAME    FUNC_ADD_OP
+                       7     
+                       8     ?PR?_add_op?FUNC_ADD_OP                  SEGMENT CODE 
+                       9     ?PR?main?FUNC_ADD_OP SEGMENT CODE 
+                      10             EXTRN   CODE (?C_STARTUP)
+                      11             PUBLIC  main
+                      12             PUBLIC  _add_op
+                      13     ; char add_op(char a, char b) {
+                      14     
+----                  15             RSEG  ?PR?_add_op?FUNC_ADD_OP
+0000                  16     _add_op:
+                      17             USING   0
+                      18                             ; SOURCE LINE # 1
+                      19     ;---- Variable 'b?041' assigned to Register 'R5' ----
+                      20     ;---- Variable 'a?040' assigned to Register 'R7' ----
+                      21     ;     return a + b;
+                      22                             ; SOURCE LINE # 2
+0000 EF               23             MOV     A,R7
+0001 2D               24             ADD     A,R5
+0002 FF               25             MOV     R7,A
+                      26     ; }
+                      27                             ; SOURCE LINE # 3
+0003 22               28             RET     
+                      29     ; END OF _add_op
+                      30     
+                      31     ; 
+                      32     ; int main()
+                      33     
+----                  34             RSEG  ?PR?main?FUNC_ADD_OP
+0000                  35     main:
+                      36             USING   0
+                      37                             ; SOURCE LINE # 5
+                      38     ; {
+                      39                             ; SOURCE LINE # 6
+                      40     ;     return 0;
+                      41                             ; SOURCE LINE # 7
+0000 E4               42             CLR     A
+0001 FE               43             MOV     R6,A
+0002 FF               44             MOV     R7,A
+                      45     ; }                     ; SOURCE LINE # 8
+0003 22               46             RET     
+                      47     ; END OF main
+                      48     
+                      49             END
+A51 MACRO ASSEMBLER  FUNC_ADD_OP                                                          04/03/2026 11:40:47 PAGE     2
+
+SYMBOL TABLE LISTING
+------ ----- -------
+
+
+N A M E                  T Y P E  V A L U E   ATTRIBUTES
+
+?C_STARTUP. . . . . . .  C ADDR   -----       EXT
+?PR?MAIN?FUNC_ADD_OP. .  C SEG    0004H       REL=UNIT
+?PR?_ADD_OP?FUNC_ADD_OP  C SEG    0004H       REL=UNIT
+FUNC_ADD_OP . . . . . .  N NUMB   -----       
+MAIN. . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?MAIN?FUNC_ADD_OP
+_ADD_OP . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_ADD_OP?FUNC_ADD_OP
+
+
+REGISTER BANK(S) USED: 0 
+
+
+ASSEMBLY COMPLETE.  0 WARNING(S), 0 ERROR(S)

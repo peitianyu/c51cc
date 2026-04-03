@@ -1,0 +1,84 @@
+A51 MACRO ASSEMBLER  FUNC_ADD_SUB                                                         04/03/2026 11:40:48 PAGE     1
+
+
+MACRO ASSEMBLER A51 V8.2.7.0
+OBJECT MODULE PLACED IN func_add_sub.obj
+ASSEMBLER INVOKED BY: D:\ws\test\C51CC\_tools\keil\C51\BIN\A51.EXE func_add_sub.SRC OBJECT(func_add_sub.obj) 
+
+LOC  OBJ            LINE     SOURCE
+
+                       1     ; func_add_sub.SRC generated from: func_add_sub.c
+                       2     ; COMPILER INVOKED BY:
+                       3     ;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe func_add_sub.c OBJECT(func_add_sub.ob
+                             j) SRC
+                       4     
+                       5     
+                       6     NAME    FUNC_ADD_SUB
+                       7     
+                       8     ?PR?_add_sub?FUNC_ADD_SUB                SEGMENT CODE 
+                       9     ?PR?main?FUNC_ADD_SUB                    SEGMENT CODE 
+                      10             EXTRN   CODE (?C_STARTUP)
+                      11             PUBLIC  main
+                      12             PUBLIC  _add_sub
+                      13     ; char add_sub(char a, char b) {
+                      14     
+----                  15             RSEG  ?PR?_add_sub?FUNC_ADD_SUB
+0000                  16     _add_sub:
+                      17             USING   0
+                      18                             ; SOURCE LINE # 1
+                      19     ;---- Variable 'b?041' assigned to Register 'R5' ----
+                      20     ;---- Variable 'a?040' assigned to Register 'R7' ----
+                      21     ;     return (a + b) ^ (a - b);
+                      22                             ; SOURCE LINE # 2
+0000 EF               23             MOV     A,R7
+0001 2D               24             ADD     A,R5
+0002 FE               25             MOV     R6,A
+0003 C3               26             CLR     C
+0004 EF               27             MOV     A,R7
+0005 9D               28             SUBB    A,R5
+0006 6E               29             XRL     A,R6
+0007 FF               30             MOV     R7,A
+                      31     ; }
+                      32                             ; SOURCE LINE # 3
+0008 22               33             RET     
+                      34     ; END OF _add_sub
+                      35     
+                      36     ; 
+                      37     ; int main()
+                      38     
+----                  39             RSEG  ?PR?main?FUNC_ADD_SUB
+0000                  40     main:
+                      41             USING   0
+                      42                             ; SOURCE LINE # 5
+                      43     ; {
+                      44                             ; SOURCE LINE # 6
+                      45     ;     return 0;
+                      46                             ; SOURCE LINE # 7
+0000 E4               47             CLR     A
+0001 FE               48             MOV     R6,A
+0002 FF               49             MOV     R7,A
+                      50     ; }                     ; SOURCE LINE # 8
+0003 22               51             RET     
+                      52     ; END OF main
+                      53     
+                      54             END
+A51 MACRO ASSEMBLER  FUNC_ADD_SUB                                                         04/03/2026 11:40:48 PAGE     2
+
+SYMBOL TABLE LISTING
+------ ----- -------
+
+
+N A M E                    T Y P E  V A L U E   ATTRIBUTES
+
+?C_STARTUP. . . . . . . .  C ADDR   -----       EXT
+?PR?MAIN?FUNC_ADD_SUB . .  C SEG    0004H       REL=UNIT
+?PR?_ADD_SUB?FUNC_ADD_SUB  C SEG    0009H       REL=UNIT
+FUNC_ADD_SUB. . . . . . .  N NUMB   -----       
+MAIN. . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?MAIN?FUNC_ADD_SUB
+_ADD_SUB. . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_ADD_SUB?FUNC_ADD_SUB
+
+
+REGISTER BANK(S) USED: 0 
+
+
+ASSEMBLY COMPLETE.  0 WARNING(S), 0 ERROR(S)

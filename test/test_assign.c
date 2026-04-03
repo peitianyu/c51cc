@@ -21,6 +21,10 @@ int main() {
 	int b = 2;
 
 	/* locals */
+	int *p = &g;
+	int arr[4];
+	struct S s;
+	struct S *sp = &s;
 	a += b;
 	a -= 1;
 	a *= 3;
@@ -41,26 +45,22 @@ int main() {
 	h >>= 1;
 
 	/* pointer deref */
-	int *p = &g;
 	*p += 7;
 	*p >>= 1;
 
 	/* array element (desugars to deref) */
-	int arr[4];
 	arr[0] = 1;
 	arr[0] += 2;
 	arr[1] = 8;
 	arr[1] >>= 2;
 
 	/* struct field */
-	struct S s;
 	s.x = 1;
 	s.x += 2;
 	s.y = 4;
 	s.y |= 8;
 
 	/* pointer-to-struct (->) */
-	struct S *sp = &s;
 	sp->x <<= 1;
 	sp->y ^= 3;
 

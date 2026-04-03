@@ -1,0 +1,145 @@
+; cmp_mix_ops.SRC generated from: cmp_mix_ops.c
+; COMPILER INVOKED BY:
+;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe cmp_mix_ops.c OBJECT(cmp_mix_ops.obj) SRC
+
+
+NAME	CMP_MIX_OPS
+
+?PR?_f_lt?CMP_MIX_OPS                    SEGMENT CODE 
+?PR?_f_le?CMP_MIX_OPS                    SEGMENT CODE 
+?PR?_f_eq?CMP_MIX_OPS                    SEGMENT CODE 
+?PR?_f_ne?CMP_MIX_OPS                    SEGMENT CODE 
+?PR?_f_sel?CMP_MIX_OPS                   SEGMENT CODE 
+?PR?main?CMP_MIX_OPS SEGMENT CODE 
+	EXTRN	CODE (?C_STARTUP)
+	PUBLIC	main
+	PUBLIC	_f_sel
+	PUBLIC	_f_ne
+	PUBLIC	_f_eq
+	PUBLIC	_f_le
+	PUBLIC	_f_lt
+; typedef unsigned char u8;
+; typedef unsigned int u16;
+; 
+; u8 f_lt(u8 i) { return i < 8; }
+
+	RSEG  ?PR?_f_lt?CMP_MIX_OPS
+_f_lt:
+	USING	0
+			; SOURCE LINE # 4
+;---- Variable 'i?040' assigned to Register 'R7' ----
+	CLR  	C
+	MOV  	A,R7
+	SUBB 	A,#08H
+	MOV  	A,#080H
+	SUBB 	A,#080H
+	JNC  	?C0001
+	MOV  	R7,#01H
+	RET  	
+?C0001:
+	MOV  	R7,#00H
+?C0002:
+	RET  	
+; END OF _f_lt
+
+; u8 f_le(u8 i) { return i <= 8; }
+
+	RSEG  ?PR?_f_le?CMP_MIX_OPS
+_f_le:
+	USING	0
+			; SOURCE LINE # 5
+;---- Variable 'i?141' assigned to Register 'R7' ----
+	SETB 	C
+	MOV  	A,R7
+	SUBB 	A,#08H
+	MOV  	A,#080H
+	SUBB 	A,#080H
+	JNC  	?C0004
+	MOV  	R7,#01H
+	RET  	
+?C0004:
+	MOV  	R7,#00H
+?C0005:
+	RET  	
+; END OF _f_le
+
+; u8 f_eq(u8 i) { return i == 3; }
+
+	RSEG  ?PR?_f_eq?CMP_MIX_OPS
+_f_eq:
+	USING	0
+			; SOURCE LINE # 6
+;---- Variable 'i?242' assigned to Register 'R7' ----
+	MOV  	A,R7
+	XRL  	A,#03H
+	JNZ  	?C0007
+	MOV  	R7,#01H
+	RET  	
+?C0007:
+	MOV  	R7,#00H
+?C0008:
+	RET  	
+; END OF _f_eq
+
+; u8 f_ne(u8 i) { return i != 3; }
+
+	RSEG  ?PR?_f_ne?CMP_MIX_OPS
+_f_ne:
+	USING	0
+			; SOURCE LINE # 7
+;---- Variable 'i?343' assigned to Register 'R7' ----
+	MOV  	A,R7
+	XRL  	A,#03H
+	JZ   	?C0010
+	MOV  	R7,#01H
+	RET  	
+?C0010:
+	MOV  	R7,#00H
+?C0011:
+	RET  	
+; END OF _f_ne
+
+; 
+; u16 f_sel(u8 c, u8 a, u8 b) {
+
+	RSEG  ?PR?_f_sel?CMP_MIX_OPS
+_f_sel:
+	USING	0
+			; SOURCE LINE # 9
+;---- Variable 'c?444' assigned to Register 'R7' ----
+;---- Variable 'b?446' assigned to Register 'R3' ----
+;---- Variable 'a?445' assigned to Register 'R5' ----
+;     return c ? a : b;
+			; SOURCE LINE # 10
+	MOV  	A,R7
+	JZ   	?C0013
+	MOV  	R7,AR5
+	SJMP 	?C0014
+?C0013:
+	MOV  	R7,AR3
+?C0014:
+	MOV  	R6,#00H
+; }
+			; SOURCE LINE # 11
+	RET  	
+; END OF _f_sel
+
+; 
+; int main()
+
+	RSEG  ?PR?main?CMP_MIX_OPS
+main:
+	USING	0
+			; SOURCE LINE # 13
+; {
+			; SOURCE LINE # 14
+;     return 0;
+			; SOURCE LINE # 15
+	CLR  	A
+	MOV  	R6,A
+	MOV  	R7,A
+; }			; SOURCE LINE # 16
+	RET  	
+; END OF main
+
+	END

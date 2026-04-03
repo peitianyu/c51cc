@@ -1,0 +1,82 @@
+A51 MACRO ASSEMBLER  ADD_INT                                                              04/03/2026 11:40:42 PAGE     1
+
+
+MACRO ASSEMBLER A51 V8.2.7.0
+OBJECT MODULE PLACED IN add_int.obj
+ASSEMBLER INVOKED BY: D:\ws\test\C51CC\_tools\keil\C51\BIN\A51.EXE add_int.SRC OBJECT(add_int.obj) 
+
+LOC  OBJ            LINE     SOURCE
+
+                       1     ; add_int.SRC generated from: add_int.c
+                       2     ; COMPILER INVOKED BY:
+                       3     ;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe add_int.c OBJECT(add_int.obj) SRC
+                       4     
+                       5     
+                       6     NAME    ADD_INT
+                       7     
+                       8     ?PR?_add_int?ADD_INT SEGMENT CODE 
+                       9     ?PR?main?ADD_INT     SEGMENT CODE 
+                      10             EXTRN   CODE (?C_STARTUP)
+                      11             PUBLIC  main
+                      12             PUBLIC  _add_int
+                      13     ; int add_int(int a, int b) { return a + b; }
+                      14     
+----                  15             RSEG  ?PR?_add_int?ADD_INT
+0000                  16     _add_int:
+                      17             USING   0
+                      18                             ; SOURCE LINE # 1
+                      19     ;---- Variable 'b?041' assigned to Register 'R4/R5' ----
+                      20     ;---- Variable 'a?040' assigned to Register 'R6/R7' ----
+0000 EF               21             MOV     A,R7
+0001 2D               22             ADD     A,R5
+0002 FF               23             MOV     R7,A
+0003 EE               24             MOV     A,R6
+0004 3C               25             ADDC    A,R4
+0005 FE               26             MOV     R6,A
+0006 22               27             RET     
+                      28     ; END OF _add_int
+                      29     
+                      30     ; 
+                      31     ; int main() {
+                      32     
+----                  33             RSEG  ?PR?main?ADD_INT
+0000                  34     main:
+                      35             USING   0
+                      36                             ; SOURCE LINE # 3
+                      37     ;     int x = 5;
+                      38                             ; SOURCE LINE # 4
+                      39     ;---- Variable 'x?142' assigned to Register 'R6/R7' ----
+0000 7F05             40             MOV     R7,#05H
+0002 7E00             41             MOV     R6,#00H
+                      42     ;     int y = 10;
+                      43                             ; SOURCE LINE # 5
+                      44     ;---- Variable 'y?143' assigned to Register 'R4/R5' ----
+0004 7D0A             45             MOV     R5,#0AH
+0006 7C00             46             MOV     R4,#00H
+                      47     ;     int z = add_int(x, y);
+                      48                             ; SOURCE LINE # 6
+0008 020000   F       49             LJMP    _add_int
+                      50     ;---- Variable 'z?144' assigned to Register 'R6/R7' ----
+                      51     ; END OF main
+                      52     
+                      53             END
+A51 MACRO ASSEMBLER  ADD_INT                                                              04/03/2026 11:40:42 PAGE     2
+
+SYMBOL TABLE LISTING
+------ ----- -------
+
+
+N A M E               T Y P E  V A L U E   ATTRIBUTES
+
+?C_STARTUP . . . . .  C ADDR   -----       EXT
+?PR?MAIN?ADD_INT . .  C SEG    000BH       REL=UNIT
+?PR?_ADD_INT?ADD_INT  C SEG    0007H       REL=UNIT
+ADD_INT. . . . . . .  N NUMB   -----       
+MAIN . . . . . . . .  C ADDR   0000H   R   SEG=?PR?MAIN?ADD_INT
+_ADD_INT . . . . . .  C ADDR   0000H   R   SEG=?PR?_ADD_INT?ADD_INT
+
+
+REGISTER BANK(S) USED: 0 
+
+
+ASSEMBLY COMPLETE.  0 WARNING(S), 0 ERROR(S)

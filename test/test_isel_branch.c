@@ -1,4 +1,4 @@
-// Instruction selection tests: branches/loops/short-circuit
+/* Instruction selection tests: branches/loops/short-circuit */
 
 int if_else(int a, int b) {
     if (a > b) {
@@ -101,8 +101,8 @@ int loop_break_continue(int n) {
 int nested_branch_phi(int n) {
     int i = 0;
     int s = 0;
-    while (i < n) {
         int t;
+    while (i < n) {
         if (i < 3) {
             t = i + 1;
         } else {

@@ -1,0 +1,39 @@
+BL51 BANKED LINKER/LOCATER V6.22.2.0                                                    04/03/2026  11:40:44  PAGE 1
+
+
+BL51 BANKED LINKER/LOCATER V6.22.2.0, INVOKED BY:
+D:\WS\TEST\C51CC\_TOOLS\KEIL\C51\BIN\BL51.EXE CMP_MIX_OPS.OBJ, STARTUP.OBJ, C51S.LIB TO CMP_MIX_OPS.ABS
+
+
+INPUT MODULES INCLUDED:
+  CMP_MIX_OPS.OBJ (CMP_MIX_OPS)
+  STARTUP.OBJ (?C_STARTUP)
+
+
+LINK MAP OF MODULE:  CMP_MIX_OPS.ABS (CMP_MIX_OPS)
+
+
+            TYPE    BASE      LENGTH    RELOCATION   SEGMENT NAME
+            -----------------------------------------------------
+
+            * * * * * * *   D A T A   M E M O R Y   * * * * * * *
+            REG     0000H     0008H     ABSOLUTE     "REG BANK 0"
+            IDATA   0008H     0001H     UNIT         ?STACK
+
+            * * * * * * *   C O D E   M E M O R Y   * * * * * * *
+            CODE    0000H     0003H     ABSOLUTE     
+                    0003H     07FDH                  *** GAP ***
+            CODE    0800H     0010H     UNIT         ?PR?_F_LT?CMP_MIX_OPS
+            CODE    0810H     0010H     UNIT         ?PR?_F_LE?CMP_MIX_OPS
+            CODE    0820H     000CH     UNIT         ?PR?_F_SEL?CMP_MIX_OPS
+            CODE    082CH     000CH     UNIT         ?C_C51STARTUP
+            CODE    0838H     000BH     UNIT         ?PR?_F_EQ?CMP_MIX_OPS
+            CODE    0843H     000BH     UNIT         ?PR?_F_NE?CMP_MIX_OPS
+            CODE    084EH     0004H     UNIT         ?PR?MAIN?CMP_MIX_OPS
+
+******************************************************************************
+* RESTRICTED VERSION WITH 0800H BYTE CODE SIZE LIMIT; USED: 0055H BYTE ( 4%) *
+******************************************************************************
+
+Program Size: data=9.0 xdata=0 code=85
+LINK/LOCATE RUN COMPLETE.  0 WARNING(S),  0 ERROR(S)

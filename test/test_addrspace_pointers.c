@@ -28,3 +28,8 @@ int addrspace_pointers_main(void) {
 
     return sum;
 }
+
+int main()
+{
+    return 0;
+}

@@ -1,5 +1,5 @@
-// bit/bool 类型测试
-// 根据 Keil C51 约定，bool 类型通过 Carry Flag (C) 返回
+/* bit/bool 类型测试 */
+/* 根据 Keil C51 约定，bool 类型通过 Carry Flag (C) 返回 */
 
 bool is_positive(int x) {
     return x > 0;
@@ -13,17 +13,17 @@ bool is_negative(int x) {
     return x < 0;
 }
 
-// 逻辑与
+/* 逻辑与 */
 bool and_op(bool a, bool b) {
     return a && b;
 }
 
-// 逻辑或
+/* 逻辑或 */
 bool or_op(bool a, bool b) {
     return a || b;
 }
 
-// 逻辑非
+/* 逻辑非 */
 bool not_op(bool a) {
     return !a;
 }

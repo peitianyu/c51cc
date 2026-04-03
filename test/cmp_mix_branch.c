@@ -28,3 +28,8 @@ u8 loop_lt(u8 start) {
     }
     return i;
 }
+
+int main()
+{
+    return 0;
+}

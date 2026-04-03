@@ -1,0 +1,234 @@
+A51 MACRO ASSEMBLER  CMP_MIX_BRANCH                                                       04/03/2026 11:40:43 PAGE     1
+
+
+MACRO ASSEMBLER A51 V8.2.7.0
+OBJECT MODULE PLACED IN cmp_mix_branch.obj
+ASSEMBLER INVOKED BY: D:\ws\test\C51CC\_tools\keil\C51\BIN\A51.EXE cmp_mix_branch.SRC OBJECT(cmp_mix_branch.obj) 
+
+LOC  OBJ            LINE     SOURCE
+
+                       1     ; cmp_mix_branch.SRC generated from: cmp_mix_branch.c
+                       2     ; COMPILER INVOKED BY:
+                       3     ;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe cmp_mix_branch.c OBJECT(cmp_mix_branc
+                             h.obj) SRC
+                       4     
+                       5     
+                       6     NAME    CMP_MIX_BRANCH
+                       7     
+                       8     ?PR?_b_lt?CMP_MIX_BRANCH                 SEGMENT CODE 
+                       9     ?PR?_b_le?CMP_MIX_BRANCH                 SEGMENT CODE 
+                      10     ?PR?_b_eq?CMP_MIX_BRANCH                 SEGMENT CODE 
+                      11     ?PR?_b_ne?CMP_MIX_BRANCH                 SEGMENT CODE 
+                      12     ?PR?_loop_lt?CMP_MIX_BRANCH              SEGMENT CODE 
+                      13     ?PR?main?CMP_MIX_BRANCH                  SEGMENT CODE 
+                      14             EXTRN   CODE (?C_STARTUP)
+                      15             PUBLIC  main
+                      16             PUBLIC  _loop_lt
+                      17             PUBLIC  _b_ne
+                      18             PUBLIC  _b_eq
+                      19             PUBLIC  _b_le
+                      20             PUBLIC  _b_lt
+                      21     ; typedef unsigned char u8;
+                      22     ; typedef unsigned int u16;
+                      23     ; 
+                      24     ; u8 b_lt(u8 i) {
+                      25     
+----                  26             RSEG  ?PR?_b_lt?CMP_MIX_BRANCH
+0000                  27     _b_lt:
+                      28             USING   0
+                      29                             ; SOURCE LINE # 4
+                      30     ;---- Variable 'i?040' assigned to Register 'R7' ----
+                      31     ;     if ((u16)i < 8) return 1;
+                      32                             ; SOURCE LINE # 5
+0000 C3               33             CLR     C
+0001 EF               34             MOV     A,R7
+0002 9408             35             SUBB    A,#08H
+0004 E4               36             CLR     A
+0005 9400             37             SUBB    A,#00H
+0007 5003             38             JNC     ?C0001
+0009 7F01             39             MOV     R7,#01H
+000B 22               40             RET     
+000C                  41     ?C0001:
+                      42     ;     return 0;
+                      43                             ; SOURCE LINE # 6
+000C 7F00             44             MOV     R7,#00H
+                      45     ; }
+                      46                             ; SOURCE LINE # 7
+000E                  47     ?C0002:
+000E 22               48             RET     
+                      49     ; END OF _b_lt
+                      50     
+                      51     ; 
+                      52     ; u8 b_le(u8 i) {
+                      53     
+----                  54             RSEG  ?PR?_b_le?CMP_MIX_BRANCH
+0000                  55     _b_le:
+                      56             USING   0
+                      57                             ; SOURCE LINE # 9
+A51 MACRO ASSEMBLER  CMP_MIX_BRANCH                                                       04/03/2026 11:40:43 PAGE     2
+
+                      58     ;---- Variable 'i?141' assigned to Register 'R7' ----
+                      59     ;     if ((u16)i <= 8) return 1;
+                      60                             ; SOURCE LINE # 10
+0000 D3               61             SETB    C
+0001 EF               62             MOV     A,R7
+0002 9408             63             SUBB    A,#08H
+0004 E4               64             CLR     A
+0005 9400             65             SUBB    A,#00H
+0007 5003             66             JNC     ?C0003
+0009 7F01             67             MOV     R7,#01H
+000B 22               68             RET     
+000C                  69     ?C0003:
+                      70     ;     return 0;
+                      71                             ; SOURCE LINE # 11
+000C 7F00             72             MOV     R7,#00H
+                      73     ; }
+                      74                             ; SOURCE LINE # 12
+000E                  75     ?C0004:
+000E 22               76             RET     
+                      77     ; END OF _b_le
+                      78     
+                      79     ; 
+                      80     ; u8 b_eq(u8 i) {
+                      81     
+----                  82             RSEG  ?PR?_b_eq?CMP_MIX_BRANCH
+0000                  83     _b_eq:
+                      84             USING   0
+                      85                             ; SOURCE LINE # 14
+                      86     ;---- Variable 'i?242' assigned to Register 'R7' ----
+                      87     ;     if ((u16)i == 3) return 1;
+                      88                             ; SOURCE LINE # 15
+0000 EF               89             MOV     A,R7
+0001 6403             90             XRL     A,#03H
+0003 7003             91             JNZ     ?C0005
+0005 7F01             92             MOV     R7,#01H
+0007 22               93             RET     
+0008                  94     ?C0005:
+                      95     ;     return 0;
+                      96                             ; SOURCE LINE # 16
+0008 7F00             97             MOV     R7,#00H
+                      98     ; }
+                      99                             ; SOURCE LINE # 17
+000A                 100     ?C0006:
+000A 22              101             RET     
+                     102     ; END OF _b_eq
+                     103     
+                     104     ; 
+                     105     ; u8 b_ne(u8 i) {
+                     106     
+----                 107             RSEG  ?PR?_b_ne?CMP_MIX_BRANCH
+0000                 108     _b_ne:
+                     109             USING   0
+                     110                             ; SOURCE LINE # 19
+                     111     ;---- Variable 'i?343' assigned to Register 'R7' ----
+                     112     ;     if ((u16)i != 3) return 1;
+                     113                             ; SOURCE LINE # 20
+0000 EF              114             MOV     A,R7
+0001 6403            115             XRL     A,#03H
+0003 6003            116             JZ      ?C0007
+0005 7F01            117             MOV     R7,#01H
+0007 22              118             RET     
+0008                 119     ?C0007:
+                     120     ;     return 0;
+                     121                             ; SOURCE LINE # 21
+0008 7F00            122             MOV     R7,#00H
+                     123     ; }
+A51 MACRO ASSEMBLER  CMP_MIX_BRANCH                                                       04/03/2026 11:40:43 PAGE     3
+
+                     124                             ; SOURCE LINE # 22
+000A                 125     ?C0008:
+000A 22              126             RET     
+                     127     ; END OF _b_ne
+                     128     
+                     129     ; 
+                     130     ; u8 loop_lt(u8 start) {
+                     131     
+----                 132             RSEG  ?PR?_loop_lt?CMP_MIX_BRANCH
+0000                 133     _loop_lt:
+                     134             USING   0
+                     135                             ; SOURCE LINE # 24
+                     136     ;---- Variable 'start?444' assigned to Register 'R7' ----
+                     137     ;     u8 i = start;
+                     138                             ; SOURCE LINE # 25
+                     139     ;---- Variable 'i?445' assigned to Register 'R7' ----
+0000                 140     ?C0009:
+                     141     ;     while ((u16)i < 8) {
+                     142                             ; SOURCE LINE # 26
+0000 EF              143             MOV     A,R7
+0001 C3              144             CLR     C
+0002 9408            145             SUBB    A,#08H
+0004 E4              146             CLR     A
+0005 9400            147             SUBB    A,#00H
+0007 5003            148             JNC     ?C0010
+                     149     ;         i = i + 1;
+                     150                             ; SOURCE LINE # 27
+0009 0F              151             INC     R7
+                     152     ;     }
+                     153                             ; SOURCE LINE # 28
+000A 80F4            154             SJMP    ?C0009
+000C                 155     ?C0010:
+                     156     ;     return i;
+                     157                             ; SOURCE LINE # 29
+                     158     ; }
+                     159                             ; SOURCE LINE # 30
+000C 22              160             RET     
+                     161     ; END OF _loop_lt
+                     162     
+                     163     ; 
+                     164     ; int main()
+                     165     
+----                 166             RSEG  ?PR?main?CMP_MIX_BRANCH
+0000                 167     main:
+                     168             USING   0
+                     169                             ; SOURCE LINE # 32
+                     170     ; {
+                     171                             ; SOURCE LINE # 33
+                     172     ;     return 0;
+                     173                             ; SOURCE LINE # 34
+0000 E4              174             CLR     A
+0001 FE              175             MOV     R6,A
+0002 FF              176             MOV     R7,A
+                     177     ; }
+                     178                             ; SOURCE LINE # 35
+0003 22              179             RET     
+                     180     ; END OF main
+                     181     
+                     182             END
+A51 MACRO ASSEMBLER  CMP_MIX_BRANCH                                                       04/03/2026 11:40:43 PAGE     4
+
+SYMBOL TABLE LISTING
+------ ----- -------
+
+
+N A M E                      T Y P E  V A L U E   ATTRIBUTES
+
+?C0001. . . . . . . . . . .  C ADDR   000CH   R   SEG=?PR?_B_LT?CMP_MIX_BRANCH
+?C0002. . . . . . . . . . .  C ADDR   000EH   R   SEG=?PR?_B_LT?CMP_MIX_BRANCH
+?C0003. . . . . . . . . . .  C ADDR   000CH   R   SEG=?PR?_B_LE?CMP_MIX_BRANCH
+?C0004. . . . . . . . . . .  C ADDR   000EH   R   SEG=?PR?_B_LE?CMP_MIX_BRANCH
+?C0005. . . . . . . . . . .  C ADDR   0008H   R   SEG=?PR?_B_EQ?CMP_MIX_BRANCH
+?C0006. . . . . . . . . . .  C ADDR   000AH   R   SEG=?PR?_B_EQ?CMP_MIX_BRANCH
+?C0007. . . . . . . . . . .  C ADDR   0008H   R   SEG=?PR?_B_NE?CMP_MIX_BRANCH
+?C0008. . . . . . . . . . .  C ADDR   000AH   R   SEG=?PR?_B_NE?CMP_MIX_BRANCH
+?C0009. . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_LOOP_LT?CMP_MIX_BRANCH
+?C0010. . . . . . . . . . .  C ADDR   000CH   R   SEG=?PR?_LOOP_LT?CMP_MIX_BRANCH
+?C_STARTUP. . . . . . . . .  C ADDR   -----       EXT
+?PR?MAIN?CMP_MIX_BRANCH . .  C SEG    0004H       REL=UNIT
+?PR?_B_EQ?CMP_MIX_BRANCH. .  C SEG    000BH       REL=UNIT
+?PR?_B_LE?CMP_MIX_BRANCH. .  C SEG    000FH       REL=UNIT
+?PR?_B_LT?CMP_MIX_BRANCH. .  C SEG    000FH       REL=UNIT
+?PR?_B_NE?CMP_MIX_BRANCH. .  C SEG    000BH       REL=UNIT
+?PR?_LOOP_LT?CMP_MIX_BRANCH  C SEG    000DH       REL=UNIT
+CMP_MIX_BRANCH. . . . . . .  N NUMB   -----       
+MAIN. . . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?MAIN?CMP_MIX_BRANCH
+_B_EQ . . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_B_EQ?CMP_MIX_BRANCH
+_B_LE . . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_B_LE?CMP_MIX_BRANCH
+_B_LT . . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_B_LT?CMP_MIX_BRANCH
+_B_NE . . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_B_NE?CMP_MIX_BRANCH
+_LOOP_LT. . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_LOOP_LT?CMP_MIX_BRANCH
+
+
+REGISTER BANK(S) USED: 0 
+
+
+ASSEMBLY COMPLETE.  0 WARNING(S), 0 ERROR(S)

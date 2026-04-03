@@ -6,3 +6,8 @@ int sum_for(int n) {
     }
     return sum;
 }
+
+int main()
+{
+    return 0;
+}

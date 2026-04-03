@@ -12,3 +12,8 @@ int reg_shift(int a, int b) {
     int s6 = (s3 - s4) >> 1;
     return x1 + x2 + x3 + x4 + x5 + s1 + s2 + s3 + s4 + s5 + s6;
 }
+
+int main() 
+{
+    return 0;
+}

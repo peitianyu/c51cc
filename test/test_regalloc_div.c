@@ -12,3 +12,8 @@ int reg_div(int a, int b, int c) {
     int z1 = (int)c1;
     return x1 + x2 + x3 + x4 + x5 + q1 + r1 + q2 + r2 + z1;
 }
+
+int main() 
+{
+    return 0;
+}

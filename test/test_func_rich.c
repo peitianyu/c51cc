@@ -1,4 +1,4 @@
-// Rich function-oriented codegen test for C51 backend.
+/* Rich function-oriented codegen test for C51 backend. */
 
 int ret_const(void) {
     return 7;

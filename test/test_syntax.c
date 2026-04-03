@@ -7,7 +7,7 @@
  * 一、基础类型与变量声明测试
  *=============================*/
 
-// 全局变量声明
+/* 全局变量声明 */
 int g_int;
 char g_char;
 float g_float;
@@ -15,24 +15,24 @@ double g_double;
 int g_bool;
 long g_long;
 
-// 全局变量初始化
+/* 全局变量初始化 */
 int g_init_int = 42;
 char g_init_char = 'A';
 float g_init_float = 3.14;
 double g_init_double = 2.71828;
 
-// 数组声明与初始化
+/* 数组声明与初始化 */
 int g_arr[5];
 int g_arr_init[3] = {1, 2, 3};
 int g_arr_infer[] = {10, 20, 30};
 char g_str[] = "Hello";
 
-// 多维数组
+/* 多维数组 */
 int g_2d_arr[2][3];
 int g_2d_init[2][3] = {{1, 2, 3}, {4, 5, 6}};
 int g_2d_infer[][2] = {{1, 2}, {3, 4}, {5, 6}};
 
-// 指针声明
+/* 指针声明 */
 int *g_ptr;
 char *g_str_ptr;
 int **g_ptr_ptr;
@@ -42,7 +42,7 @@ int *g_arr_ptr[5];
  * 二、结构体与联合体测试
  *=============================*/
 
-// 结构体定义与变量声明
+/* 结构体定义与变量声明 */
 struct Point {
     int x;
     int y;
@@ -52,7 +52,7 @@ struct Point g_point;
 struct Point g_point_init = {10, 20};
 struct Point g_point_named = {.x = 5, .y = 15};
 
-// 嵌套结构体
+/* 嵌套结构体 */
 struct Rect {
     struct Point tl;
     struct Point br;
@@ -60,7 +60,7 @@ struct Rect {
 
 struct Rect g_rect = {{0, 0}, {100, 100}};
 
-// 联合体
+/* 联合体 */
 union Data {
     int i;
     float f;
@@ -69,7 +69,7 @@ union Data {
 
 union Data g_data;
 
-// 位域结构体
+/* 位域结构体 */
 struct BitField {
     int a: 4;
     int b: 8;
@@ -113,26 +113,26 @@ Point_t g_typedef_point;
  * 五、函数声明与定义测试
  *=============================*/
 
-// 函数声明
+/* 函数声明 */
 int func_decl(int a, int b);
 void func_void();
 
-// 基础函数定义
+/* 基础函数定义 */
 int add(int a, int b) {
     return a + b;
 }
 
-// 多参数函数
+/* 多参数函数 */
 int sum3(int a, int b, int c) {
     return a + b + c;
 }
 
-// 无返回值函数
+/* 无返回值函数 */
 void print_int(int n) {
-    // 空函数体
+    /* 空函数体 */
 }
 
-// 递归函数
+/* 递归函数 */
 int factorial(int n) {
     if (n <= 1) {
         return 1;
@@ -140,15 +140,16 @@ int factorial(int n) {
     return n * factorial(n - 1);
 }
 
-// 函数指针参数
+/* 函数指针参数 */
 int apply(int (*fn)(int), int x) {
     return fn(x);
 }
 
-// 数组参数
+/* 数组参数 */
 int sum_array(int arr[], int n) {
     int sum = 0;
-    for (int i = 0; i < n; i = i + 1) {
+    int i = 0;
+    for (; i < n; i = i + 1) {
         sum = sum + arr[i];
     }
     return sum;
@@ -310,15 +311,16 @@ int test_for() {
     int sum = 0;
     int i;
     
+    int j = 0;
+    int k = 0;
     for (i = 0; i < 10; i = i + 1) {
         sum = sum + i;
     }
     
-    for (int j = 0; j < 5; j = j + 1) {
+    for (; j < 5; j = j + 1) {
         sum = sum + j;
     }
     
-    int k = 0;
     for (; k < 5; k = k + 1) {
         sum = sum + 1;
     }
@@ -386,7 +388,8 @@ skip:
 int test_break_continue() {
     int sum = 0;
     
-    for (int i = 0; i < 100; i = i + 1) {
+    int i = 0;
+    for (; i < 100; i = i + 1) {
         if (i == 10) {
             break;
         }
@@ -394,7 +397,7 @@ int test_break_continue() {
     }
     
     sum = 0;
-    for (int i = 0; i < 10; i = i + 1) {
+    for (; i < 10; i = i + 1) {
         if (i == 5) {
             continue;
         }
@@ -411,13 +414,12 @@ int test_break_continue() {
 int test_compound_stmt() {
     int a = 10;
     
+    int b = 20;
     {
-        int b = 20;
         a = a + b;
     }
     
     {
-        int b = 30;
         a = a + b;
     }
     
@@ -457,11 +459,11 @@ int test_array_access() {
     int arr[5] = {10, 20, 30, 40, 50};
     int r;
     
+    int *p = arr;
     r = arr[0];
     r = arr[2];
     r = arr[1 + 2];
     
-    int *p = arr;
     r = p[3];
     r = 3[p];
     
@@ -472,7 +474,7 @@ int test_array_access() {
  * 十、函数指针测试
  *=============================*/
 
-// 基础函数
+/* 基础函数 */
 int func_int(int a) {
     return a * 2;
 }
@@ -481,14 +483,14 @@ int func_add(int a, int b) {
     return a + b;
 }
 
-// 1. 函数指针变量声明
+/* 1. 函数指针变量声明 */
 void test_func_ptr_decl() {
     int (*fp1)(int);
     int (*fp2)(int, int);
     void (*fp3)(void);
 }
 
-// 2. 函数指针初始化与赋值
+/* 2. 函数指针初始化与赋值 */
 void test_func_ptr_init() {
     int (*fp1)(int) = func_int;
     int (*fp2)(int, int) = func_add;
@@ -497,19 +499,19 @@ void test_func_ptr_init() {
     fp2 = func_add;
 }
 
-// 3. 函数指针调用
+/* 3. 函数指针调用 */
 int test_func_ptr_call() {
     int (*fp)(int) = func_int;
     int r = fp(5);
     return r;
 }
 
-// 4. 函数指针作为参数
+/* 4. 函数指针作为参数 */
 int binary_op(int (*op)(int, int), int a, int b) {
     return op(a, b);
 }
 
-// 5. 使用typedef的函数指针
+/* 5. 使用typedef的函数指针 */
 typedef int (*compare_fn)(int, int);
 
 int compare_desc(int a, int b) {
@@ -519,26 +521,29 @@ int compare_desc(int a, int b) {
 void test_func_ptr_typedef() {
     compare_fn cmp = compare_desc;
     int r = cmp(3, 5);
+    (void)r;
 }
 
-// 6. 结构体中的函数指针 (暂不支持字段赋值)
-// struct Ops {
-//     int (*add)(int, int);
-// };
-//
-// void test_func_ptr_in_struct() {
-//     struct Ops ops;
-//     ops.add = func_add;  // 暂不支持
-//     int r = ops.add(3, 4);
-// }
+/* 6. 结构体中的函数指针 (暂不支持，已注释) */
+/*
+struct Ops { 
+    int (*add)(int, int); 
+}; 
 
-// 7. 返回函数指针的函数 (暂不支持)
-// typedef int (*int_func_ptr)(int);
-// int_func_ptr get_func() {
-//     return func_int;
-// }
+void test_func_ptr_in_struct() { 
+    int r;
+    struct Ops ops; 
+    ops.add = func_add;  
+    r = ops.add(3, 4); 
+    (void)r;
+} 
+*/
 
-// 综合函数指针测试
+/* 7. 返回函数指针的函数 (暂不支持，已注释) */
+/* typedef int (*int_func_ptr)(int); */
+/* int_func_ptr get_func() { return func_int; } */
+
+/* 综合函数指针测试 */
 int test_all_func_ptr() {
     int result = 0;
     
@@ -547,7 +552,7 @@ int test_all_func_ptr() {
     result = test_func_ptr_call();
     result = result + binary_op(func_add, 3, 4);
     test_func_ptr_typedef();
-    // test_func_ptr_in_struct();  // 暂不支持
+    /* test_func_ptr_in_struct(); */
     
     return result;
 }
@@ -560,16 +565,16 @@ int test_struct() {
     struct Point p;
     int r;
     
+    struct Point *ptr = &p;
+    struct Rect rect;
     p.x = 10;
     p.y = 20;
     r = p.x + p.y;
     
-    struct Point *ptr = &p;
     ptr->x = 30;
     ptr->y = 40;
     r = ptr->x + ptr->y;
     
-    struct Rect rect;
     rect.tl.x = 0;
     rect.tl.y = 0;
     rect.br.x = 100;

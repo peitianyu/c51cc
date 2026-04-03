@@ -26,3 +26,7 @@ int addrspace_calls_main(void) {
          + addrspace_bump_xdata(&ac_xdata)
          + addrspace_read_code(&ac_code);
 }
+int main()
+{
+    return 0;
+}

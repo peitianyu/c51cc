@@ -1,0 +1,81 @@
+A51 MACRO ASSEMBLER  FUNC_ADD_PTR                                                         04/03/2026 11:40:47 PAGE     1
+
+
+MACRO ASSEMBLER A51 V8.2.7.0
+OBJECT MODULE PLACED IN func_add_ptr.obj
+ASSEMBLER INVOKED BY: D:\ws\test\C51CC\_tools\keil\C51\BIN\A51.EXE func_add_ptr.SRC OBJECT(func_add_ptr.obj) 
+
+LOC  OBJ            LINE     SOURCE
+
+                       1     ; func_add_ptr.SRC generated from: func_add_ptr.c
+                       2     ; COMPILER INVOKED BY:
+                       3     ;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe func_add_ptr.c OBJECT(func_add_ptr.ob
+                             j) SRC
+                       4     
+                       5     
+                       6     NAME    FUNC_ADD_PTR
+                       7     
+                       8     ?PR?_add_ptr?FUNC_ADD_PTR                SEGMENT CODE 
+                       9     ?PR?main?FUNC_ADD_PTR                    SEGMENT CODE 
+                      10             EXTRN   CODE (?C?CLDPTR)
+                      11             EXTRN   CODE (?C_STARTUP)
+                      12             PUBLIC  main
+                      13             PUBLIC  _add_ptr
+                      14     ; char add_ptr(char *p, char x) {
+                      15     
+----                  16             RSEG  ?PR?_add_ptr?FUNC_ADD_PTR
+0000                  17     _add_ptr:
+                      18             USING   0
+                      19                             ; SOURCE LINE # 1
+                      20     ;---- Variable 'x?041' assigned to Register 'R5' ----
+                      21     ;---- Variable 'p?040' assigned to Register 'R1/R2/R3' ----
+                      22     ;     return *p + x;
+                      23                             ; SOURCE LINE # 2
+0000 120000   F       24             LCALL   ?C?CLDPTR
+0003 2D               25             ADD     A,R5
+0004 FF               26             MOV     R7,A
+                      27     ; }
+                      28                             ; SOURCE LINE # 3
+0005 22               29             RET     
+                      30     ; END OF _add_ptr
+                      31     
+                      32     ; 
+                      33     ; int main()
+                      34     
+----                  35             RSEG  ?PR?main?FUNC_ADD_PTR
+0000                  36     main:
+                      37             USING   0
+                      38                             ; SOURCE LINE # 5
+                      39     ; {
+                      40                             ; SOURCE LINE # 6
+                      41     ;     return 0;
+                      42                             ; SOURCE LINE # 7
+0000 E4               43             CLR     A
+0001 FE               44             MOV     R6,A
+0002 FF               45             MOV     R7,A
+                      46     ; }                     ; SOURCE LINE # 8
+0003 22               47             RET     
+                      48     ; END OF main
+                      49     
+                      50             END
+A51 MACRO ASSEMBLER  FUNC_ADD_PTR                                                         04/03/2026 11:40:47 PAGE     2
+
+SYMBOL TABLE LISTING
+------ ----- -------
+
+
+N A M E                    T Y P E  V A L U E   ATTRIBUTES
+
+?C?CLDPTR . . . . . . . .  C ADDR   -----       EXT
+?C_STARTUP. . . . . . . .  C ADDR   -----       EXT
+?PR?MAIN?FUNC_ADD_PTR . .  C SEG    0004H       REL=UNIT
+?PR?_ADD_PTR?FUNC_ADD_PTR  C SEG    0006H       REL=UNIT
+FUNC_ADD_PTR. . . . . . .  N NUMB   -----       
+MAIN. . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?MAIN?FUNC_ADD_PTR
+_ADD_PTR. . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_ADD_PTR?FUNC_ADD_PTR
+
+
+REGISTER BANK(S) USED: 0 
+
+
+ASSEMBLY COMPLETE.  0 WARNING(S), 0 ERROR(S)

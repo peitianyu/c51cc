@@ -1,0 +1,53 @@
+; add_int.SRC generated from: add_int.c
+; COMPILER INVOKED BY:
+;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe add_int.c OBJECT(add_int.obj) SRC
+
+
+NAME	ADD_INT
+
+?PR?_add_int?ADD_INT SEGMENT CODE 
+?PR?main?ADD_INT     SEGMENT CODE 
+	EXTRN	CODE (?C_STARTUP)
+	PUBLIC	main
+	PUBLIC	_add_int
+; int add_int(int a, int b) { return a + b; }
+
+	RSEG  ?PR?_add_int?ADD_INT
+_add_int:
+	USING	0
+			; SOURCE LINE # 1
+;---- Variable 'b?041' assigned to Register 'R4/R5' ----
+;---- Variable 'a?040' assigned to Register 'R6/R7' ----
+	MOV  	A,R7
+	ADD  	A,R5
+	MOV  	R7,A
+	MOV  	A,R6
+	ADDC 	A,R4
+	MOV  	R6,A
+	RET  	
+; END OF _add_int
+
+; 
+; int main() {
+
+	RSEG  ?PR?main?ADD_INT
+main:
+	USING	0
+			; SOURCE LINE # 3
+;     int x = 5;
+			; SOURCE LINE # 4
+;---- Variable 'x?142' assigned to Register 'R6/R7' ----
+	MOV  	R7,#05H
+	MOV  	R6,#00H
+;     int y = 10;
+			; SOURCE LINE # 5
+;---- Variable 'y?143' assigned to Register 'R4/R5' ----
+	MOV  	R5,#0AH
+	MOV  	R4,#00H
+;     int z = add_int(x, y);
+			; SOURCE LINE # 6
+	LJMP 	_add_int
+;---- Variable 'z?144' assigned to Register 'R6/R7' ----
+; END OF main
+
+	END

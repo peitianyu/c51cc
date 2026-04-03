@@ -2017,8 +2017,13 @@ static bool inline_single_call(Func *f, Instr *call, int *next_val, Stats *s, Li
         }
         if (i->labels && i->labels->len > 0) {
             ni->labels = make_list();
-            for (int k = 0; k < i->labels->len; ++k)
-                list_push(ni->labels, list_get(i->labels, k));
+            for (int k = 0; k < i->labels->len; ++k) {
+                char *orig = (char *)list_get(i->labels, k);
+                /* 深拷贝 label 字符串，避免多个指令共享同一指针被 list_clear 重复释放 */
+                char *dup = orig ? pass_alloc(strlen(orig) + 1) : NULL;
+                if (dup) strcpy(dup, orig);
+                list_push(ni->labels, dup);
+            }
         }
         list_push(cloned, ni);
     }

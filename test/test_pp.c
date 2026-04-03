@@ -15,7 +15,7 @@
 #define MAX_VALUE 1000
 #define MIN_VALUE 0
 
-// 使用基本宏
+/* 使用基本宏 */
 int test_basic_define() {
     int a = PI;
     int b = MAX_VALUE;
@@ -57,7 +57,7 @@ int is_release = 0;
 int is_release = 1;
 #endif
 
-// 测试条件编译
+/* 测试条件编译 */
 int test_conditional_compile() {
     int r = 0;
     r = r + debug_enabled;
@@ -102,7 +102,7 @@ int level_defined = 1;
 int level_defined = 0;
 #endif
 
-// 测试复杂条件编译
+/* 测试复杂条件编译 */
 int test_complex_conditional() {
     return feature_a_enabled + level_defined;
 }
@@ -174,7 +174,7 @@ int test_nested_conditional() {
  * 九、#else 分支测试
  *=============================*/
 
-// UNDEFINED_MACRO 未定义
+/* UNDEFINED_MACRO 未定义 */
 
 int test_else_branch() {
     int r;
@@ -206,11 +206,11 @@ int test_macro_array_size() {
     int buf2[SMALL_BUF];
     int i;
     
+    int sum = 0;
     for (i = 0; i < SMALL_BUF; i = i + 1) {
         buf2[i] = i;
     }
     
-    int sum = 0;
     for (i = 0; i < SMALL_BUF; i = i + 1) {
         sum = sum + buf2[i];
     }
@@ -291,25 +291,25 @@ int test_macro_init() {
 int test_include() {
     int r = 0;
     
-    // 测试从 include 文件引入的宏
-    r = r + INCLUDE_MACRO;      // 42
-    r = r + INCLUDE_OFFSET;     // 1000
+    /* 测试从 include 文件引入的宏 */
+    int arr[INCLUDE_ARRAY_SIZE];
+    int i;
+    struct IncludeStruct s;
+    r = r + INCLUDE_MACRO;      /* 42 */
+    r = r + INCLUDE_OFFSET;     /* 1000 */
     
-    // 测试从 include 文件引入的条件编译宏
+    /* 测试从 include 文件引入的条件编译宏 */
 #ifdef INCLUDE_FEATURE_ENABLED
     r = r + 100;
 #endif
 
-    // 测试从 include 文件引入的数组大小宏
-    int arr[INCLUDE_ARRAY_SIZE];
-    int i;
+    /* 测试从 include 文件引入的数组大小宏 */
     for (i = 0; i < INCLUDE_ARRAY_SIZE; i = i + 1) {
         arr[i] = i;
         r = r + arr[i];
     }
     
-    // 测试从 include 文件引入的结构体
-    struct IncludeStruct s;
+    /* 测试从 include 文件引入的结构体 */
     s.x = 10;
     s.y = 20;
     r = r + s.x + s.y;
@@ -456,10 +456,10 @@ int test_if_elif_expr() {
 int test_hash_ops() {
     /* # 字符串化：不应把 LEVEL 展开为 2 */
     char *s1 = STR(LEVEL);
+    char *s2 = STR( a +   b );
     (void)s1;
 
     /* # 字符串化：应规范化空白 */
-    char *s2 = STR( a +   b );
     (void)s2;
 
     DECL_TMP(foo)

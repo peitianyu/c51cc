@@ -1,0 +1,79 @@
+BL51 BANKED LINKER/LOCATER V6.22.2.0                                                    04/03/2026  11:40:43  PAGE 1
+
+
+BL51 BANKED LINKER/LOCATER V6.22.2.0, INVOKED BY:
+D:\WS\TEST\C51CC\_TOOLS\KEIL\C51\BIN\BL51.EXE ARITH_EXT_INT.OBJ, STARTUP.OBJ, C51S.LIB TO ARITH_EXT_INT.ABS
+
+
+INPUT MODULES INCLUDED:
+  ARITH_EXT_INT.OBJ (ARITH_EXT_INT)
+  STARTUP.OBJ (?C_STARTUP)
+  C51S.LIB (?C?IMUL)
+  C51S.LIB (?C?UIDIV)
+  C51S.LIB (?C?SIDIV)
+
+
+LINK MAP OF MODULE:  ARITH_EXT_INT.ABS (ARITH_EXT_INT)
+
+
+            TYPE    BASE      LENGTH    RELOCATION   SEGMENT NAME
+            -----------------------------------------------------
+
+            * * * * * * *   D A T A   M E M O R Y   * * * * * * *
+            REG     0000H     0008H     ABSOLUTE     "REG BANK 0"
+            IDATA   0008H     0001H     UNIT         ?STACK
+
+            * * * * * * *   C O D E   M E M O R Y   * * * * * * *
+            CODE    0000H     0003H     ABSOLUTE     
+                    0003H     07FDH                  *** GAP ***
+            CODE    0800H     009DH     UNIT         ?C?LIB_CODE
+            CODE    089DH     0010H     UNIT         ?PR?_SHR_SIGNED?ARITH_EXT_INT
+            CODE    08ADH     000FH     UNIT         ?PR?_SHL_INT?ARITH_EXT_INT
+            CODE    08BCH     000FH     UNIT         ?PR?_SHR_UNSIGNED?ARITH_EXT_INT
+            CODE    08CBH     000CH     UNIT         ?C_C51STARTUP
+            CODE    08D7H     0009H     UNIT         ?PR?_ADD_WITH_CONST?ARITH_EXT_INT
+            CODE    08E0H     0009H     UNIT         ?PR?_ADDU_WITH_CONST?ARITH_EXT_INT
+            CODE    08E9H     0008H     UNIT         ?PR?_SUB_BORROW_SIGNED?ARITH_EXT_INT
+            CODE    08F1H     0008H     UNIT         ?PR?_SUB_BORROW_UNSIGNED?ARITH_EXT_INT
+            CODE    08F9H     0008H     UNIT         ?PR?_MOD_SIGNED?ARITH_EXT_INT
+            CODE    0901H     0008H     UNIT         ?PR?_MOD_UNSIGNED?ARITH_EXT_INT
+            CODE    0909H     0007H     UNIT         ?PR?_ADD_OVERFLOW_SIGNED?ARITH_EXT_INT
+            CODE    0910H     0007H     UNIT         ?PR?_ADD_OVERFLOW_UNSIGNED?ARITH_EXT_INT
+            CODE    0917H     0007H     UNIT         ?PR?_MIXED_SIGNED_UNSIGNED?ARITH_EXT_INT
+            CODE    091EH     0007H     UNIT         ?PR?_MIXED_UNSIGNED_SIGNED?ARITH_EXT_INT
+            CODE    0925H     0005H     UNIT         ?PR?ADD_MIN_MAX?ARITH_EXT_INT
+            CODE    092AH     0005H     UNIT         ?PR?SUB_MIN_MAX?ARITH_EXT_INT
+            CODE    092FH     0004H     UNIT         ?PR?MAIN?ARITH_EXT_INT
+            CODE    0933H     0003H     UNIT         ?PR?_MUL_SIGNED?ARITH_EXT_INT
+            CODE    0936H     0003H     UNIT         ?PR?_MUL_UNSIGNED?ARITH_EXT_INT
+            CODE    0939H     0003H     UNIT         ?PR?_DIV_SIGNED?ARITH_EXT_INT
+            CODE    093CH     0003H     UNIT         ?PR?_DIV_UNSIGNED?ARITH_EXT_INT
+
+
+
+SYMBOL TABLE OF MODULE:  ARITH_EXT_INT.ABS (ARITH_EXT_INT)
+
+  VALUE           TYPE          NAME
+  ----------------------------------
+
+  -------         MODULE        ?C?IMUL
+  C:0800H         PUBLIC        ?C?IMUL
+  -------         ENDMOD        ?C?IMUL
+BL51 BANKED LINKER/LOCATER V6.22.2.0                                                  04/03/2026  11:40:43  PAGE 2
+
+
+
+  -------         MODULE        ?C?UIDIV
+  C:0812H         PUBLIC        ?C?UIDIV
+  -------         ENDMOD        ?C?UIDIV
+
+  -------         MODULE        ?C?SIDIV
+  C:0867H         PUBLIC        ?C?SIDIV
+  -------         ENDMOD        ?C?SIDIV
+
+******************************************************************************
+* RESTRICTED VERSION WITH 0800H BYTE CODE SIZE LIMIT; USED: 00A5H BYTE ( 8%) *
+******************************************************************************
+
+Program Size: data=9.0 xdata=0 code=322
+LINK/LOCATE RUN COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,256 @@
+A51 MACRO ASSEMBLER  CMP_SIGNED_INT                                                       04/03/2026 11:40:45 PAGE     1
+
+
+MACRO ASSEMBLER A51 V8.2.7.0
+OBJECT MODULE PLACED IN cmp_signed_int.obj
+ASSEMBLER INVOKED BY: D:\ws\test\C51CC\_tools\keil\C51\BIN\A51.EXE cmp_signed_int.SRC OBJECT(cmp_signed_int.obj) 
+
+LOC  OBJ            LINE     SOURCE
+
+                       1     ; cmp_signed_int.SRC generated from: cmp_signed_int.c
+                       2     ; COMPILER INVOKED BY:
+                       3     ;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe cmp_signed_int.c OBJECT(cmp_signed_in
+                             t.obj) SRC
+                       4     
+                       5     
+                       6     NAME    CMP_SIGNED_INT
+                       7     
+                       8     ?PR?_cmp_signed_lt?CMP_SIGNED_INT        SEGMENT CODE 
+                       9     ?PR?_cmp_signed_le?CMP_SIGNED_INT        SEGMENT CODE 
+                      10     ?PR?_cmp_signed_gt?CMP_SIGNED_INT        SEGMENT CODE 
+                      11     ?PR?_cmp_signed_ge?CMP_SIGNED_INT        SEGMENT CODE 
+                      12     ?PR?_cmp_signed_eq?CMP_SIGNED_INT        SEGMENT CODE 
+                      13     ?PR?_cmp_signed_ne?CMP_SIGNED_INT        SEGMENT CODE 
+                      14     ?PR?main?CMP_SIGNED_INT                  SEGMENT CODE 
+                      15             EXTRN   CODE (?C_STARTUP)
+                      16             PUBLIC  main
+                      17             PUBLIC  _cmp_signed_ne
+                      18             PUBLIC  _cmp_signed_eq
+                      19             PUBLIC  _cmp_signed_ge
+                      20             PUBLIC  _cmp_signed_gt
+                      21             PUBLIC  _cmp_signed_le
+                      22             PUBLIC  _cmp_signed_lt
+                      23     ; int cmp_signed_lt(int a,int b){ return a < b; }
+                      24     
+----                  25             RSEG  ?PR?_cmp_signed_lt?CMP_SIGNED_INT
+0000                  26     _cmp_signed_lt:
+                      27             USING   0
+                      28                             ; SOURCE LINE # 1
+                      29     ;---- Variable 'b?041' assigned to Register 'R4/R5' ----
+                      30     ;---- Variable 'a?040' assigned to Register 'R6/R7' ----
+0000 C3               31             CLR     C
+0001 EF               32             MOV     A,R7
+0002 9D               33             SUBB    A,R5
+0003 EC               34             MOV     A,R4
+0004 6480             35             XRL     A,#080H
+0006 F8               36             MOV     R0,A
+0007 EE               37             MOV     A,R6
+0008 6480             38             XRL     A,#080H
+000A 98               39             SUBB    A,R0
+000B 7E00             40             MOV     R6,#00H
+000D 5003             41             JNC     ?C0001
+000F 7F01             42             MOV     R7,#01H
+0011 22               43             RET     
+0012                  44     ?C0001:
+0012 7F00             45             MOV     R7,#00H
+0014                  46     ?C0002:
+0014 22               47             RET     
+                      48     ; END OF _cmp_signed_lt
+                      49     
+                      50     ; int cmp_signed_le(int a,int b){ return a <= b; }
+                      51     
+----                  52             RSEG  ?PR?_cmp_signed_le?CMP_SIGNED_INT
+0000                  53     _cmp_signed_le:
+                      54             USING   0
+                      55                             ; SOURCE LINE # 2
+                      56     ;---- Variable 'b?143' assigned to Register 'R4/R5' ----
+                      57     ;---- Variable 'a?142' assigned to Register 'R6/R7' ----
+A51 MACRO ASSEMBLER  CMP_SIGNED_INT                                                       04/03/2026 11:40:45 PAGE     2
+
+0000 D3               58             SETB    C
+0001 EF               59             MOV     A,R7
+0002 9D               60             SUBB    A,R5
+0003 EC               61             MOV     A,R4
+0004 6480             62             XRL     A,#080H
+0006 F8               63             MOV     R0,A
+0007 EE               64             MOV     A,R6
+0008 6480             65             XRL     A,#080H
+000A 98               66             SUBB    A,R0
+000B 7E00             67             MOV     R6,#00H
+000D 5003             68             JNC     ?C0004
+000F 7F01             69             MOV     R7,#01H
+0011 22               70             RET     
+0012                  71     ?C0004:
+0012 7F00             72             MOV     R7,#00H
+0014                  73     ?C0005:
+0014 22               74             RET     
+                      75     ; END OF _cmp_signed_le
+                      76     
+                      77     ; int cmp_signed_gt(int a,int b){ return a > b; }
+                      78     
+----                  79             RSEG  ?PR?_cmp_signed_gt?CMP_SIGNED_INT
+0000                  80     _cmp_signed_gt:
+                      81             USING   0
+                      82                             ; SOURCE LINE # 3
+                      83     ;---- Variable 'b?245' assigned to Register 'R4/R5' ----
+                      84     ;---- Variable 'a?244' assigned to Register 'R6/R7' ----
+0000 D3               85             SETB    C
+0001 EF               86             MOV     A,R7
+0002 9D               87             SUBB    A,R5
+0003 EC               88             MOV     A,R4
+0004 6480             89             XRL     A,#080H
+0006 F8               90             MOV     R0,A
+0007 EE               91             MOV     A,R6
+0008 6480             92             XRL     A,#080H
+000A 98               93             SUBB    A,R0
+000B 7E00             94             MOV     R6,#00H
+000D 4003             95             JC      ?C0007
+000F 7F01             96             MOV     R7,#01H
+0011 22               97             RET     
+0012                  98     ?C0007:
+0012 7F00             99             MOV     R7,#00H
+0014                 100     ?C0008:
+0014 22              101             RET     
+                     102     ; END OF _cmp_signed_gt
+                     103     
+                     104     ; int cmp_signed_ge(int a,int b){ return a >= b; }
+                     105     
+----                 106             RSEG  ?PR?_cmp_signed_ge?CMP_SIGNED_INT
+0000                 107     _cmp_signed_ge:
+                     108             USING   0
+                     109                             ; SOURCE LINE # 4
+                     110     ;---- Variable 'b?347' assigned to Register 'R4/R5' ----
+                     111     ;---- Variable 'a?346' assigned to Register 'R6/R7' ----
+0000 C3              112             CLR     C
+0001 EF              113             MOV     A,R7
+0002 9D              114             SUBB    A,R5
+0003 EC              115             MOV     A,R4
+0004 6480            116             XRL     A,#080H
+0006 F8              117             MOV     R0,A
+0007 EE              118             MOV     A,R6
+0008 6480            119             XRL     A,#080H
+000A 98              120             SUBB    A,R0
+000B 7E00            121             MOV     R6,#00H
+000D 4003            122             JC      ?C0010
+000F 7F01            123             MOV     R7,#01H
+A51 MACRO ASSEMBLER  CMP_SIGNED_INT                                                       04/03/2026 11:40:45 PAGE     3
+
+0011 22              124             RET     
+0012                 125     ?C0010:
+0012 7F00            126             MOV     R7,#00H
+0014                 127     ?C0011:
+0014 22              128             RET     
+                     129     ; END OF _cmp_signed_ge
+                     130     
+                     131     ; int cmp_signed_eq(int a,int b){ return a == b; }
+                     132     
+----                 133             RSEG  ?PR?_cmp_signed_eq?CMP_SIGNED_INT
+0000                 134     _cmp_signed_eq:
+                     135             USING   0
+                     136                             ; SOURCE LINE # 5
+                     137     ;---- Variable 'b?449' assigned to Register 'R4/R5' ----
+                     138     ;---- Variable 'a?448' assigned to Register 'R6/R7' ----
+0000 EF              139             MOV     A,R7
+0001 B50509          140             CJNE    A,AR5,?C0013
+0004 EE              141             MOV     A,R6
+0005 B50405          142             CJNE    A,AR4,?C0013
+0008 7E00            143             MOV     R6,#00H
+000A 7F01            144             MOV     R7,#01H
+000C 22              145             RET     
+000D                 146     ?C0013:
+000D 7E00            147             MOV     R6,#00H
+000F 7F00            148             MOV     R7,#00H
+0011                 149     ?C0014:
+0011 22              150             RET     
+                     151     ; END OF _cmp_signed_eq
+                     152     
+                     153     ; int cmp_signed_ne(int a,int b){ return a != b; }
+                     154     
+----                 155             RSEG  ?PR?_cmp_signed_ne?CMP_SIGNED_INT
+0000                 156     _cmp_signed_ne:
+                     157             USING   0
+                     158                             ; SOURCE LINE # 6
+                     159     ;---- Variable 'b?551' assigned to Register 'R4/R5' ----
+                     160     ;---- Variable 'a?550' assigned to Register 'R6/R7' ----
+0000 EF              161             MOV     A,R7
+0001 6D              162             XRL     A,R5
+0002 7002            163             JNZ     ?C0021
+0004 EE              164             MOV     A,R6
+0005 6C              165             XRL     A,R4
+0006                 166     ?C0021:
+0006 7E00            167             MOV     R6,#00H
+0008 6003            168             JZ      ?C0016
+000A 7F01            169             MOV     R7,#01H
+000C 22              170             RET     
+000D                 171     ?C0016:
+000D 7F00            172             MOV     R7,#00H
+000F                 173     ?C0017:
+000F 22              174             RET     
+                     175     ; END OF _cmp_signed_ne
+                     176     
+                     177     ; 
+                     178     ; int main()
+                     179     
+----                 180             RSEG  ?PR?main?CMP_SIGNED_INT
+0000                 181     main:
+                     182             USING   0
+                     183                             ; SOURCE LINE # 8
+                     184     ; {
+                     185                             ; SOURCE LINE # 9
+                     186     ;     return 0;
+                     187                             ; SOURCE LINE # 10
+0000 E4              188             CLR     A
+0001 FE              189             MOV     R6,A
+A51 MACRO ASSEMBLER  CMP_SIGNED_INT                                                       04/03/2026 11:40:45 PAGE     4
+
+0002 FF              190             MOV     R7,A
+                     191     ; }                     ; SOURCE LINE # 11
+0003 22              192             RET     
+                     193     ; END OF main
+                     194     
+                     195             END
+A51 MACRO ASSEMBLER  CMP_SIGNED_INT                                                       04/03/2026 11:40:45 PAGE     5
+
+SYMBOL TABLE LISTING
+------ ----- -------
+
+
+N A M E                            T Y P E  V A L U E   ATTRIBUTES
+
+?C0001. . . . . . . . . . . . . .  C ADDR   0012H   R   SEG=?PR?_CMP_SIGNED_LT?CMP_SIGNED_INT
+?C0002. . . . . . . . . . . . . .  C ADDR   0014H   R   SEG=?PR?_CMP_SIGNED_LT?CMP_SIGNED_INT
+?C0004. . . . . . . . . . . . . .  C ADDR   0012H   R   SEG=?PR?_CMP_SIGNED_LE?CMP_SIGNED_INT
+?C0005. . . . . . . . . . . . . .  C ADDR   0014H   R   SEG=?PR?_CMP_SIGNED_LE?CMP_SIGNED_INT
+?C0007. . . . . . . . . . . . . .  C ADDR   0012H   R   SEG=?PR?_CMP_SIGNED_GT?CMP_SIGNED_INT
+?C0008. . . . . . . . . . . . . .  C ADDR   0014H   R   SEG=?PR?_CMP_SIGNED_GT?CMP_SIGNED_INT
+?C0010. . . . . . . . . . . . . .  C ADDR   0012H   R   SEG=?PR?_CMP_SIGNED_GE?CMP_SIGNED_INT
+?C0011. . . . . . . . . . . . . .  C ADDR   0014H   R   SEG=?PR?_CMP_SIGNED_GE?CMP_SIGNED_INT
+?C0013. . . . . . . . . . . . . .  C ADDR   000DH   R   SEG=?PR?_CMP_SIGNED_EQ?CMP_SIGNED_INT
+?C0014. . . . . . . . . . . . . .  C ADDR   0011H   R   SEG=?PR?_CMP_SIGNED_EQ?CMP_SIGNED_INT
+?C0016. . . . . . . . . . . . . .  C ADDR   000DH   R   SEG=?PR?_CMP_SIGNED_NE?CMP_SIGNED_INT
+?C0017. . . . . . . . . . . . . .  C ADDR   000FH   R   SEG=?PR?_CMP_SIGNED_NE?CMP_SIGNED_INT
+?C0021. . . . . . . . . . . . . .  C ADDR   0006H   R   SEG=?PR?_CMP_SIGNED_NE?CMP_SIGNED_INT
+?C_STARTUP. . . . . . . . . . . .  C ADDR   -----       EXT
+?PR?MAIN?CMP_SIGNED_INT . . . . .  C SEG    0004H       REL=UNIT
+?PR?_CMP_SIGNED_EQ?CMP_SIGNED_INT  C SEG    0012H       REL=UNIT
+?PR?_CMP_SIGNED_GE?CMP_SIGNED_INT  C SEG    0015H       REL=UNIT
+?PR?_CMP_SIGNED_GT?CMP_SIGNED_INT  C SEG    0015H       REL=UNIT
+?PR?_CMP_SIGNED_LE?CMP_SIGNED_INT  C SEG    0015H       REL=UNIT
+?PR?_CMP_SIGNED_LT?CMP_SIGNED_INT  C SEG    0015H       REL=UNIT
+?PR?_CMP_SIGNED_NE?CMP_SIGNED_INT  C SEG    0010H       REL=UNIT
+AR4 . . . . . . . . . . . . . . .  D ADDR   0004H   A   
+AR5 . . . . . . . . . . . . . . .  D ADDR   0005H   A   
+CMP_SIGNED_INT. . . . . . . . . .  N NUMB   -----       
+MAIN. . . . . . . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?MAIN?CMP_SIGNED_INT
+_CMP_SIGNED_EQ. . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_CMP_SIGNED_EQ?CMP_SIGNED_INT
+_CMP_SIGNED_GE. . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_CMP_SIGNED_GE?CMP_SIGNED_INT
+_CMP_SIGNED_GT. . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_CMP_SIGNED_GT?CMP_SIGNED_INT
+_CMP_SIGNED_LE. . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_CMP_SIGNED_LE?CMP_SIGNED_INT
+_CMP_SIGNED_LT. . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_CMP_SIGNED_LT?CMP_SIGNED_INT
+_CMP_SIGNED_NE. . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_CMP_SIGNED_NE?CMP_SIGNED_INT
+
+
+REGISTER BANK(S) USED: 0 
+
+
+ASSEMBLY COMPLETE.  0 WARNING(S), 0 ERROR(S)

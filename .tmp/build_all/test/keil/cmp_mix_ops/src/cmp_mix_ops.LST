@@ -1,0 +1,199 @@
+A51 MACRO ASSEMBLER  CMP_MIX_OPS                                                          04/03/2026 11:40:44 PAGE     1
+
+
+MACRO ASSEMBLER A51 V8.2.7.0
+OBJECT MODULE PLACED IN cmp_mix_ops.obj
+ASSEMBLER INVOKED BY: D:\ws\test\C51CC\_tools\keil\C51\BIN\A51.EXE cmp_mix_ops.SRC OBJECT(cmp_mix_ops.obj) 
+
+LOC  OBJ            LINE     SOURCE
+
+                       1     ; cmp_mix_ops.SRC generated from: cmp_mix_ops.c
+                       2     ; COMPILER INVOKED BY:
+                       3     ;        D:\ws\test\C51CC\_tools\keil\C51\BIN\C51.exe cmp_mix_ops.c OBJECT(cmp_mix_ops.obj)
+                              SRC
+                       4     
+                       5     
+                       6     NAME    CMP_MIX_OPS
+                       7     
+                       8     ?PR?_f_lt?CMP_MIX_OPS                    SEGMENT CODE 
+                       9     ?PR?_f_le?CMP_MIX_OPS                    SEGMENT CODE 
+                      10     ?PR?_f_eq?CMP_MIX_OPS                    SEGMENT CODE 
+                      11     ?PR?_f_ne?CMP_MIX_OPS                    SEGMENT CODE 
+                      12     ?PR?_f_sel?CMP_MIX_OPS                   SEGMENT CODE 
+                      13     ?PR?main?CMP_MIX_OPS SEGMENT CODE 
+                      14             EXTRN   CODE (?C_STARTUP)
+                      15             PUBLIC  main
+                      16             PUBLIC  _f_sel
+                      17             PUBLIC  _f_ne
+                      18             PUBLIC  _f_eq
+                      19             PUBLIC  _f_le
+                      20             PUBLIC  _f_lt
+                      21     ; typedef unsigned char u8;
+                      22     ; typedef unsigned int u16;
+                      23     ; 
+                      24     ; u8 f_lt(u8 i) { return i < 8; }
+                      25     
+----                  26             RSEG  ?PR?_f_lt?CMP_MIX_OPS
+0000                  27     _f_lt:
+                      28             USING   0
+                      29                             ; SOURCE LINE # 4
+                      30     ;---- Variable 'i?040' assigned to Register 'R7' ----
+0000 C3               31             CLR     C
+0001 EF               32             MOV     A,R7
+0002 9408             33             SUBB    A,#08H
+0004 7480             34             MOV     A,#080H
+0006 9480             35             SUBB    A,#080H
+0008 5003             36             JNC     ?C0001
+000A 7F01             37             MOV     R7,#01H
+000C 22               38             RET     
+000D                  39     ?C0001:
+000D 7F00             40             MOV     R7,#00H
+000F                  41     ?C0002:
+000F 22               42             RET     
+                      43     ; END OF _f_lt
+                      44     
+                      45     ; u8 f_le(u8 i) { return i <= 8; }
+                      46     
+----                  47             RSEG  ?PR?_f_le?CMP_MIX_OPS
+0000                  48     _f_le:
+                      49             USING   0
+                      50                             ; SOURCE LINE # 5
+                      51     ;---- Variable 'i?141' assigned to Register 'R7' ----
+0000 D3               52             SETB    C
+0001 EF               53             MOV     A,R7
+0002 9408             54             SUBB    A,#08H
+0004 7480             55             MOV     A,#080H
+0006 9480             56             SUBB    A,#080H
+0008 5003             57             JNC     ?C0004
+A51 MACRO ASSEMBLER  CMP_MIX_OPS                                                          04/03/2026 11:40:44 PAGE     2
+
+000A 7F01             58             MOV     R7,#01H
+000C 22               59             RET     
+000D                  60     ?C0004:
+000D 7F00             61             MOV     R7,#00H
+000F                  62     ?C0005:
+000F 22               63             RET     
+                      64     ; END OF _f_le
+                      65     
+                      66     ; u8 f_eq(u8 i) { return i == 3; }
+                      67     
+----                  68             RSEG  ?PR?_f_eq?CMP_MIX_OPS
+0000                  69     _f_eq:
+                      70             USING   0
+                      71                             ; SOURCE LINE # 6
+                      72     ;---- Variable 'i?242' assigned to Register 'R7' ----
+0000 EF               73             MOV     A,R7
+0001 6403             74             XRL     A,#03H
+0003 7003             75             JNZ     ?C0007
+0005 7F01             76             MOV     R7,#01H
+0007 22               77             RET     
+0008                  78     ?C0007:
+0008 7F00             79             MOV     R7,#00H
+000A                  80     ?C0008:
+000A 22               81             RET     
+                      82     ; END OF _f_eq
+                      83     
+                      84     ; u8 f_ne(u8 i) { return i != 3; }
+                      85     
+----                  86             RSEG  ?PR?_f_ne?CMP_MIX_OPS
+0000                  87     _f_ne:
+                      88             USING   0
+                      89                             ; SOURCE LINE # 7
+                      90     ;---- Variable 'i?343' assigned to Register 'R7' ----
+0000 EF               91             MOV     A,R7
+0001 6403             92             XRL     A,#03H
+0003 6003             93             JZ      ?C0010
+0005 7F01             94             MOV     R7,#01H
+0007 22               95             RET     
+0008                  96     ?C0010:
+0008 7F00             97             MOV     R7,#00H
+000A                  98     ?C0011:
+000A 22               99             RET     
+                     100     ; END OF _f_ne
+                     101     
+                     102     ; 
+                     103     ; u16 f_sel(u8 c, u8 a, u8 b) {
+                     104     
+----                 105             RSEG  ?PR?_f_sel?CMP_MIX_OPS
+0000                 106     _f_sel:
+                     107             USING   0
+                     108                             ; SOURCE LINE # 9
+                     109     ;---- Variable 'c?444' assigned to Register 'R7' ----
+                     110     ;---- Variable 'b?446' assigned to Register 'R3' ----
+                     111     ;---- Variable 'a?445' assigned to Register 'R5' ----
+                     112     ;     return c ? a : b;
+                     113                             ; SOURCE LINE # 10
+0000 EF              114             MOV     A,R7
+0001 6004            115             JZ      ?C0013
+0003 AF05            116             MOV     R7,AR5
+0005 8002            117             SJMP    ?C0014
+0007                 118     ?C0013:
+0007 AF03            119             MOV     R7,AR3
+0009                 120     ?C0014:
+0009 7E00            121             MOV     R6,#00H
+                     122     ; }
+                     123                             ; SOURCE LINE # 11
+A51 MACRO ASSEMBLER  CMP_MIX_OPS                                                          04/03/2026 11:40:44 PAGE     3
+
+000B 22              124             RET     
+                     125     ; END OF _f_sel
+                     126     
+                     127     ; 
+                     128     ; int main()
+                     129     
+----                 130             RSEG  ?PR?main?CMP_MIX_OPS
+0000                 131     main:
+                     132             USING   0
+                     133                             ; SOURCE LINE # 13
+                     134     ; {
+                     135                             ; SOURCE LINE # 14
+                     136     ;     return 0;
+                     137                             ; SOURCE LINE # 15
+0000 E4              138             CLR     A
+0001 FE              139             MOV     R6,A
+0002 FF              140             MOV     R7,A
+                     141     ; }                     ; SOURCE LINE # 16
+0003 22              142             RET     
+                     143     ; END OF main
+                     144     
+                     145             END
+A51 MACRO ASSEMBLER  CMP_MIX_OPS                                                          04/03/2026 11:40:44 PAGE     4
+
+SYMBOL TABLE LISTING
+------ ----- -------
+
+
+N A M E                 T Y P E  V A L U E   ATTRIBUTES
+
+?C0001 . . . . . . . .  C ADDR   000DH   R   SEG=?PR?_F_LT?CMP_MIX_OPS
+?C0002 . . . . . . . .  C ADDR   000FH   R   SEG=?PR?_F_LT?CMP_MIX_OPS
+?C0004 . . . . . . . .  C ADDR   000DH   R   SEG=?PR?_F_LE?CMP_MIX_OPS
+?C0005 . . . . . . . .  C ADDR   000FH   R   SEG=?PR?_F_LE?CMP_MIX_OPS
+?C0007 . . . . . . . .  C ADDR   0008H   R   SEG=?PR?_F_EQ?CMP_MIX_OPS
+?C0008 . . . . . . . .  C ADDR   000AH   R   SEG=?PR?_F_EQ?CMP_MIX_OPS
+?C0010 . . . . . . . .  C ADDR   0008H   R   SEG=?PR?_F_NE?CMP_MIX_OPS
+?C0011 . . . . . . . .  C ADDR   000AH   R   SEG=?PR?_F_NE?CMP_MIX_OPS
+?C0013 . . . . . . . .  C ADDR   0007H   R   SEG=?PR?_F_SEL?CMP_MIX_OPS
+?C0014 . . . . . . . .  C ADDR   0009H   R   SEG=?PR?_F_SEL?CMP_MIX_OPS
+?C_STARTUP . . . . . .  C ADDR   -----       EXT
+?PR?MAIN?CMP_MIX_OPS .  C SEG    0004H       REL=UNIT
+?PR?_F_EQ?CMP_MIX_OPS.  C SEG    000BH       REL=UNIT
+?PR?_F_LE?CMP_MIX_OPS.  C SEG    0010H       REL=UNIT
+?PR?_F_LT?CMP_MIX_OPS.  C SEG    0010H       REL=UNIT
+?PR?_F_NE?CMP_MIX_OPS.  C SEG    000BH       REL=UNIT
+?PR?_F_SEL?CMP_MIX_OPS  C SEG    000CH       REL=UNIT
+AR3. . . . . . . . . .  D ADDR   0003H   A   
+AR5. . . . . . . . . .  D ADDR   0005H   A   
+CMP_MIX_OPS. . . . . .  N NUMB   -----       
+MAIN . . . . . . . . .  C ADDR   0000H   R   SEG=?PR?MAIN?CMP_MIX_OPS
+_F_EQ. . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_F_EQ?CMP_MIX_OPS
+_F_LE. . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_F_LE?CMP_MIX_OPS
+_F_LT. . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_F_LT?CMP_MIX_OPS
+_F_NE. . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_F_NE?CMP_MIX_OPS
+_F_SEL . . . . . . . .  C ADDR   0000H   R   SEG=?PR?_F_SEL?CMP_MIX_OPS
+
+
+REGISTER BANK(S) USED: 0 
+
+
+ASSEMBLY COMPLETE.  0 WARNING(S), 0 ERROR(S)

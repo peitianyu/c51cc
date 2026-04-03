@@ -24,3 +24,9 @@ unsigned int mixed_unsigned_signed(unsigned int a,int b){ return a + b; }
 
 int add_min_max(){ return 32767 + 1; }
 int sub_min_max(){ return (-32768) - 1; }
+
+
+int main()
+{
+    return 0;
+}

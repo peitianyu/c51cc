@@ -7,3 +7,5 @@ code/
 artifacts/
 _tools/
 output/
+.vscode/
+.venv/

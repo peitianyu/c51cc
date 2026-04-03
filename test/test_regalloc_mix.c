@@ -21,3 +21,8 @@ int reg_mix(int a) {
     int r2 = mix_call(x3, x4, x5, x6, x7, x8);
     return r1 + r2 + m1 + m2 + b1 + b2 + b3 + b4 + x7 + x8;
 }
+
+int main() 
+{
+    return 0;
+}
