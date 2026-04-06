@@ -95,12 +95,14 @@ static bool operand_references_label(const char* arg, const char* label) {
 
     if (!arg || !label) return false;
     while (*arg == ' ' || *arg == '\t') arg++;
+    if (*arg == '#') arg++;  /* 跳过立即数前缀 '#'，如 MOV DPTR, #LabelName */
     if (strcmp(arg, label) == 0) return true;
 
     comma = strrchr(arg, ',');
     if (!comma) return false;
     comma++;
     while (*comma == ' ' || *comma == '\t') comma++;
+    if (*comma == '#') comma++;  /* 同样跳过逗号后操作数的 '#' 前缀 */
     return strcmp(comma, label) == 0;
 }
 
@@ -594,6 +596,102 @@ static int peephole_remove_empty_local_label(List* instrs, int start) {
     remove_instr(instrs, start);
     return 1;
 }
+
+/* 窥孔优化：ADD/ADDC A, #0 是算术 NOP，直接删除
+ * ADD A, #0 → 无操作（不修改 A，但设置 carry；这里只删 #0 立即数的版本）
+ * ADDC A, #0 → 只保留了 carry，A 值不变，删除
+ * 注意：ADD A, #0 会更新 PSW（C/OV等），若之后读取 PSW flags 需保留。
+ * 保守策略：若下一条指令是 ADDC（使用 carry），则不删 ADD A, #0。
+ */
+static int peephole_add_addc_zero(List* instrs, int start) {
+    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
+    if (!ins || !ins->op) return 0;
+    if (is_basic_block_barrier(ins)) return 0;
+
+    bool is_add  = (strcmp(ins->op, "ADD")  == 0);
+    bool is_addc = (strcmp(ins->op, "ADDC") == 0);
+    if (!is_add && !is_addc) return 0;
+
+    const char* dst = get_operand(ins, 0);
+    const char* src = get_operand(ins, 1);
+    if (!dst || !src) return 0;
+    if (!operands_equal(dst, "A")) return 0;
+    if (strcmp(src, "#0") != 0) return 0;
+
+    /* ADD A, #0: 若下条是 ADDC，则 carry 被使用，不能删除 ADD（会清零 C） */
+    if (is_add && start + 1 < instrs->len) {
+        AsmInstr* next = (AsmInstr*)list_get(instrs, start + 1);
+        if (next && next->op && strcmp(next->op, "ADDC") == 0) return 0;
+    }
+
+    remove_instr(instrs, start);
+    return 1;
+}
+
+/* 窥孔优化：ANL A, #1; JNZ/JZ label → JB/JNB ACC.0, label
+ * 测试 bit0 后立即跳转的常见模式（i & 1 检查）
+ * 消除 ANL 指令和后续的条件跳转合并为一条位跳转指令
+ * 前提：ANL 之后 A 值（仅 bit0 被测试）不再被读取（因为 JB/JNB 后 A 未定义）
+ */
+static int peephole_anl_bit0_branch(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+    if (!ins1 || !ins2) return 0;
+    if (is_basic_block_barrier(ins1)) return 0;
+
+    /* ins1: ANL A, #1 */
+    if (!ins1->op || strcmp(ins1->op, "ANL") != 0) return 0;
+    const char* dst1 = get_operand(ins1, 0);
+    const char* src1 = get_operand(ins1, 1);
+    if (!dst1 || !src1) return 0;
+    if (!operands_equal(dst1, "A")) return 0;
+    if (strcmp(src1, "#1") != 0) return 0;
+
+    /* ins2: JNZ label 或 JZ label */
+    if (!ins2->op) return 0;
+    bool is_jnz = (strcmp(ins2->op, "JNZ") == 0);
+    bool is_jz  = (strcmp(ins2->op, "JZ")  == 0);
+    if (!is_jnz && !is_jz) return 0;
+    if (!ins2->args || ins2->args->len < 1) return 0;
+    const char* label = (const char*)list_get(ins2->args, 0);
+    if (!label) return 0;
+
+    /* 替换为 JB/JNB ACC.0, label
+     * JNZ → JB ACC.0（bit0=1 则跳转）
+     * JZ  → JNB ACC.0（bit0=0 则跳转）
+     */
+    free(ins2->op);
+    ins2->op = is_jnz ? strdup("JB") : strdup("JNB");
+
+    /* 修改参数：从 [label] 改为 [ACC.0, label] */
+    /* 原来只有 1 个参数 label，需要插入 ACC.0 在前面 */
+    free(ins2->args->head->elem);
+    ins2->args->head->elem = strdup("ACC.0");
+    list_push(ins2->args, strdup(label));
+
+    /* 删除 ANL A, #1 */
+    remove_instr(instrs, start);
+    return 1;
+}
+
+/* 窥孔优化：JNZ/JZ 前的 16 位布尔化模式简化
+ * 模式: ORL A, Rx; JNZ/JZ label
+ * 此时 A 已经包含了低字节，ORL 使高字节也参与了零检测
+ * → 这个已经是最优的16位零检测
+ *
+ * 但是有个常见的冗余模式来自 ne/eq 操作的结果直接用于分支：
+ * pattern:
+ *   MOV A, Rlo; ORL A, Rhi; JNZ/JZ label (已最优)
+ *
+ * 还有一个重要模式：MOV A, Rx; JNZ/JZ 之前如果 Rx 来自 ANL A, #1:
+ *   ANL A, #1; MOV Rx, A; ...; MOV A, Rx; JNZ label
+ * 可以优化为：MOV A, Rx(orig); JB ACC.0, label
+ *
+ * 更大的冗余：ne/bool 操作产生的整个 Lne_true/Lne_end 跳转链可以被替换
+ * 这需要更复杂的分析，暂不实现
+ */
 
 /* Remove logical NOPs:
  *   XRL Rx, #0    (XOR with 0 = no-op)
@@ -1303,6 +1401,200 @@ static int peephole_idata_load_from_reg(List* instrs, int start) {
     return 1;
 }
 
+/* 通用 spill 16-bit store-reload forward 优化
+ *
+ * 处理两种形式的 store：
+ *  A 形式: MOV sym, A;        MOV (sym+1), #imm
+ *  B 形式: MOV sym, Rx;       MOV (sym+1), Ry
+ *
+ * 然后跨越至多 MAX_SCAN 条不涉及 sym 的指令，找到对应 reload：
+ *  MOV Rlo, sym;  MOV Rhi, (sym+1)
+ *
+ * 替换 reload 为：MOV Rlo, lo_src; MOV Rhi, hi_src
+ * （去掉内存访问，节省 2 条指令；若 Rlo==lo_src 或 Rhi==hi_src 则各省 1 条）
+ *
+ * 安全条件：
+ *  - sym 和 (sym+1) 在 store 和 reload 之间未被写入
+ *  - lo_src/hi_src（寄存器）在 store 和 reload 之间未被写入
+ *    对于立即数，无需检查
+ *  - 中间没有基本块边界（标签/跳转）
+ */
+static int peephole_spill16_store_reload_forward(List* instrs, int start) {
+    #define MAX_SCAN 16
+    if (start + 3 >= instrs->len) return 0;
+
+    AsmInstr* s0 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* s1 = (AsmInstr*)list_get(instrs, start + 1);
+    if (!s0 || !s1) return 0;
+    if (!is_mov(s0) || !is_mov(s1)) return 0;
+    if (is_basic_block_barrier(s0) || is_basic_block_barrier(s1)) return 0;
+
+    const char* sym    = get_operand(s0, 0);
+    const char* lo_src = get_operand(s0, 1);
+    const char* hi_dst = get_operand(s1, 0);
+    const char* hi_src = get_operand(s1, 1);
+
+    if (!sym || !lo_src || !hi_dst || !hi_src) return 0;
+
+    /* sym 必须是直接 IDATA 符号（非寄存器、非立即数、非间接） */
+    if (is_register_operand(sym) || is_immediate_operand(sym) || is_indirect_operand(sym)) return 0;
+
+    /* hi_dst 必须是 (sym + 1) */
+    if (!is_idata_hi_of(hi_dst, sym)) return 0;
+
+    /* lo_src: A 或 寄存器 Rx；hi_src: 立即数 或 寄存器 */
+    bool lo_is_A   = operands_equal(lo_src, "A");
+    bool lo_is_reg = (!lo_is_A) && is_register_operand(lo_src);
+    if (!lo_is_A && !lo_is_reg) return 0;  /* 不处理从内存 store 到 spill 的情况 */
+    bool hi_is_imm = is_immediate_operand(hi_src);
+    bool hi_is_reg = !hi_is_imm && is_register_operand(hi_src);
+    if (!hi_is_imm && !hi_is_reg) return 0;
+
+    /* 如果 lo 是 A，需要向前追踪 A 的来源
+     * 仅接受：A 来自 MOV A, Rx（Rx 在 start-1 之前）
+     * 或在 start 的前一条指令中有 MOV Rsave, A（A 保存到寄存器）*/
+    const char* lo_forwarded = NULL;  /* 如果 lo_src=A，这里存实际来源 */
+    if (lo_is_A) {
+        /* 向后扫描找 A 的设置指令（或 A 的保存指令） */
+        for (int k = start - 1; k >= 0 && k >= start - 6; k--) {
+            AsmInstr* prev = (AsmInstr*)list_get(instrs, k);
+            if (!prev || !prev->op) break;
+            if (is_label_instr(prev) || is_control_transfer_instr(prev)) break;
+            if (!is_mov(prev)) {
+                /* 非 MOV（ALU 指令等）设置了 A，停止 */
+                break;
+            }
+            const char* pdst = get_operand(prev, 0);
+            const char* psrc = get_operand(prev, 1);
+            if (!pdst || !psrc) break;
+            if (operands_equal(pdst, "A")) {
+                /* 找到 A 的设置：MOV A, Rx */
+                if (is_register_operand(psrc)) {
+                    lo_forwarded = psrc;
+                }
+                break;
+            }
+            /* MOV Rsave, A：A 的当前值保存到 Rsave */
+            if (operands_equal(psrc, "A") && is_register_operand(pdst)) {
+                /* 只有当这是直接前驱时才用（否则 A 可能已变） */
+                if (k == start - 1) {
+                    lo_forwarded = pdst;
+                    break;
+                }
+            }
+        }
+        /* 如果找不到 A 的来源寄存器，不能前向传播 lo */
+        /* 但 hi 仍然可以前向传播（如果 hi_is_imm） */
+    } else {
+        lo_forwarded = lo_src;  /* lo_src 本身是寄存器 */
+    }
+
+    /* 现在向前扫描，查找 MOV Rlo, sym; MOV Rhi, (sym+1) */
+    int reload_lo_idx = -1;
+    int reload_hi_idx = -1;
+
+    for (int j = start + 2; j < instrs->len && j < start + 2 + MAX_SCAN; j++) {
+        AsmInstr* ins = (AsmInstr*)list_get(instrs, j);
+        if (!ins || !ins->op) break;
+
+        /* 基本块边界：停止 */
+        if (is_label_instr(ins)) break;
+        if (is_control_transfer_instr(ins)) break;
+
+        if (!is_mov(ins)) {
+            /* 非 MOV 指令：检查是否是安全的 ALU 指令（不写 sym）
+             * 保守：非 MOV 不涉及 IDATA，继续扫描 */
+            continue;
+        }
+
+        const char* idst = get_operand(ins, 0);
+        const char* isrc = get_operand(ins, 1);
+        if (!idst || !isrc) continue;
+
+        /* 如果发现向 sym 写入，停止 */
+        if (operands_equal(idst, sym) || operands_equal(idst, hi_dst)) break;
+
+        /* 检查 reload lo: MOV Rlo, sym */
+        if (operands_equal(isrc, sym) && is_register_operand(idst)) {
+            reload_lo_idx = j;
+            continue;
+        }
+        /* 检查 reload hi: MOV Rhi, (sym+1) */
+        if (operands_equal(isrc, hi_dst) && is_register_operand(idst)) {
+            reload_hi_idx = j;
+            continue;
+        }
+    }
+
+    if (reload_lo_idx < 0 && reload_hi_idx < 0) return 0;
+
+    int saved = 0;
+
+    /* 替换 reload_hi（先处理较大的索引以免影响 reload_lo 的索引） */
+    if (reload_hi_idx >= 0) {
+        /* 确认 hi_src 在 start+2 到 reload_hi_idx 之间没有被 sym 的 store 覆盖 */
+        bool hi_safe = true;
+        for (int k = start + 2; k < reload_hi_idx && hi_safe; k++) {
+            AsmInstr* ins = (AsmInstr*)list_get(instrs, k);
+            if (!ins || !ins->op) break;
+            if (is_mov(ins)) {
+                const char* d = get_operand(ins, 0);
+                /* 如果发现有对 (sym+1) 的再次写入，不安全 */
+                if (operands_equal(d, hi_dst)) { hi_safe = false; break; }
+                /* 如果 hi_src 是寄存器，检查是否被覆盖 */
+                if (hi_is_reg && operands_equal(d, hi_src)) { hi_safe = false; break; }
+            }
+        }
+        if (hi_safe) {
+            AsmInstr* rhi_ins = (AsmInstr*)list_get(instrs, reload_hi_idx);
+            const char* rhi = get_operand(rhi_ins, 0);
+            if (operands_equal(rhi, hi_src)) {
+                /* rhi == hi_src，整条指令是自赋值，删除 */
+                remove_instr(instrs, reload_hi_idx);
+                saved++;
+                if (reload_lo_idx > reload_hi_idx) reload_lo_idx--;
+            } else {
+                /* 替换 source 操作数为 hi_src（直接使用立即数或寄存器）*/
+                free(rhi_ins->args->head->next->elem);
+                rhi_ins->args->head->next->elem = strdup(hi_src);
+                saved++;
+            }
+        }
+    }
+
+    if (reload_lo_idx >= 0 && lo_forwarded) {
+        /* 验证 lo_forwarded 在 store 和 reload_lo 之间未被修改 */
+        bool lo_safe = true;
+        if (is_register_operand(lo_forwarded)) {
+            for (int k = start + 2; k < reload_lo_idx && lo_safe; k++) {
+                AsmInstr* ins = (AsmInstr*)list_get(instrs, k);
+                if (!ins || !ins->op) break;
+                if (is_mov(ins)) {
+                    const char* d = get_operand(ins, 0);
+                    if (operands_equal(d, lo_forwarded)) { lo_safe = false; break; }
+                    /* sym 本身被覆盖 */
+                    if (operands_equal(d, sym)) { lo_safe = false; break; }
+                }
+            }
+        }
+        if (lo_safe) {
+            AsmInstr* rlo_ins = (AsmInstr*)list_get(instrs, reload_lo_idx);
+            const char* rlo = get_operand(rlo_ins, 0);
+            if (operands_equal(rlo, lo_forwarded)) {
+                remove_instr(instrs, reload_lo_idx);
+                saved++;
+            } else {
+                free(rlo_ins->args->head->next->elem);
+                rlo_ins->args->head->next->elem = strdup(lo_forwarded);
+                saved++;
+            }
+        }
+    }
+
+    return saved;
+    #undef MAX_SCAN
+}
+
 /* 检查指令是否不修改指定寄存器 */
 static bool instr_does_not_modify_reg(AsmInstr* ins, const char* reg) {
     if (!ins || !reg) return true;
@@ -1596,6 +1888,33 @@ static int peephole_dead_code(List* instrs, int start) {
     return 0;
 }
 
+/* 窥孔优化：删除无条件跳转/RET 后的死代码（跳转到下一个 label 之前的指令）
+ * SJMP X + dead_instr → 直接删除 dead_instr
+ * 例：SJMP L10; SJMP L11 → SJMP L10（第二个 SJMP 永远不执行）
+ */
+static int peephole_dead_after_jump(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
+    if (!ins || !ins->op) return 0;
+
+    /* 当前指令必须是无条件控制转移（SJMP/LJMP/AJMP/RET/RETI）*/
+    bool is_uncond = (strcmp(ins->op,"SJMP")==0 || strcmp(ins->op,"LJMP")==0 ||
+                      strcmp(ins->op,"AJMP")==0 || strcmp(ins->op,"RET")==0  ||
+                      strcmp(ins->op,"RETI")==0);
+    if (!is_uncond) return 0;
+
+    AsmInstr* next = (AsmInstr*)list_get(instrs, start + 1);
+    if (!next || !next->op) return 0;
+
+    /* 下一条必须不是 label（label 是可达的）*/
+    size_t nlen = strlen(next->op);
+    if (nlen > 0 && next->op[nlen - 1] == ':') return 0;
+
+    /* 删除下一条（死代码）*/
+    remove_instr(instrs, start + 1);
+    return 1;
+}
+
 /* 返回条件指令的逆条件 */
 static const char* invert_cond(const char* op) {
     if (!op) return NULL;
@@ -1670,6 +1989,57 @@ static int peephole_fold_cond_jump(List* instrs, int start) {
     return 1;
 }
 
+/* 窥孔优化：Jcond X; SJMP Y → Jinv_cond Y
+ * 当 Jcond X + SJMP Y 且下一指令不是 X: 时（即不能用 fold_cond_jump 折叠），
+ * 直接反转条件、目标改为 Y、删除 SJMP，保留 X 的 label。
+ * 例：JNZ L12; SJMP L13; L11: → JZ L13; L11:
+ */
+static int peephole_invert_cond_over_jump(List* instrs, int start) {
+    if (start + 1 >= instrs->len) return 0;
+
+    AsmInstr* ins1 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* ins2 = (AsmInstr*)list_get(instrs, start + 1);
+
+    if (!ins1 || !ins2 || !ins1->op || !ins2->op) return 0;
+
+    /* ins1: JZ/JNZ/JC/JNC */
+    const char* inv = invert_cond(ins1->op);
+    if (!inv) return 0;
+    if (!ins1->args || ins1->args->len < 1) return 0;
+    const char* skip_target = (const char*)list_get(ins1->args, 0);
+    if (!skip_target) return 0;
+
+    /* ins2: SJMP/LJMP/AJMP */
+    if (!(strcmp(ins2->op, "SJMP") == 0 || strcmp(ins2->op, "LJMP") == 0 || strcmp(ins2->op, "AJMP") == 0)) return 0;
+    if (!ins2->args || ins2->args->len < 1) return 0;
+    const char* jump_target = (const char*)list_get(ins2->args, 0);
+    if (!jump_target) return 0;
+
+    /* 如果 ins3 紧接是 skip_target 的 label，fold_cond_jump 已处理，跳过 */
+    if (start + 2 < instrs->len) {
+        AsmInstr* ins3 = (AsmInstr*)list_get(instrs, start + 2);
+        if (ins3 && ins3->op) {
+            size_t len3 = strlen(ins3->op);
+            if (len3 > 1 && ins3->op[len3 - 1] == ':') {
+                char label3[64];
+                if (len3 < sizeof(label3)) {
+                    strncpy(label3, ins3->op, len3 - 1);
+                    label3[len3 - 1] = '\0';
+                    if (strcmp(skip_target, label3) == 0) return 0; /* fold_cond_jump 会处理 */
+                }
+            }
+        }
+    }
+
+    /* 折叠：反转条件，目标改为 jump_target，删除 SJMP */
+    free(ins1->op);
+    ins1->op = strdup(inv);
+    free(ins1->args->head->elem);
+    ins1->args->head->elem = strdup(jump_target);
+    remove_instr(instrs, start + 1);
+    return 1;
+}
+
 /* 窥孔优化：删除 MOV Rn, Rn（自赋值） */
 static int peephole_self_mov(List* instrs, int start) {
     AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
@@ -1737,6 +2107,54 @@ static int peephole_jump_to_following_label_cluster(List* instrs, int start) {
     return 0;
 }
 
+/* 窥孔优化：条件跳转 threading
+ * Jcond TARGET; ... TARGET: SJMP Y → Jcond Y
+ * 当 TARGET 标签后紧跟的是无条件跳转 SJMP/LJMP/AJMP 时，
+ * 直接把条件跳转的目标替换为 Y（穿透跳转链）。
+ * 例：JB ACC.7, Lcmp_true_1 + Lcmp_true_1: SJMP L11 → JB ACC.7, L11
+ */
+static int peephole_thread_cond_jump(List* instrs, int start) {
+    AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
+    if (!ins || !ins->op) return 0;
+
+    /* 必须是单操作数条件跳转：JZ/JNZ/JC/JNC，或双/三操作数末尾是 label 的
+     * 这里只处理 JZ/JNZ/JC/JNC/JB/JNB 且第一个（或最后一个）操作数是 label */
+    const char* op = ins->op;
+    bool is_single_cond = (strcmp(op,"JZ")==0 || strcmp(op,"JNZ")==0 ||
+                           strcmp(op,"JC")==0 || strcmp(op,"JNC")==0);
+    bool is_bit_cond    = (strcmp(op,"JB")==0 || strcmp(op,"JNB")==0 || strcmp(op,"JBC")==0);
+    if (!is_single_cond && !is_bit_cond) return 0;
+    if (!ins->args || ins->args->len < 1) return 0;
+
+    /* 目标 label 是最后一个操作数 */
+    const char* target = (const char*)list_get(ins->args, ins->args->len - 1);
+    if (!target) return 0;
+
+    /* 向前找 target 标签，紧跟一条无条件跳转 */
+    for (int i = start + 1; i + 1 < instrs->len; i++) {
+        AsmInstr* label_ins = (AsmInstr*)list_get(instrs, i);
+        char label[64];
+        if (!get_label_name(label_ins, label, sizeof(label))) continue;
+        if (strcmp(label, target) != 0) continue;
+
+        /* 找到 label，检查紧跟的指令 */
+        AsmInstr* jump_ins = (AsmInstr*)list_get(instrs, i + 1);
+        if (!jump_ins || !jump_ins->op) return 0;
+        if (!(strcmp(jump_ins->op, "SJMP") == 0 || strcmp(jump_ins->op, "LJMP") == 0 || strcmp(jump_ins->op, "AJMP") == 0)) return 0;
+        if (!jump_ins->args || jump_ins->args->len < 1) return 0;
+        const char* chained_target = (const char*)list_get(jump_ins->args, 0);
+        if (!chained_target || strcmp(chained_target, target) == 0) return 0;
+
+        /* 更新条件跳转的目标 */
+        ListNode* n = ins->args->head;
+        for (int k = 0; k < ins->args->len - 1; k++) n = n->next;
+        free(n->elem);
+        n->elem = strdup(chained_target);
+        return 1;
+    }
+    return 0;
+}
+
 static int peephole_thread_jump_chain(List* instrs, int start) {
     AsmInstr* ins;
     const char* target;
@@ -1770,6 +2188,179 @@ static int peephole_thread_jump_chain(List* instrs, int start) {
     }
 
     return 0;
+}
+
+/* 辅助函数：比较两条指令是否等价（op 和 args 完全相同，忽略注释） */
+static bool asm_instrs_equal(AsmInstr* a, AsmInstr* b) {
+    if (!a || !b) return false;
+    if (!a->op || !b->op) return false;
+    if (strcmp(a->op, b->op) != 0) return false;
+    int na = a->args ? a->args->len : 0;
+    int nb = b->args ? b->args->len : 0;
+    if (na != nb) return false;
+    for (int i = 0; i < na; i++) {
+        const char* aa = (const char*)list_get(a->args, i);
+        const char* ba = (const char*)list_get(b->args, i);
+        if (!aa || !ba) return false;
+        if (strcmp(aa, ba) != 0) return false;
+    }
+    return true;
+}
+
+/* 辅助函数：复制一条指令（浅复制 op 和 args，不复制注释） */
+static AsmInstr* asm_instr_clone(AsmInstr* src) {
+    if (!src) return NULL;
+    AsmInstr* dst = calloc(1, sizeof(AsmInstr));
+    if (!dst) return NULL;
+    dst->op = src->op ? strdup(src->op) : NULL;
+    dst->args = make_list();
+    if (src->args) {
+        for (int i = 0; i < src->args->len; i++) {
+            const char* a = (const char*)list_get(src->args, i);
+            list_push(dst->args, a ? strdup(a) : strdup(""));
+        }
+    }
+    return dst;
+}
+
+/* 窥孔优化：提升两路相同代码到条件跳转之前
+ * 模式：
+ *   Jcond L_true
+ *   [N 条相同的 MOV，称 A1..AN]
+ *   SJMP L_false
+ * L_true:
+ *   [N 条相同的 MOV，称 B1..BN，与 A1..AN 完全相同]
+ *   SJMP L_other  (或 fallthrough)
+ *
+ * 变换为：
+ *   [A1..AN]          ← 提升到条件跳转之前
+ *   Jinv_cond L_false ← 反转条件，跳到原 false 路
+ *   SJMP L_other      ← 保留 true 路跳转（会被 dead_after_jump 等继续优化）
+ *
+ * 节省：删掉 false 路 N 条 MOV + false SJMP + L_true 标签 + true 路 N 条 MOV，
+ *       插入 N 条提升 MOV，净节省 2N+2-N = N+2 条
+ */
+static int peephole_hoist_common_code_over_branch(List* instrs, int start) {
+    if (start + 4 >= instrs->len) return 0;
+
+    AsmInstr* jcond = (AsmInstr*)list_get(instrs, start);
+    if (!jcond || !jcond->op) return 0;
+
+    /* ins1: JZ/JNZ/JC/JNC（单操作数条件跳转） */
+    const char* inv = invert_cond(jcond->op);
+    if (!inv) return 0;
+    if (!jcond->args || jcond->args->len != 1) return 0;
+    const char* l_true_target = (const char*)list_get(jcond->args, 0);
+    if (!l_true_target) return 0;
+
+    /* 扫描 false 路：找 N 条 MOV，再跟一条 SJMP */
+    int n = 0;
+    int false_sjmp_idx = -1;
+    const char* l_false_target = NULL;
+    #define MAX_HOIST 4
+    int false_mov_idx[MAX_HOIST];
+
+    for (int j = start + 1; j < instrs->len && n <= MAX_HOIST; j++) {
+        AsmInstr* ins = (AsmInstr*)list_get(instrs, j);
+        if (!ins || !ins->op) break;
+        /* 遇到标签 → false 路结束（没有找到 SJMP） */
+        size_t oplen = strlen(ins->op);
+        if (oplen > 0 && ins->op[oplen - 1] == ':') break;
+        /* 遇到 SJMP/LJMP/AJMP → 这是 false 路的最终跳转 */
+        if (strcmp(ins->op, "SJMP") == 0 || strcmp(ins->op, "LJMP") == 0 || strcmp(ins->op, "AJMP") == 0) {
+            if (!ins->args || ins->args->len < 1) break;
+            l_false_target = (const char*)list_get(ins->args, 0);
+            false_sjmp_idx = j;
+            break;
+        }
+        /* 只允许 MOV 指令（其他指令不能安全提升） */
+        if (!is_mov(ins)) break;
+        /* 提升的 MOV 不能写 A（会影响后续条件跳转的标志/操作数） */
+        const char* dst = get_operand(ins, 0);
+        if (dst && operands_equal(dst, "A")) break;
+        /* 记录这条 MOV */
+        if (n < MAX_HOIST) {
+            false_mov_idx[n] = j;
+            n++;
+        }
+    }
+
+    if (n == 0 || false_sjmp_idx < 0 || !l_false_target) return 0;
+    /* false 路必须紧跟在条件跳转后（false_mov_idx[0] == start+1） */
+    if (false_mov_idx[0] != start + 1) return 0;
+
+    /* 在 false_sjmp 之后寻找 L_true: 标签（允许最多 1 步） */
+    int label_idx = -1;
+    for (int j = false_sjmp_idx + 1; j < instrs->len && j <= false_sjmp_idx + 2; j++) {
+        AsmInstr* ins = (AsmInstr*)list_get(instrs, j);
+        char label_name[64];
+        if (!get_label_name(ins, label_name, sizeof(label_name))) break;
+        if (strcmp(label_name, l_true_target) == 0) { label_idx = j; break; }
+    }
+    if (label_idx < 0) return 0;
+
+    /* true 路：紧跟 L_true: 标签后的 N 条指令必须与 false 路完全相同 */
+    if (label_idx + n >= instrs->len) return 0;
+    for (int k = 0; k < n; k++) {
+        AsmInstr* fa = (AsmInstr*)list_get(instrs, false_mov_idx[k]);
+        AsmInstr* ta = (AsmInstr*)list_get(instrs, label_idx + 1 + k);
+        if (!asm_instrs_equal(fa, ta)) return 0;
+    }
+
+    /* 确认 L_true 标签只被 jcond 引用（其他引用 = 不安全） */
+    int ref_count = 0;
+    for (int j = 0; j < instrs->len; j++) {
+        AsmInstr* ins = (AsmInstr*)list_get(instrs, j);
+        if (!ins || !ins->args) continue;
+        for (int a = 0; a < ins->args->len; a++) {
+            const char* arg = (const char*)list_get(ins->args, a);
+            if (arg && strcmp(arg, l_true_target) == 0) ref_count++;
+        }
+    }
+    if (ref_count > 1) return 0; /* 有多于 1 处引用，不安全 */
+
+    /* 所有条件满足，执行变换 */
+
+    /* 步骤 1：在 start 之前插入 N 条 MOV（提升到条件跳转之前） */
+    for (int k = 0; k < n; k++) {
+        /* 每次插入后索引向后偏移 1，所以 false_mov_idx[k] 对应当前的 false_mov_idx[k]+k */
+        AsmInstr* fa = (AsmInstr*)list_get(instrs, false_mov_idx[k] + k);
+        AsmInstr* cloned = asm_instr_clone(fa);
+        if (!cloned) return 0;
+        insert_instr(instrs, start + k, cloned);
+    }
+    /* 插入 N 条后，所有后续索引 +N */
+    int jcond_new      = start + n;
+    int false_mov_base = jcond_new + 1;           /* false 路 MOV 的起始 */
+    int false_sjmp_new = false_sjmp_idx + n;      /* false SJMP */
+    int label_new      = label_idx + n;           /* L_true: */
+    int true_mov_base  = label_new + 1;           /* true 路 MOV 的起始 */
+
+    /* 步骤 2：把 jcond 改为反转条件，目标改为 l_false_target */
+    AsmInstr* jcond_ins = (AsmInstr*)list_get(instrs, jcond_new);
+    free(jcond_ins->op);
+    jcond_ins->op = strdup(inv);
+    free(jcond_ins->args->head->elem);
+    jcond_ins->args->head->elem = strdup(l_false_target);
+
+    /* 步骤 3：从后往前删除 true 路 N 条 MOV */
+    for (int k = n - 1; k >= 0; k--) {
+        remove_instr(instrs, true_mov_base + k);
+    }
+
+    /* 步骤 4：删掉 L_true: 标签（true_mov_base 减 N 后就是 label_new）*/
+    remove_instr(instrs, label_new);
+
+    /* 步骤 5：删掉 false SJMP */
+    remove_instr(instrs, false_sjmp_new);
+
+    /* 步骤 6：从后往前删除 false 路 N 条 MOV */
+    for (int k = n - 1; k >= 0; k--) {
+        remove_instr(instrs, false_mov_base + k);
+    }
+
+    /* 净节省：插入 N，删掉 N(false) + 1(SJMP) + 1(label) + N(true) = 2N+2，净减少 N+2 */
+    return n + 2;
 }
 
 /* IDATA dead spill store elimination
@@ -1943,6 +2534,12 @@ static void optimize_section(Section* sec) {
             removed = peephole_add_zero_16(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
+            removed = peephole_add_addc_zero(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_anl_bit0_branch(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
             removed = peephole_logical_nop(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
@@ -1986,6 +2583,9 @@ static void optimize_section(Section* sec) {
             removed = peephole_idata_load_from_reg(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
+            removed = peephole_spill16_store_reload_forward(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
             removed = peephole_xdata_store_load_forward(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
@@ -2001,13 +2601,25 @@ static void optimize_section(Section* sec) {
             removed = peephole_dead_code(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
+            removed = peephole_dead_after_jump(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
             removed = peephole_self_mov(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_fold_cond_jump(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
+            removed = peephole_invert_cond_over_jump(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
             removed = peephole_thread_jump_chain(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_thread_cond_jump(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_hoist_common_code_over_branch(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_jump_to_next_label(sec->asminstrs, i);

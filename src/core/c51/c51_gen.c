@@ -413,28 +413,378 @@ static ObjFile *compile_startup_file(const char *startup_path)
     return obj;
 }
 
+/* -----------------------------------------------------------------------
+ * Built-in C51 runtime library
+ *
+ * These functions replicate the Keil ?C? runtime routines so that the
+ * generated hex is self-contained and does not require Keil libraries.
+ *
+ * ?C?SCDIV  – signed 8-bit divide/modulo
+ *   In:  A = dividend, B = divisor
+ *   Out: A = quotient,  B = remainder  (C-style truncation-toward-zero)
+ *
+ * ?C?SIDIV  – signed 16-bit divide/modulo
+ *   In:  R6:R7 = dividend, R4:R5 = divisor
+ *   Out: R6:R7 = quotient, R4:R5 = remainder
+ *
+ * ?C?UIDIV  – unsigned 16-bit divide/modulo
+ *   In:  R6:R7 = dividend, R4:R5 = divisor
+ *   Out: R6:R7 = quotient, R4:R5 = remainder
+ *
+ * ?C?IMUL   – 16-bit multiply (signed and unsigned share the same low 16 bits)
+ *   In:  R6:R7 = multiplicand, R4:R5 = multiplier
+ *   Out: R6:R7 = product (low 16 bits)
+ * ----------------------------------------------------------------------- */
+
+/* Assembly source for each runtime function.
+ * Uses only standard 8051 mnemonics that c51cc's encoder already handles. */
+
+static const char *k_scdiv_v2 =
+    /* ?C?SCDIV – Signed 8-bit division (C99 truncate-toward-zero)
+     * Entry:  A = dividend,  B = divisor
+     * Exit:   A = quotient,  B = remainder
+     * Uses: R0 (sign_quot), R1 (sign_num), R2 (temp)
+     */
+    "?C?SCDIV:\n"
+    /* abs(dividend) → A; sign → R1 */
+    "MOV R1, #0\n"
+    "JNB ACC.7, Lsd_a\n"
+    "CPL A\n"
+    "INC A\n"
+    "MOV R1, #1\n"
+    "Lsd_a:\n"
+    "MOV R2, A\n"            /* R2 = |dividend| */
+    /* abs(divisor) via A; sign XOR → R0 */
+    "MOV R0, R1\n"           /* R0 = sign_num */
+    "MOV A, B\n"
+    "JNB ACC.7, Lsd_b\n"
+    "CPL A\n"
+    "INC A\n"
+    "MOV B, A\n"             /* B = |divisor| */
+    "MOV A, R0\n"
+    "XRL A, #1\n"
+    "MOV R0, A\n"            /* R0 ^= 1 */
+    "Lsd_b:\n"
+    "MOV A, R2\n"            /* A = |dividend| */
+    "DIV AB\n"               /* A = |quotient|, B = |remainder| */
+    /* negate quotient if R0 != 0 */
+    "JZ Lsd_qz\n"
+    "MOV R2, A\n"
+    "MOV A, R0\n"
+    "JZ Lsd_qpos\n"
+    "MOV A, R2\n"
+    "CPL A\n"
+    "INC A\n"
+    "MOV R2, A\n"
+    "Lsd_qpos:\n"
+    "MOV A, R2\n"
+    "Lsd_qz:\n"
+    /* negate remainder if R1 != 0 and remainder != 0 */
+    "MOV R2, A\n"            /* save quotient */
+    "MOV A, B\n"
+    "JZ Lsd_rz\n"
+    "MOV A, R1\n"
+    "JZ Lsd_rpos\n"
+    "MOV A, B\n"
+    "CPL A\n"
+    "INC A\n"
+    "MOV B, A\n"
+    "Lsd_rpos:\n"
+    "Lsd_rz:\n"
+    "MOV A, R2\n"
+    "RET\n";
+
+/* ?C?UIDIV – Unsigned 16-bit division
+ * Entry:  R6:R7 = dividend (R6=hi, R7=lo), R4:R5 = divisor (R4=hi, R5=lo)
+ * Exit:   R6:R7 = quotient,  R4:R5 = remainder
+ * Uses: R0, R1, R2, R3 as scratch (loop count = 16 iterations of shift-subtract)
+ *
+ * Algorithm: non-restoring long division (16-bit shift-and-subtract)
+ *   rem = 0; quot = dividend
+ *   for i=0..15:
+ *     rem = (rem<<1) | (quot>>15)  -- shift msb of quot into rem
+ *     quot <<= 1
+ *     if rem >= divisor: rem -= divisor; quot |= 1
+ *   quotient = quot; remainder = rem
+ *
+ * Register map:
+ *   R6:R7  = quot (starts as dividend, becomes quotient)
+ *   R2:R3  = rem  (starts 0)
+ *   R4:R5  = divisor (preserved for comparison)
+ *   R0     = loop count
+ *   A, B   = scratch
+ */
+static const char *k_uidiv =
+    "?C?UIDIV:\n"
+    "MOV R2, #0\n"
+    "MOV R3, #0\n"
+    "MOV R0, #16\n"
+    "Luid_loop:\n"
+    /* shift rem:quot left by 1; carry-in for rem is MSB of quot_hi (R6.7) */
+    "MOV A, R7\n"
+    "RLC A\n"                 /* shift quot_lo left, MSB into C */
+    "MOV R7, A\n"
+    "MOV A, R6\n"
+    "RLC A\n"                 /* shift quot_hi left, MSB into C, old C from quot_lo.MSB in */
+    "MOV R6, A\n"
+    "MOV A, R3\n"
+    "RLC A\n"                 /* shift rem_lo left, carry-in = old quot_hi.MSB */
+    "MOV R3, A\n"
+    "MOV A, R2\n"
+    "RLC A\n"
+    "MOV R2, A\n"             /* rem_hi */
+    /* compare rem (R2:R3) >= divisor (R4:R5) */
+    "MOV A, R2\n"
+    "CLR C\n"
+    "SUBB A, R4\n"
+    "JC Luid_lt\n"
+    "JNZ Luid_ge\n"           /* R2 > R4: definitely >=; R2==R4: check low */
+    "MOV A, R3\n"
+    "CLR C\n"
+    "SUBB A, R5\n"
+    "JC Luid_lt\n"            /* R3 < R5: rem < div */
+    "Luid_ge:\n"
+    /* rem >= divisor: rem -= divisor; set LSB of quot */
+    "MOV A, R3\n"
+    "CLR C\n"
+    "SUBB A, R5\n"
+    "MOV R3, A\n"
+    "MOV A, R2\n"
+    "SUBB A, R4\n"
+    "MOV R2, A\n"
+    "ORL A, R7\n"
+    "ORL A, #1\n"             /* set LSB of quotient */
+    "MOV R7, A\n"
+    "Luid_lt:\n"
+    "DJNZ R0, Luid_loop\n"
+    /* R6:R7 = quotient; move remainder R2:R3 → R4:R5 */
+    "MOV R4, R2\n"
+    "MOV R5, R3\n"
+    "RET\n";
+
+/* ?C?SIDIV – Signed 16-bit division
+ * Entry:  R6:R7 = dividend, R4:R5 = divisor
+ * Exit:   R6:R7 = quotient, R4:R5 = remainder  (C99 trunc)
+ * Uses: R0 (sign_quot), R1 (sign_num), A
+ */
+static const char *k_sidiv =
+    "?C?SIDIV:\n"
+    /* abs(dividend R6:R7); sign → R1 */
+    "MOV R1, #0\n"
+    "MOV A, R6\n"
+    "JNB ACC.7, Lsid_a\n"
+    /* negate R6:R7 */
+    "MOV A, R7\n"
+    "CPL A\n"
+    "ADD A, #1\n"
+    "MOV R7, A\n"
+    "MOV A, R6\n"
+    "CPL A\n"
+    "ADDC A, #0\n"
+    "MOV R6, A\n"
+    "MOV R1, #1\n"
+    "Lsid_a:\n"
+    /* abs(divisor R4:R5); sign XOR → R0 */
+    "MOV R0, R1\n"
+    "MOV A, R4\n"
+    "JNB ACC.7, Lsid_b\n"
+    "MOV A, R5\n"
+    "CPL A\n"
+    "ADD A, #1\n"
+    "MOV R5, A\n"
+    "MOV A, R4\n"
+    "CPL A\n"
+    "ADDC A, #0\n"
+    "MOV R4, A\n"
+    "MOV A, R0\n"
+    "XRL A, #1\n"
+    "MOV R0, A\n"
+    "Lsid_b:\n"
+    /* call unsigned division */
+    "LCALL ?C?UIDIV\n"
+    /* R6:R7 = |quotient|, R4:R5 = |remainder| */
+    /* negate quotient if R0 != 0 */
+    "MOV A, R0\n"
+    "JZ Lsid_qp\n"
+    "MOV A, R7\n"
+    "CPL A\n"
+    "ADD A, #1\n"
+    "MOV R7, A\n"
+    "MOV A, R6\n"
+    "CPL A\n"
+    "ADDC A, #0\n"
+    "MOV R6, A\n"
+    "Lsid_qp:\n"
+    /* negate remainder if R1 != 0 (same sign as dividend) */
+    "MOV A, R1\n"
+    "JZ Lsid_rp\n"
+    /* check if remainder is zero */
+    "MOV A, R4\n"
+    "ORL A, R5\n"
+    "JZ Lsid_rp\n"
+    "MOV A, R5\n"
+    "CPL A\n"
+    "ADD A, #1\n"
+    "MOV R5, A\n"
+    "MOV A, R4\n"
+    "CPL A\n"
+    "ADDC A, #0\n"
+    "MOV R4, A\n"
+    "Lsid_rp:\n"
+    "RET\n";
+
+/* ?C?IMUL – 16-bit multiply (low 16 bits; same for signed & unsigned)
+ * Entry:  R6:R7 = a (a_hi=R6, a_lo=R7), R4:R5 = b (b_hi=R4, b_lo=R5)
+ * Exit:   R6:R7 = product low 16 bits
+ * Uses: A, B, R0, R1
+ *
+ * product = a_lo*b_lo + (a_hi*b_lo + a_lo*b_hi)<<8  (only lo 16 bits needed)
+ */
+static const char *k_imul =
+    "?C?IMUL:\n"
+    /* a_lo*b_lo -> R0 (lo byte), carry (hi byte) */
+    "MOV A, R7\n"
+    "MOV B, R5\n"
+    "MUL AB\n"               /* A=lo, B=hi of a_lo*b_lo */
+    "MOV R0, A\n"            /* save lo */
+    "MOV R1, B\n"            /* save hi (= partial carry into byte 1) */
+    /* a_hi*b_lo -> contribute to byte 1 only */
+    "MOV A, R6\n"
+    "MOV B, R5\n"
+    "MUL AB\n"               /* A = a_hi*b_lo (lo byte; hi byte overflows 16-bit, discard) */
+    "ADD A, R1\n"            /* add partial hi */
+    "MOV R1, A\n"            /* R1 = byte1 so far */
+    /* a_lo*b_hi -> contribute to byte 1 only */
+    "MOV A, R7\n"
+    "MOV B, R4\n"
+    "MUL AB\n"
+    "ADD A, R1\n"
+    /* Result: A = byte1, R0 = byte0 */
+    "MOV R6, A\n"            /* R6 = hi byte */
+    "MOV R7, R0\n"           /* R7 = lo byte */
+    "RET\n";
+
+/* Check whether any relocation in obj references the given symbol name */
+static int obj_needs_symbol(const ObjFile *obj, const char *sym)
+{
+    if (!obj || !sym) return 0;
+    for (Iter it = list_iter(obj->relocs); !iter_end(it);) {
+        Reloc *rel = iter_next(&it);
+        if (rel && rel->symbol && strcmp(rel->symbol, sym) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Build a runtime ObjFile containing the assembly for the given function */
+static ObjFile *build_runtime_obj(const char *sym_name, const char *asm_src)
+{
+    ObjFile *obj;
+    Section *sec;
+    int sec_idx;
+
+    if (!sym_name || !asm_src) return NULL;
+
+    obj = obj_new();
+    sec_idx = obj_add_section(obj, sym_name, SEC_CODE, 0, 1);
+    sec = obj_get_section(obj, sec_idx);
+    if (!sec) { obj_free(obj); return NULL; }
+
+    c51_emit_asm_text(sec, asm_src);
+    /* Add a global symbol for the entry point (offset 0 in this section) */
+    obj_add_symbol(obj, sym_name, SYM_FUNC, sec_idx, 0, 0, SYM_FLAG_GLOBAL);
+    /* Encode the assembly into bytes */
+    c51_encode(NULL, obj);
+    return obj;
+}
+
+/* Inject any needed runtime objects into the link list.
+ * Returns 1 if any were added. */
+static int inject_runtime_libs(const ObjFile *main_obj, List *objs)
+{
+    int added = 0;
+
+    /* Table of (symbol_name, asm_source) pairs */
+    struct { const char *sym; const char *src; } table[] = {
+        { "?C?SCDIV", k_scdiv_v2 },
+        { "?C?UIDIV", k_uidiv    },
+        { "?C?SIDIV", k_sidiv    },
+        { "?C?IMUL",  k_imul     },
+    };
+    int n = (int)(sizeof(table) / sizeof(table[0]));
+
+    for (int i = 0; i < n; i++) {
+        if (!obj_needs_symbol(main_obj, table[i].sym)) continue;
+        ObjFile *rt = build_runtime_obj(table[i].sym, table[i].src);
+        if (rt) { list_push(objs, rt); added++; }
+    }
+    return added;
+}
+
 ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj)
 {
     char *startup_path;
-    ObjFile *startup_obj;
+    ObjFile *startup_obj = NULL;
     ObjFile *linked;
     List objs = EMPTY_LIST;
 
-    if (!main_obj || !source_path) return main_obj;
+    if (!main_obj) return main_obj;
 
-    startup_path = find_startup_path(source_path);
-    if (!startup_path) return main_obj;
+    /* Always inject needed runtime functions first */
+    inject_runtime_libs(main_obj, &objs);
 
-    startup_obj = compile_startup_file(startup_path);
-    free(startup_path);
-    if (!startup_obj) return main_obj;
+    /* ?C?SIDIV calls ?C?UIDIV internally – if SIDIV was added, ensure UIDIV is present too */
+    {
+        int has_sidiv = 0, has_uidiv = 0;
+        for (Iter it = list_iter(&objs); !iter_end(it);) {
+            ObjFile *o = iter_next(&it);
+            if (!o) continue;
+            for (Iter sit = list_iter(o->symbols); !iter_end(sit);) {
+                Symbol *s = iter_next(&sit);
+                if (s && s->name) {
+                    if (strcmp(s->name, "?C?SIDIV") == 0) has_sidiv = 1;
+                    if (strcmp(s->name, "?C?UIDIV") == 0) has_uidiv = 1;
+                }
+            }
+        }
+        if (has_sidiv && !has_uidiv) {
+            ObjFile *rt = build_runtime_obj("?C?UIDIV", k_uidiv);
+            if (rt) list_push(&objs, rt);
+        }
+    }
 
-    list_push(&objs, startup_obj);
+    /* Optional startup file */
+    if (source_path) {
+        startup_path = find_startup_path(source_path);
+        if (startup_path) {
+            startup_obj = compile_startup_file(startup_path);
+            free(startup_path);
+        }
+    }
+
+    if (startup_obj) list_push(&objs, startup_obj);
     list_push(&objs, main_obj);
+
+    if (objs.len <= 1) {
+        /* Only main_obj – nothing to link */
+        while (!list_empty(&objs)) list_shift(&objs);
+        return main_obj;
+    }
+
     linked = obj_link(&objs);
 
+    /* Free runtime and startup objects (main_obj is owned by caller) */
+    {
+        List to_free = EMPTY_LIST;
+        for (Iter it = list_iter(&objs); !iter_end(it);) {
+            ObjFile *o = iter_next(&it);
+            if (o && o != main_obj) list_push(&to_free, o);
+        }
+        for (Iter it = list_iter(&to_free); !iter_end(it);) {
+            obj_free(iter_next(&it));
+        }
+        while (!list_empty(&to_free)) list_shift(&to_free);
+    }
     while (!list_empty(&objs)) list_shift(&objs);
-    obj_free(startup_obj);
 
     return linked ? linked : main_obj;
 }

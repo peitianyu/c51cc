@@ -123,6 +123,9 @@ static const FixedEncoding fixed_simple_encodings[] = {
 	{"DIV", "AB", NULL, 0x84, 1},
 	{"RLC", "A", NULL, 0x33, 1},
 	{"RRC", "A", NULL, 0x13, 1},
+	{"RL",  "A", NULL, 0x23, 1},
+	{"RR",  "A", NULL, 0x03, 1},
+	{"SWAP", "A", NULL, 0xC4, 1},
 	{"JMP", "@A+DPTR", NULL, 0x73, 1},
 	{NULL, NULL, NULL, 0, 0}
 };
@@ -852,6 +855,8 @@ static int size_alu_view(const InstrView *view)
 		case OPERAND_KIND_IMMEDIATE:
 		case OPERAND_KIND_OTHER:
 			return 2;
+		case OPERAND_KIND_ACC: /* ADD A, A → ADD A, ACC (direct 0xE0) */
+			return 2;
 		case OPERAND_KIND_REGISTER:
 		case OPERAND_KIND_INDIRECT_REG:
 			return 1;
@@ -1343,6 +1348,10 @@ static int encode_alu(EncodeState *state, const InstrView *view, unsigned char *
 		case OPERAND_KIND_IMMEDIATE:
 			out[view->pc - state->start_offset] = entry->imm_opcode;
 			if (!eval_immediate(state, view->arg2, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+			return view->size;
+		case OPERAND_KIND_ACC: /* ADD A, A → ADD A, ACC (direct addr 0xE0) */
+			out[view->pc - state->start_offset] = entry->direct_opcode;
+			out[view->pc - state->start_offset + 1] = 0xE0; /* ACC SFR address */
 			return view->size;
 		case OPERAND_KIND_REGISTER:
 			reg = reg_index(view->arg2);

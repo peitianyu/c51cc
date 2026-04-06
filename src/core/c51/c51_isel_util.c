@@ -93,6 +93,46 @@ void free_temp_reg(ISelContext* isel, int reg, int size) {
     }
 }
 
+/* 直接用立即数写 IDATA/DATA spill（不需要通过 A 和 Rn 中转）
+ * 用于 emit_set_bool_result 的优化路径：避免多余的 MOV A,#imm + MOV Rn,A + MOV A,Rn + MOV spill,A
+ */
+static void emit_store_spill_imm(ISelContext* isel, ValueName val, int size,
+                                  const char* lo_imm, const char* hi_imm, Instr* ins) {
+    if (!isel || !isel->ctx || val < 0 || !isel_value_is_spilled(isel, val)) return;
+    char* key = int_to_key(val);
+    const char* var_name = isel->ctx->value_to_addr ?
+                           (const char*)dict_get(isel->ctx->value_to_addr, key) : NULL;
+    free(key);
+    if (!var_name) return;
+
+    SectionKind sym_sec = get_symbol_section_kind(isel, var_name);
+    if (sym_sec == SEC_IDATA) {
+        /* MOV direct, #imm: 合法 8051 指令，直接写 IDATA，不需要 A */
+        char* ssa = instr_to_ssa_str(ins);
+        isel_emit(isel, "MOV", var_name, lo_imm, ssa);
+        if (size == 2) {
+            char off1[256];
+            snprintf(off1, sizeof(off1), "(%s + 1)", var_name);
+            isel_emit(isel, "MOV", off1, hi_imm, NULL);
+        }
+        free(ssa);
+    } else if (sym_sec == SEC_DATA) {
+        /* DATA section: 直接 MOV direct, #imm */
+        char* ssa = instr_to_ssa_str(ins);
+        isel_emit(isel, "MOV", var_name, lo_imm, ssa);
+        if (size == 2) {
+            char off1[256];
+            snprintf(off1, sizeof(off1), "(%s + 1)", var_name);
+            isel_emit(isel, "MOV", off1, hi_imm, NULL);
+        }
+        free(ssa);
+    } else {
+        /* XDATA 或其他：退回到用立即数通过 A 写，比 Rn 中转少一条 */
+        /* 先设 A = lo_imm，再走通常路径；这里直接用 isel_store_spill_from_reg 的逻辑 */
+        /* 简单起见：这里不处理 XDATA，让调用方 fallback 到老路径 */
+    }
+}
+
 void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, bool one) {
     int phys_reg = dst_reg;
     if (phys_reg < 0 && ins) {
@@ -104,12 +144,33 @@ void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, 
 
     const char* dst_lo = isel_reg_name(phys_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(phys_reg);
-    isel_emit(isel, "MOV", "A", one ? "#1" : "#0", NULL);
-    emit_mov(isel, dst_lo, "A", ins);
+    const char* imm_val = one ? "#1" : "#0";
+
+    /* 直接用立即数写寄存器，不通过 A（省去 MOV A,#imm + MOV Rn,A = 1条） */
+    emit_mov(isel, dst_lo, imm_val, ins);
     if (size == 2) {
         emit_mov(isel, dst_hi, "#0", ins);
     }
-    emit_store_spilled_result(isel, ins ? ins->dest : -1, phys_reg, size, ins);
+
+    /* 对于 IDATA/DATA spill：直接用立即数写，不通过 A（省去 MOV A,Rn + MOV spill,A = 1条） */
+    ValueName dest_val = ins ? ins->dest : -1;
+    if (dest_val >= 0 && isel_value_is_spilled(isel, dest_val)) {
+        char* key2 = int_to_key(dest_val);
+        const char* var_name2 = isel->ctx && isel->ctx->value_to_addr ?
+                                (const char*)dict_get(isel->ctx->value_to_addr, key2) : NULL;
+        free(key2);
+        SectionKind sec2 = var_name2 ? get_symbol_section_kind(isel, var_name2) : SEC_XDATA;
+        if (sec2 == SEC_IDATA || sec2 == SEC_DATA) {
+            emit_store_spill_imm(isel, dest_val, size, imm_val, "#0", ins);
+            return;
+        }
+    }
+    /* 非 IDATA/DATA spill（XDATA 等）：退回到通过 A 中转的老路 */
+    /* 先把 A 设为立即数，再走 isel_store_spill_from_reg */
+    if (dest_val >= 0 && isel_value_is_spilled(isel, dest_val)) {
+        isel_emit(isel, "MOV", "A", imm_val, NULL);
+        emit_store_spilled_result(isel, dest_val, phys_reg, size, ins);
+    }
 }
 
 void emit_store_spilled_result(ISelContext* isel, ValueName val, int reg, int size, Instr* ins) {

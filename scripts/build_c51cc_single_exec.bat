@@ -1,8 +1,8 @@
 @echo off
 REM ======================================
-REM  C51CC 批量编译 single-exec 脚本
-REM  编译 code/c-testsuite/tests/single-exec 中所有 .c 文件
-REM  输出到 output/c51cc/single-exec
+REM  C51CC 批量编译 test 脚本
+REM  编译 test 中所有 .c 文件
+REM  输出到 output/c51cc/test
 REM
 REM  用法: build_c51cc_single_exec.bat [c51cc路径] [源目录] [输出目录]
 REM ======================================
@@ -18,13 +18,13 @@ if "%~1"=="" (
 )
 
 if "%~2"=="" (
-    call :resolve_path "%REPO_ROOT%\code\c-testsuite\tests\single-exec" SOURCE_DIR
+    call :resolve_path "%REPO_ROOT%\test" SOURCE_DIR
 ) else (
     call :resolve_path "%~2" SOURCE_DIR
 )
 
 if "%~3"=="" (
-    call :resolve_path "%REPO_ROOT%\output\c51cc\single-exec" OUTPUT_DIR
+    call :resolve_path "%REPO_ROOT%\output\c51cc\test" OUTPUT_DIR
 ) else (
     call :resolve_path "%~3" OUTPUT_DIR
 )
