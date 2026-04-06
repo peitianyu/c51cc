@@ -269,6 +269,39 @@ void emit_br(ISelContext* isel, Instr* ins) {
             }
         }
 
+        /* EQ(sbit, 0) or EQ(sbit, 1) used directly as branch condition.
+         * eq(sbit_load, 0): true when bit==0 -> invert=true (JB skips true)
+         * eq(sbit_load, 1): true when bit==1 -> invert unchanged (JNB skips true) */
+        if (def && def->op == IROP_EQ) {
+            ValueName eq_src1 = get_src1_value(def);
+            ValueName eq_src2 = get_src2_value(def);
+            Func* cur_func = isel->ctx->current_func;
+            int64_t eq_cst = 0;
+            bool eq_has_const = false;
+            if (is_imm_operand(def, &eq_cst)) {
+                eq_has_const = true;
+            } else if (is_const_zero_def(cur_func, eq_src2)) {
+                eq_cst = 0;
+                eq_has_const = true;
+            } else {
+                Instr* cdef2 = find_def_instr_in_func(cur_func, eq_src2);
+                if (cdef2 && cdef2->op == IROP_CONST) {
+                    eq_cst = cdef2->imm.ival;
+                    eq_has_const = true;
+                }
+            }
+            if (eq_has_const && (eq_cst == 0 || eq_cst == 1)) {
+                Instr* eq_def = find_def_instr_in_func(cur_func, eq_src1);
+                if (eq_def && eq_def->op == IROP_LOAD && is_sbit_type(eq_def->mem_type)) {
+                    base = eq_src1;
+                    def = eq_def;
+                    if (eq_cst == 0) {
+                        invert = !invert;
+                    }
+                }
+            }
+        }
+
         if (def && def->op == IROP_LNOT) {
             base = get_src1_value(def);
             invert = !invert;
@@ -502,6 +535,21 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
                     }
                 }
             }
+            /* LOAD(sbit) -> EQ(sbit, 0) -> BR: eq(sbit,0) is true when bit==0, use JNB (invert=true) */
+            if (ne && br && ne->op == IROP_EQ && br->op == IROP_BR) {
+                ValueName other = -1;
+                if (ne_is_compare_zero(instrs, n, ne, &other) && other == v0) {
+                    ValueName v1 = ne->dest;
+                    if (instr_uses_value(br, v1)) {
+                        if (count_value_uses(instrs, n, v0) == 1 && count_value_uses(instrs, n, v1) == 1) {
+                            br_bitinfo_put(isel, br, bit, true);
+                            ld->op = IROP_NOP;
+                            ne->op = IROP_NOP;
+                            continue;
+                        }
+                    }
+                }
+            }
         }
 
         if (i + 3 < n) {
@@ -545,6 +593,16 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
             if (ne_is_compare_zero_def(isel->ctx->current_func, def, &other)) {
                 def_ne = def;
                 cond = other;
+                def = find_def_instr_in_func(isel->ctx->current_func, cond);
+            }
+        }
+        /* EQ(sbit, 0): eq(x,0) is true when x==0, equivalent to LNOT of the sbit (invert) */
+        if (def && def->op == IROP_EQ) {
+            ValueName other = -1;
+            if (ne_is_compare_zero_def(isel->ctx->current_func, def, &other)) {
+                def_ne = def;  /* reuse def_ne slot to NOP this instruction */
+                cond = other;
+                invert = !invert;
                 def = find_def_instr_in_func(isel->ctx->current_func, cond);
             }
         }

@@ -1875,6 +1875,668 @@ static bool reg_read_before_write_or_end(List* instrs, int start, const char* re
     return false;
 }
 
+/* 窥孔优化：DEC/DJNZ 生成
+ *
+ * 模式 A1（相同寄存器，生成 DJNZ，节省 3 条）：
+ *   MOV A, Rx        [0]
+ *   DEC A            [1]
+ *   MOV Rx, A        [2]  (写回同一寄存器)
+ *   JNZ label        [3]
+ * →  DJNZ Rx, label
+ *
+ * 模式 A2（不同寄存器，生成 MOV+DJNZ，节省 2 条）：
+ *   MOV A, Rx        [0]
+ *   DEC A            [1]
+ *   MOV Ry, A        [2]  (Ry ≠ Rx)
+ *   JNZ label        [3]
+ * →  MOV Ry, Rx
+ *    DJNZ Ry, label
+ *
+ * 模式 B1（相同寄存器，生成 DEC+JZ，节省 2 条）：
+ *   MOV A, Rx        [0]
+ *   DEC A            [1]
+ *   MOV Rx, A        [2]
+ *   JZ  label        [3]
+ * →  DEC Rx
+ *    JZ  label
+ *
+ * 模式 B2（不同寄存器，生成 MOV+DEC+JZ，节省 1 条）：
+ *   MOV A, Rx        [0]
+ *   DEC A            [1]
+ *   MOV Ry, A        [2]  (Ry ≠ Rx)
+ *   JZ  label        [3]
+ * →  MOV Ry, Rx
+ *    DEC Ry
+ *    JZ  label
+ *
+ * 条件：
+ *   - [0]~[3] 均不是基本块边界
+ *   - [0] 的源 Rx 是 R0-R7（不是 A）
+ *   - [2] 的目标 Ry 是 R0-R7（不是 A）
+ *   - 对于 A2：A 在 [3] 之后不再被读取（保证 "MOV Ry,Rx" 时 A 丢失不影响后续）
+ * 注：DJNZ Rx,label = DEC Rx; JNZ label（减后非零则跳）
+ */
+static int peephole_dec_reg_branch(List* instrs, int start) {
+    if (start + 3 >= instrs->len) return 0;
+
+    AsmInstr* i0 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* i1 = (AsmInstr*)list_get(instrs, start + 1);
+    AsmInstr* i2 = (AsmInstr*)list_get(instrs, start + 2);
+    AsmInstr* i3 = (AsmInstr*)list_get(instrs, start + 3);
+    if (!i0 || !i1 || !i2 || !i3) return 0;
+    /* [0],[1],[2] 不能是基本块边界；[3] 本身是跳转（控制转移），允许但不能是标签 */
+    if (is_basic_block_barrier(i0) || is_basic_block_barrier(i1) ||
+        is_basic_block_barrier(i2)) return 0;
+    if (is_label_instr(i3)) return 0;
+
+    /* [0]: MOV A, Rx  (Rx = R0-R7) */
+    if (!is_mov(i0)) return 0;
+    const char* dst0 = get_operand(i0, 0);
+    const char* src0 = get_operand(i0, 1);
+    if (!dst0 || !src0) return 0;
+    if (!operands_equal(dst0, "A")) return 0;
+    if (!(src0[0] == 'R' && src0[1] >= '0' && src0[1] <= '7' && src0[2] == '\0')) return 0;
+
+    /* [1]: DEC A */
+    if (!i1->op || strcmp(i1->op, "DEC") != 0) return 0;
+    const char* dec_arg = get_operand(i1, 0);
+    if (!dec_arg || !operands_equal(dec_arg, "A")) return 0;
+
+    /* [2]: MOV Ry, A  (Ry = R0-R7) */
+    if (!is_mov(i2)) return 0;
+    const char* dst2 = get_operand(i2, 0);
+    const char* src2 = get_operand(i2, 1);
+    if (!dst2 || !src2) return 0;
+    if (!(dst2[0] == 'R' && dst2[1] >= '0' && dst2[1] <= '7' && dst2[2] == '\0')) return 0;
+    if (!operands_equal(src2, "A")) return 0;
+
+    /* 先尝试 5步模式：[3] 是另一个 MOV Rz, A，[4] 才是 JZ/JNZ
+     * 例：MOV A, R0; DEC A; MOV R1, A; MOV R0, A; JZ label
+     * 只处理 Rz == Rx 的情况（写回原寄存器）
+     */
+    if (start + 4 < instrs->len) {
+        AsmInstr* i3_extra = (AsmInstr*)list_get(instrs, start + 3);
+        AsmInstr* i4_jump  = (AsmInstr*)list_get(instrs, start + 4);
+        if (i3_extra && i4_jump &&
+            !is_basic_block_barrier(i3_extra) && !is_label_instr(i4_jump) &&
+            is_mov(i3_extra)) {
+            const char* dst3e = get_operand(i3_extra, 0);
+            const char* src3e = get_operand(i3_extra, 1);
+            if (dst3e && src3e && operands_equal(src3e, "A") &&
+                operands_equal(dst3e, src0) && /* Rz == Rx: 写回同一寄存器 */
+                i4_jump->op) {
+                bool jnz5 = (strcmp(i4_jump->op, "JNZ") == 0);
+                bool jz5  = (strcmp(i4_jump->op, "JZ")  == 0);
+                if ((jnz5 || jz5) && i4_jump->args && i4_jump->args->len >= 1) {
+                    const char* label5 = (const char*)list_get(i4_jump->args, 0);
+                    if (label5) {
+                        /* 5步模式匹配成功:
+                         * MOV A, Rx; DEC A; MOV Ry, A; MOV Rx, A; JNZ/JZ label
+                         * 转换为:
+                         * MOV Ry, Rx (节省 2 条)
+                         * DEC Rx
+                         * JNZ/JZ label (JNZ → DJNZ Rx)
+                         */
+                        if (jnz5) {
+                            /* → MOV Ry, Rx; DJNZ Rx, label (2条，节省3) */
+                            /* 修改 i4_jump: JNZ → DJNZ Rx, label */
+                            free(i4_jump->op);
+                            i4_jump->op = strdup("DJNZ");
+                            free(i4_jump->args->head->elem);
+                            i4_jump->args->head->elem = strdup(src0);
+                            list_push(i4_jump->args, strdup(label5));
+                            /* 修改 i3_extra: MOV Rx, A → DEC Rx（用来做 DJNZ 的 dec）
+                             * 实际上 DJNZ 自身就有 dec，不需要单独 DEC；
+                             * 只需 MOV Ry, Rx; DJNZ Rx, label */
+                            /* i2: MOV Ry, A → MOV Ry, Rx */
+                            free(i2->args->head->next->elem);
+                            i2->args->head->next->elem = strdup(src0);
+                            /* 删除 [0] MOV A,Rx; [1] DEC A; [3] MOV Rx,A（高到低） */
+                            remove_instr(instrs, start + 3); /* i3_extra */
+                            remove_instr(instrs, start + 1); /* i1 DEC A */
+                            remove_instr(instrs, start + 0); /* i0 MOV A,Rx */
+                            return 3;
+                        } else {
+                            /* → MOV Ry, Rx; DEC Rx; JZ label (3条，节省2) */
+                            /* i2: MOV Ry, A → MOV Ry, Rx */
+                            free(i2->args->head->next->elem);
+                            i2->args->head->next->elem = strdup(src0);
+                            /* i3_extra: MOV Rx, A → DEC Rx */
+                            free(i3_extra->op);
+                            i3_extra->op = strdup("DEC");
+                            if (i3_extra->args->len >= 2) {
+                                ListNode* second = i3_extra->args->head->next;
+                                if (second) {
+                                    free(second->elem);
+                                    i3_extra->args->head->next = second->next;
+                                    if (second->next) second->next->prev = i3_extra->args->head;
+                                    else i3_extra->args->tail = i3_extra->args->head;
+                                    free(second);
+                                    i3_extra->args->len--;
+                                }
+                            }
+                            /* 删除 [0] MOV A,Rx; [1] DEC A */
+                            remove_instr(instrs, start + 1);
+                            remove_instr(instrs, start + 0);
+                            return 2;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    bool same_reg = operands_equal(dst2, src0); /* Ry == Rx */
+
+    /* [3]: JNZ label  or  JZ label */
+    if (!i3->op) return 0;
+    bool is_jnz = (strcmp(i3->op, "JNZ") == 0);
+    bool is_jz  = (strcmp(i3->op, "JZ")  == 0);
+    if (!is_jnz && !is_jz) return 0;
+    if (!i3->args || i3->args->len < 1) return 0;
+    const char* label = (const char*)list_get(i3->args, 0);
+    if (!label) return 0;
+
+    if (is_jnz) {
+        if (same_reg) {
+            /* 模式 A1: 生成 DJNZ Rx, label (替换 4 条为 1 条，节省 3) */
+            free(i3->op);
+            i3->op = strdup("DJNZ");
+            /* 参数从 [label] 改为 [Rx, label] */
+            free(i3->args->head->elem);
+            i3->args->head->elem = strdup(src0);   /* Rx */
+            list_push(i3->args, strdup(label));     /* label */
+            /* 删除 [0],[1],[2]（从高到低） */
+            remove_instr(instrs, start + 2);
+            remove_instr(instrs, start + 1);
+            remove_instr(instrs, start + 0);
+            return 3;
+        } else {
+            /* 模式 A2: 生成 MOV Ry, Rx; DJNZ Ry, label (替换 4 条为 2 条，节省 2) */
+            /* 修改 i3: JNZ label → DJNZ Ry, label */
+            free(i3->op);
+            i3->op = strdup("DJNZ");
+            free(i3->args->head->elem);
+            i3->args->head->elem = strdup(dst2);   /* Ry */
+            list_push(i3->args, strdup(label));     /* label */
+            /* 修改 i2: MOV Ry, A → MOV Ry, Rx */
+            free(i2->args->head->next->elem);
+            i2->args->head->next->elem = strdup(src0);  /* src = Rx */
+            /* 删除 [0],[1]（从高到低） */
+            remove_instr(instrs, start + 1);
+            remove_instr(instrs, start + 0);
+            return 2;
+        }
+    } else { /* is_jz */
+        if (same_reg) {
+            /* 模式 B1: 生成 DEC Rx; JZ label (替换 4 条为 2 条，节省 2) */
+            /* 修改 i2: MOV Rx, A → DEC Rx */
+            free(i2->op);
+            i2->op = strdup("DEC");
+            /* 修改参数：[Rx, A] → [Rx]（移除第二个参数） */
+            if (i2->args->len >= 2) {
+                ListNode* second = i2->args->head->next;
+                if (second) {
+                    free(second->elem);
+                    i2->args->head->next = second->next;
+                    if (second->next) second->next->prev = i2->args->head;
+                    else i2->args->tail = i2->args->head;
+                    free(second);
+                    i2->args->len--;
+                }
+            }
+            /* 删除 [0],[1]（从高到低） */
+            remove_instr(instrs, start + 1);
+            remove_instr(instrs, start + 0);
+            return 2;
+        } else {
+            /* 模式 B2: 生成 MOV Ry, Rx; DEC Ry; JZ label (替换 4 条为 3 条，节省 1) */
+            /* 修改 i2: MOV Ry, A → DEC Ry */
+            free(i2->op);
+            i2->op = strdup("DEC");
+            if (i2->args->len >= 2) {
+                ListNode* second = i2->args->head->next;
+                if (second) {
+                    free(second->elem);
+                    i2->args->head->next = second->next;
+                    if (second->next) second->next->prev = i2->args->head;
+                    else i2->args->tail = i2->args->head;
+                    free(second);
+                    i2->args->len--;
+                }
+            }
+            /* 修改 i1: DEC A → MOV Ry, Rx */
+            free(i1->op);
+            i1->op = strdup("MOV");
+            /* 当前 i1->args 只有一个参数 "A"，需要改为 [Ry, Rx] */
+            free(i1->args->head->elem);
+            i1->args->head->elem = strdup(dst2);   /* Ry */
+            list_push(i1->args, strdup(src0));      /* Rx */
+            /* 删除 [0]（MOV A, Rx） */
+            remove_instr(instrs, start + 0);
+            return 1;
+        }
+    }
+}
+
+/* 窥孔优化：直接 MOV+DEC 循环 → DJNZ
+ *
+ * 模式（5条，R0-R7 直接 dec，不通过累加器 A）：
+ *   Lloop:              [label at start]   ← 注：此处 Lloop 是当前 section 的循环头
+ *   变体 A（5 条，DEC 的是目标 Rd）：
+ *   [0] MOV Rd, Rs      (Rs, Rd 均为 R0-R7，且 Rd != Rs)
+ *   [1] DEC Rd
+ *   [2] JZ  Lexit       (或 JNZ Lloop)
+ *   [3] MOV Rs, Rd      (phi 并行移动：把减后的值写回循环变量 Rs)
+ *   [4] SJMP Lloop      (跳回循环头；Lloop 必须是 start 位置之前的标签)
+ * →
+ *   [0] DJNZ Rs, Lloop  (一条代替 5 条，节省 4)
+ *
+ *   变体 B（4 条，DEC 的是源 Rs，由 peephole_dec_reg_branch 5步变换后产生）：
+ *   [0] MOV Ry, Rx      (Rx 是循环变量，Ry 是副本)
+ *   [1] DEC Rx          (dec 源！与变体 A 不同)
+ *   [2] JZ  Lexit
+ *   [3] SJMP Lloop
+ * →
+ *   [0] MOV Ry, Rx (保留，供 Ry 使用)
+ *   [1] DJNZ Rx, Lloop  (替换 [1][2][3]，节省 2)
+ *
+ *   注：DJNZ = DEC Rs; JNZ Lloop（非零则跳回），等价于原来的 while(--Rs)
+ */
+static int peephole_mov_dec_djnz(List* instrs, int start) {
+    if (start < 1 || start + 3 >= instrs->len) return 0;
+
+    AsmInstr* i_label = (AsmInstr*)list_get(instrs, start - 1);
+    AsmInstr* i0 = (AsmInstr*)list_get(instrs, start);
+    if (!i_label || !i0) return 0;
+    /* 快速预检：i0 必须是 MOV，i_label 必须是标签 */
+    if (!is_label_instr(i_label)) return 0;
+    if (!is_mov(i0)) return 0;
+    /* 标签的 op 形如 "L5:"，去掉末尾冒号得到标签名 */
+    size_t llen = strlen(i_label->op);
+    char lloop_buf[64];
+    if (llen == 0 || llen >= sizeof(lloop_buf)) return 0;
+    memcpy(lloop_buf, i_label->op, llen - 1);
+    lloop_buf[llen - 1] = '\0';
+    const char* lloop = lloop_buf;
+
+    AsmInstr* i1 = (AsmInstr*)list_get(instrs, start + 1);
+    AsmInstr* i2 = (AsmInstr*)list_get(instrs, start + 2);
+    AsmInstr* i3 = (AsmInstr*)list_get(instrs, start + 3);
+    if (!i1 || !i2 || !i3) return 0;
+
+    /* [0]: MOV Rd, Rs (Rd != Rs, 均为 R0-R7) */
+    if (is_basic_block_barrier(i0) || !is_mov(i0)) return 0;
+    const char* dst0 = get_operand(i0, 0);
+    const char* src0 = get_operand(i0, 1);
+    if (!dst0 || !src0) return 0;
+    if (!(dst0[0]=='R' && dst0[1]>='0' && dst0[1]<='7' && dst0[2]=='\0')) return 0;
+    if (!(src0[0]=='R' && src0[1]>='0' && src0[1]<='7' && src0[2]=='\0')) return 0;
+    if (operands_equal(dst0, src0)) return 0; /* Rd == Rs 由其他 peephole 处理 */
+
+    /* [1]: DEC ??? */
+    if (is_basic_block_barrier(i1) || !i1->op || strcmp(i1->op, "DEC") != 0) return 0;
+    const char* dec_arg = get_operand(i1, 0);
+    if (!dec_arg) return 0;
+    bool dec_is_dst = operands_equal(dec_arg, dst0); /* 变体 A: DEC Rd */
+    bool dec_is_src = operands_equal(dec_arg, src0); /* 变体 B: DEC Rs */
+    if (!dec_is_dst && !dec_is_src) return 0;
+
+    /* [2]: JZ Lexit 或 JNZ Lloop */
+    if (is_label_instr(i2) || !i2->op) return 0;
+    bool is_jz  = (strcmp(i2->op, "JZ")  == 0);
+    bool is_jnz = (strcmp(i2->op, "JNZ") == 0);
+    if (!is_jz && !is_jnz) return 0;
+    if (!i2->args || i2->args->len < 1) return 0;
+    const char* i2_target = (const char*)list_get(i2->args, 0);
+    if (!i2_target) return 0;
+
+    /* ---- 变体 B（4条，dec_is_src）：MOV Ry,Rx; DEC Rx; JZ Lexit; SJMP/LJMP Lloop ---- */
+    if (dec_is_src && is_jz) {
+        /* [3]: SJMP/LJMP Lloop */
+        if (!i3->op) return 0;
+        bool i3_is_jump = (strcmp(i3->op, "SJMP") == 0 || strcmp(i3->op, "LJMP") == 0 ||
+                          strcmp(i3->op, "AJMP") == 0 || strcmp(i3->op, "JMP")  == 0);
+        if (!i3_is_jump) return 0;
+        if (!i3->args || i3->args->len < 1) return 0;
+        const char* sjmp_tgt = (const char*)list_get(i3->args, 0);
+        if (!sjmp_tgt || !operands_equal(sjmp_tgt, lloop)) return 0;
+        /* 变换：DEC Rx 改为 DJNZ Rx, Lloop；删除 [2] JZ, [3] SJMP */
+        free(i1->op);
+        i1->op = strdup("DJNZ");
+        /* i1->args 从 [Rx] 改为 [Rx, Lloop] */
+        list_push(i1->args, strdup(lloop));    /* Lloop */
+        /* 从高到低删除：[3] SJMP, [2] JZ */
+        remove_instr(instrs, start + 3);
+        remove_instr(instrs, start + 2);
+        return 2;
+    }
+
+    /* ---- 变体 A（5条，dec_is_dst）：MOV Rd,Rs; DEC Rd; JZ/JNZ; MOV Rs,Rd; SJMP/LJMP ---- */
+    if (!dec_is_dst) return 0;
+    if (start + 4 >= instrs->len) return 0;
+    AsmInstr* i4 = (AsmInstr*)list_get(instrs, start + 4);
+    if (!i4) return 0;
+
+    /* [3]: MOV Rs, Rd (phi 并行移动) */
+    if (is_basic_block_barrier(i3) || !is_mov(i3)) return 0;
+    const char* dst3 = get_operand(i3, 0);
+    const char* src3 = get_operand(i3, 1);
+    if (!dst3 || !src3) return 0;
+    if (!operands_equal(dst3, src0) || !operands_equal(src3, dst0)) return 0; /* MOV Rs, Rd */
+
+    if (is_jz) {
+        /* [4]: SJMP/LJMP Lloop（跳回循环头） */
+        if (!i4->op) return 0;
+        bool i4_is_jump = (strcmp(i4->op, "SJMP") == 0 || strcmp(i4->op, "LJMP") == 0 ||
+                          strcmp(i4->op, "AJMP") == 0 || strcmp(i4->op, "JMP")  == 0);
+        if (!i4_is_jump) return 0;
+        if (!i4->args || i4->args->len < 1) return 0;
+        const char* sjmp_tgt = (const char*)list_get(i4->args, 0);
+        if (!sjmp_tgt || !operands_equal(sjmp_tgt, lloop)) return 0;
+
+        /* 变换：JZ Lexit 改为 DJNZ Rs, Lloop；删除其余 4 条 */
+        free(i2->op);
+        i2->op = strdup("DJNZ");
+        /* i2->args 从 [Lexit] 改为 [Rs, Lloop] */
+        free(i2->args->head->elem);
+        i2->args->head->elem = strdup(src0);   /* Rs */
+        list_push(i2->args, strdup(lloop));    /* Lloop */
+        /* 从高到低删除：[4] SJMP, [3] MOV Rs Rd, [1] DEC, [0] MOV Rd Rs */
+        remove_instr(instrs, start + 4);
+        remove_instr(instrs, start + 3);
+        remove_instr(instrs, start + 1);
+        remove_instr(instrs, start + 0);
+        return 4;
+    } else {
+        /* is_jnz: [2] JNZ Lloop，确认 JNZ 跳回的是 Lloop */
+        if (!operands_equal(i2_target, lloop)) return 0;
+        /* 变换：JNZ Lloop → DJNZ Rs, Lloop；删除 [3] MOV Rs Rd, [1] DEC, [0] MOV Rd Rs */
+        free(i2->op);
+        i2->op = strdup("DJNZ");
+        free(i2->args->head->elem);
+        i2->args->head->elem = strdup(src0);   /* Rs */
+        list_push(i2->args, strdup(lloop));    /* Lloop */
+        remove_instr(instrs, start + 3);
+        remove_instr(instrs, start + 1);
+        remove_instr(instrs, start + 0);
+        return 3;
+    }
+}
+
+/* 窥孔优化：sbit bool 物化简化
+ *
+ * 模式：
+ *   MOV C, sbit_addr    [0]   ; 加载 sbit 到 C
+ *   CLR A               [1]   ; A = 0
+ *   RLC A               [2]   ; A = C (A = 0 + C)
+ *   MOV Rx, A           [3]   ; Rx = bool(sbit)
+ * →
+ *   CLR Rx              [0']  ; Rx = 0
+ *   JNB sbit_addr, skip [1']  ; if sbit==0, skip
+ *   MOV Rx, #1          [2']  ; Rx = 1
+ *   skip:               [3']  (用下一条指令作为 skip target)
+ *
+ * 节省：4 条 → 3 条（+ 1 个标签，但 skip 可以直接接下一条）
+ * 实际上：通过 JNB+fall-through 无需额外标签，直接跳过 MOV Rx,#1
+ *
+ * 更实用的变换（无需额外标签，3条）：
+ *   CLR Rx
+ *   JNB sbit_addr, Lskip
+ *   MOV Rx, #1
+ * Lskip:  (= 下一条指令)
+ *
+ * 因为下一条指令通常接着读 Rx，这 3 条是正确的。
+ * 但需要一个 skip label，所以我们插入一个新的本地标签。
+ *
+ * 替代方案（完全无标签，2条，仅适用于 Rx 可通过 MOV 直接设）：
+ * 其实最简洁的等价是保留这 4 条，依赖后续 peephole 消除冗余。
+ *
+ * 注意：`CLR C; RLC A` 已经被 peephole_clr_c_rlc_to_add 处理为 `ADD A, A`
+ * 但这里是 `CLR A; RLC A`（先清 A，再 rotate through carry），不同！
+ * CLR A → A=0；RLC A → A = (A<<1) | C = 0 | C = C（因 A 的位7进入C，但A=0时只有bit0=C）
+ * 所以 `CLR A; RLC A` 确实等于 `A = C(原来的值)`（即 A = 0 or 1）。
+ *
+ * 生成方案（无新标签，利用 JNB 的 fall-through）：
+ * 思路: 已有 peephole_clr_c_rlc_to_add 只处理 CLR C; RLC A。
+ * 此处 CLR A; RLC A 是不同模式。
+ *
+ * 最简单的实现：将 4 条替换为 3 条：
+ *   MOV C, sbit
+ *   CLR Rx         (Rx = 0)
+ *   RLC Rx         -- 不行，RLC 只对 A
+ *
+ * 正确方案：需要生成新标签。我们生成一个 __sbit_N 标签。
+ * 或者更好：使用 ANL/ORL 绕过：
+ *   CLR Rx
+ *   MOV C, sbit
+ *   RLC A          -- 还是需要 A
+ *   MOV Rx, A      -- back to same problem
+ *
+ * 最终方案（3条，需 1 个跳过标签）：
+ *   CLR Rx              ; Rx = 0
+ *   JNB sbit_addr, $+4  ; 若 sbit=0 则跳过下一条（SJMP 相对+2 在 8051 汇编中）
+ *   INC Rx              ; Rx = 1 (only if sbit=1)
+ * 这样不需要显式标签，但需要汇编器支持 $+N 语法。
+ *
+ * 最稳定方案（使用 CLR A; MOV C, sbit; RLC A）：
+ * 即保持 3 条，仅把 MOV C, sbit; CLR A; RLC A → CLR A; MOV C, sbit; RLC A
+ * 再加 MOV Rx, A = 4 条。实际上是重排序，节省 0。
+ *
+ * 真正有效的方案：改变 `MOV C, sbit; CLR A; RLC A` 的整个语义，
+ * 即：这 3 条 + MOV Rx, A = 4 条转换为 `CLR Rx; JNB sbit, skip; INC Rx; skip:`
+ * = 3 条 + 1 个标签。净减少 1 条指令（4→3）。
+ *
+ * 我们使用一个静态计数器生成唯一的 skip 标签：__sbit_bool_N
+ */
+static int g_sbit_bool_counter = 0;
+
+static int peephole_sbit_bool_materialize(List* instrs, int start) {
+    if (start + 3 >= instrs->len) return 0;
+
+    AsmInstr* i0 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* i1 = (AsmInstr*)list_get(instrs, start + 1);
+    AsmInstr* i2 = (AsmInstr*)list_get(instrs, start + 2);
+    AsmInstr* i3 = (AsmInstr*)list_get(instrs, start + 3);
+    if (!i0 || !i1 || !i2 || !i3) return 0;
+    if (is_basic_block_barrier(i0) || is_basic_block_barrier(i1) ||
+        is_basic_block_barrier(i2) || is_basic_block_barrier(i3)) return 0;
+
+    /* [0]: MOV C, sbit_addr */
+    if (!i0->op || strcmp(i0->op, "MOV") != 0) return 0;
+    const char* dst0 = get_operand(i0, 0);
+    const char* sbit_addr = get_operand(i0, 1);
+    if (!dst0 || !sbit_addr) return 0;
+    if (!operands_equal(dst0, "C")) return 0;
+    /* sbit_addr must not be a register or immediate */
+    if (is_register_operand(sbit_addr) || is_immediate_operand(sbit_addr)) return 0;
+
+    /* [1]: CLR A */
+    if (!i1->op || strcmp(i1->op, "CLR") != 0) return 0;
+    const char* clr_arg = get_operand(i1, 0);
+    if (!clr_arg || !operands_equal(clr_arg, "A")) return 0;
+
+    /* [2]: RLC A */
+    if (!i2->op || strcmp(i2->op, "RLC") != 0) return 0;
+    const char* rlc_arg = get_operand(i2, 0);
+    if (!rlc_arg || !operands_equal(rlc_arg, "A")) return 0;
+
+    /* [3]: MOV Rx, A  (Rx = R0-R7) */
+    if (!is_mov(i3)) return 0;
+    const char* dst3 = get_operand(i3, 0);
+    const char* src3 = get_operand(i3, 1);
+    if (!dst3 || !src3) return 0;
+    if (!(dst3[0] == 'R' && dst3[1] >= '0' && dst3[1] <= '7' && dst3[2] == '\0')) return 0;
+    if (!operands_equal(src3, "A")) return 0;
+
+    /* 生成唯一 skip 标签 */
+    char skip_label[32];
+    snprintf(skip_label, sizeof(skip_label), "__sbool_%d", g_sbit_bool_counter++);
+    char skip_label_def[34];
+    snprintf(skip_label_def, sizeof(skip_label_def), "%s:", skip_label);
+
+    /* 构建替换指令序列（3条指令 + 1个标签定义）：
+     *   CLR Rx
+     *   JNB sbit_addr, skip_label
+     *   INC Rx         (或 MOV Rx, #1，INC 更短: 2B vs 2B)
+     * skip_label:
+     */
+
+    /* 新指令1: CLR Rx */
+    AsmInstr* new_clr = calloc(1, sizeof(AsmInstr));
+    new_clr->op = strdup("CLR");
+    new_clr->args = make_list();
+    list_push(new_clr->args, strdup(dst3));
+
+    /* 新指令2: JNB sbit_addr, skip_label */
+    AsmInstr* new_jnb = calloc(1, sizeof(AsmInstr));
+    new_jnb->op = strdup("JNB");
+    new_jnb->args = make_list();
+    list_push(new_jnb->args, strdup(sbit_addr));
+    list_push(new_jnb->args, strdup(skip_label));
+
+    /* 新指令3: INC Rx */
+    AsmInstr* new_inc = calloc(1, sizeof(AsmInstr));
+    new_inc->op = strdup("INC");
+    new_inc->args = make_list();
+    list_push(new_inc->args, strdup(dst3));
+
+    /* 标签定义指令: skip_label: */
+    AsmInstr* new_lbl = calloc(1, sizeof(AsmInstr));
+    new_lbl->op = strdup(skip_label_def);
+    new_lbl->args = make_list();
+
+    /* 用 4 条新指令替换原来的 4 条
+     * 先删除原来的 4 条（从高到低），再插入新的 4 条 */
+    remove_instr(instrs, start + 3);
+    remove_instr(instrs, start + 2);
+    remove_instr(instrs, start + 1);
+    remove_instr(instrs, start + 0);
+
+    /* 从后往前插入（使最终顺序正确）*/
+    insert_instr(instrs, start, new_lbl);
+    insert_instr(instrs, start, new_inc);
+    insert_instr(instrs, start, new_jnb);
+    insert_instr(instrs, start, new_clr);
+
+    /* 净指令数变化：4→4（相同数量），但消除了 A 寄存器的依赖，
+     * 使后续 peephole 能进一步优化（如 JNB/JNZ 合并等）。
+     * 原来: MOV C,sbit(2B) + CLR A(1B) + RLC A(1B) + MOV Rx,A(1B) = 5 bytes
+     * 现在: CLR Rx(1B) + JNB sbit,lbl(3B) + INC Rx(1B) = 5 bytes
+     * 字节数相同，但消除了 A 的依赖，使后续优化可合并 CJNE 序列。
+     * 真正的节省来自后续 peephole 处理 CJNE 后面的比较零模式。
+     */
+    return 1; /* 标记发生了变化，触发再次迭代 */
+}
+
+/*
+ * peephole_sbit_bool_jz: 合并 sbit-bool 化后的 JZ/JNZ 跳转
+ *
+ * 匹配模式（由 peephole_sbit_bool_materialize 生成）：
+ *   [0]: CLR Rx
+ *   [1]: JNB sbit, skip_lbl
+ *   [2]: INC Rx
+ *   [3]: skip_lbl:          (标签定义)
+ *   [4]: MOV A, Rx
+ *   [5]: JZ/JNZ target_lbl
+ *
+ * 转换：
+ *   JNZ target → bit=1 时跳转 → JB sbit, target (节省 ~6 字节)
+ *   JZ  target → bit=0 时跳转 → JNB sbit, target (节省 ~6 字节)
+ *
+ * 同时处理 JZ 变体：result 的逻辑
+ *   Rx = (sbit != 0) ? 1 : 0
+ *   JZ  Rx: 跳转如果 Rx==0, 即 sbit==0 → JNB sbit, target
+ *   JNZ Rx: 跳转如果 Rx!=0, 即 sbit!=0 → JB  sbit, target
+ */
+static int peephole_sbit_bool_jz(List* instrs, int start) {
+    if (start + 5 >= instrs->len) return 0;
+
+    AsmInstr* i0 = (AsmInstr*)list_get(instrs, start);
+    AsmInstr* i1 = (AsmInstr*)list_get(instrs, start + 1);
+    AsmInstr* i2 = (AsmInstr*)list_get(instrs, start + 2);
+    AsmInstr* i3 = (AsmInstr*)list_get(instrs, start + 3);
+    AsmInstr* i4 = (AsmInstr*)list_get(instrs, start + 4);
+    AsmInstr* i5 = (AsmInstr*)list_get(instrs, start + 5);
+    if (!i0 || !i1 || !i2 || !i3 || !i4 || !i5) return 0;
+
+    /* [0]: CLR Rx */
+    if (!i0->op || strcmp(i0->op, "CLR") != 0) return 0;
+    const char* clr_reg = get_operand(i0, 0);
+    if (!clr_reg || !IS_RX(clr_reg)) return 0;
+
+    /* [1]: JNB sbit, skip_lbl */
+    if (!i1->op || strcmp(i1->op, "JNB") != 0) return 0;
+    const char* sbit_name = get_operand(i1, 0);
+    const char* skip_lbl  = get_operand(i1, 1);
+    if (!sbit_name || !skip_lbl) return 0;
+    if (is_register_operand(sbit_name) || is_immediate_operand(sbit_name)) return 0;
+
+    /* [2]: INC Rx (same Rx as [0]) */
+    if (!i2->op || strcmp(i2->op, "INC") != 0) return 0;
+    const char* inc_reg = get_operand(i2, 0);
+    if (!inc_reg || !operands_equal(inc_reg, clr_reg)) return 0;
+
+    /* [3]: skip_lbl: (label definition matching skip_lbl from [1]) */
+    if (!is_label_instr(i3)) return 0;
+    /* 标签定义形式为 "skip_lbl:" */
+    size_t lbl_len = strlen(skip_lbl);
+    if (strncmp(i3->op, skip_lbl, lbl_len) != 0) return 0;
+    if (i3->op[lbl_len] != ':') return 0;
+
+    /* [4]: MOV A, Rx */
+    if (!is_mov(i4)) return 0;
+    const char* mov_dst = get_operand(i4, 0);
+    const char* mov_src = get_operand(i4, 1);
+    if (!mov_dst || !mov_src) return 0;
+    if (!operands_equal(mov_dst, "A")) return 0;
+    if (!operands_equal(mov_src, clr_reg)) return 0;
+
+    /* [5]: JZ target or JNZ target */
+    if (!i5->op) return 0;
+    bool is_jz  = (strcmp(i5->op, "JZ")  == 0);
+    bool is_jnz = (strcmp(i5->op, "JNZ") == 0);
+    if (!is_jz && !is_jnz) return 0;
+    const char* target = get_operand(i5, 0);
+    if (!target) return 0;
+
+    /* 确保 skip_lbl 后面没有其他跳转目标指向 [3]（否则不安全删除标签）
+     * 简单检查：skip_lbl 只在 [1] 使用（即 JNB 的目标）。
+     * 只要在 [0..4] 之外没有其他指令跳转到 skip_lbl 即可。
+     * 我们做一个保守检查：扫描整个 instrs，看是否有其他引用。
+     */
+    for (int j = 0; j < instrs->len; j++) {
+        if (j >= start && j <= start + 5) continue; /* 跳过本模式本身 */
+        AsmInstr* aj = (AsmInstr*)list_get(instrs, j);
+        if (!aj) continue;
+        if (!aj->args) continue;
+        for (int k = 0; k < aj->args->len; k++) {
+            const char* arg = (const char*)list_get(aj->args, k);
+            if (arg && strcmp(arg, skip_lbl) == 0) return 0; /* 有其他引用，不安全 */
+        }
+    }
+
+    /* 生成替换指令：
+     *   JZ  target → JNB sbit, target   (sbit==0 时跳转)
+     *   JNZ target → JB  sbit, target   (sbit==1 时跳转)
+     */
+    const char* new_op = is_jz ? "JNB" : "JB";
+
+    AsmInstr* new_jb = calloc(1, sizeof(AsmInstr));
+    new_jb->op = strdup(new_op);
+    new_jb->args = make_list();
+    list_push(new_jb->args, strdup(sbit_name));
+    list_push(new_jb->args, strdup(target));
+
+    /* 删除原来 6 条，插入 1 条 */
+    for (int d = start + 5; d >= start; d--) {
+        remove_instr(instrs, d);
+    }
+    insert_instr(instrs, start, new_jb);
+
+    return 1;
+}
+
 /* 死代码删除：MOV Rx, src，Rx 后续不被读取则删除 */
 static int peephole_dead_code(List* instrs, int start) {
     AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
@@ -2587,6 +3249,18 @@ static void optimize_section(Section* sec) {
             if (removed) { changed = 1; continue; }
 
             removed = peephole_xdata_store_load_forward(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_dec_reg_branch(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_mov_dec_djnz(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_sbit_bool_materialize(sec->asminstrs, i);
+            if (removed) { changed = 1; continue; }
+
+            removed = peephole_sbit_bool_jz(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
             removed = peephole_mov_reg_to_any(sec->asminstrs, i);

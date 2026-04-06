@@ -228,6 +228,8 @@ static bool value_is_zero_extended_byte_logic(Func* func, ValueName value, Value
     if (!def) return false;
     if (def->op == IROP_CONST) return (def->imm.ival & ~0xFFLL) == 0;
     if (def->op == IROP_TRUNC) return true;
+    /* A 1-byte typed value (e.g. unsigned char load/param) is always a byte */
+    if (def->type && c51_abi_type_size(def->type) == 1) return true;
     if (def->op == IROP_PHI && def->args) {
         ValueName next_seen[16];
         int next_count = seen_count;

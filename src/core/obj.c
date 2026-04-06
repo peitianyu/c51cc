@@ -382,8 +382,17 @@ ObjFile *obj_link(List *objs)
                     existing->flags = sym->flags;
                     continue;
                 }
+                /* 如果已有同名且两者都有定义，视为重复定义，链接失败 */
+                if (sec >= 0 && existing->section >= 0) {
+                    fprintf(stderr, "link error: duplicate definition of symbol '%s'\n", sym->name);
+                    /* 清理并返回 NULL 上层处理 */
+                    for (Iter mit = list_iter(maps); !iter_end(mit);) free(iter_next(&mit));
+                    free(maps);
+                    obj_free(out);
+                    return NULL;
+                }
             }
-            
+
             obj_add_symbol(out, sym->name, sym->kind, sec, val, sym->size, sym->flags);
         }
         

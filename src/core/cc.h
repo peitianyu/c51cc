@@ -321,6 +321,7 @@ extern CtypeAttr get_attr(int in_attr);
 
 /* pp.c - 预处理器 */
 extern bool pp_preprocess_to_stdin(const char *filename);
+extern void pp_global_add_include_path(const char *path);
 
 /* debug */
 #define error(...) errorf(__FILE__, __LINE__, __VA_ARGS__)

@@ -363,17 +363,28 @@ static char *find_startup_path(const char *source_path)
 {
     char *dir;
     char *path;
+    char *parent;
     char *fallback;
 
     dir = dup_dirname(source_path);
     if (!dir) return NULL;
-    path = join_path2(dir, "STARTUP.A51");
-    free(dir);
-    if (!path) return NULL;
 
-    if (file_exists(path)) return path;
+    /* 1. Same directory as source file */
+    path = join_path2(dir, "STARTUP.A51");
+    if (path && file_exists(path)) { free(dir); return path; }
     free(path);
-    
+
+    /* 2. Parent directory of source file (common shared startup) */
+    parent = dup_dirname(dir);
+    free(dir);
+    if (parent) {
+        path = join_path2(parent, "STARTUP.A51");
+        free(parent);
+        if (path && file_exists(path)) return path;
+        free(path);
+    }
+
+    /* 3. Current working directory */
     fallback = join_path2(".", "STARTUP.A51");
     if (file_exists(fallback)) return fallback;
     free(fallback);
@@ -761,8 +772,20 @@ ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj)
         }
     }
 
-    if (startup_obj) list_push(&objs, startup_obj);
-    list_push(&objs, main_obj);
+    /* startup must come first so its code lands at address 0x0000,
+     * then main, then runtime libs. */
+    {
+        List ordered = EMPTY_LIST;
+        if (startup_obj) list_push(&ordered, startup_obj);
+        list_push(&ordered, main_obj);
+        /* append runtime libs that were collected in objs */
+        for (Iter it = list_iter(&objs); !iter_end(it);) {
+            ObjFile *o = iter_next(&it);
+            if (o) list_push(&ordered, o);
+        }
+        while (!list_empty(&objs)) list_shift(&objs);
+        objs = ordered;
+    }
 
     if (objs.len <= 1) {
         /* Only main_obj – nothing to link */

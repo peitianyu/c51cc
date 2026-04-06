@@ -2920,6 +2920,211 @@ static bool pass_single_block_normalize(Func *f) {
     return true;
 }
 
+/*
+ * pass_phi_const_true_fold:
+ *
+ * 合并短路求值产生的 phi+br 模式：
+ *
+ *   B_cond:  v_cond = <bool expr>; jmp B_merge
+ *   B_true:  v_const = const 1;   jmp B_merge
+ *   B_merge: v_phi = phi [v_cond/B_cond, v_const/B_true];
+ *            br v_phi, B_taken, B_not_taken
+ *
+ * 转换为：
+ *   B_cond:  v_cond = <bool expr>; br v_cond, B_taken, B_not_taken
+ *   B_true:  v_const = const 1;   jmp B_taken
+ *   B_merge: （清空，变为死块）
+ *
+ * 条件：
+ *   - B_merge 恰好有 1 个 phi，phi 恰好 2 个 arm
+ *   - phi 的其中一个 arm 是 const 非零（truthy），另一个是任意值 v_cond
+ *   - phi 结果唯一使用是 B_merge 内的一条 br 指令
+ *   - B_merge 的 instrs 只有这一条 br（可以有 NOP/CONST，但终止指令是 br）
+ *   - B_cond 的终止指令是 jmp B_merge（不是已有的 br）
+ *   - B_true 的终止指令是 jmp B_merge
+ */
+static bool pass_phi_const_true_fold(Func *f, Stats *s) {
+    if (!f || !f->blocks) return false;
+    bool changed = false;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b_merge = iter_next(&it);
+        if (!b_merge) continue;
+
+        /* B_merge 恰好有 1 个 phi */
+        if (!b_merge->phis || b_merge->phis->len != 1) continue;
+        Instr *phi = (Instr *)list_get(b_merge->phis, 0);
+        if (!phi || phi->op != IROP_PHI) continue;
+        if (!phi->args || !phi->labels || phi->args->len != 2 || phi->labels->len != 2) continue;
+
+        ValueName v0 = *(ValueName *)list_get(phi->args, 0);
+        ValueName v1 = *(ValueName *)list_get(phi->args, 1);
+        const char *lbl0 = (const char *)list_get(phi->labels, 0);
+        const char *lbl1 = (const char *)list_get(phi->labels, 1);
+        if (!lbl0 || !lbl1) continue;
+
+        /* phi 结果只用于一条 br */
+        ValueName v_phi = phi->dest;
+        if (count_uses(f, v_phi) != 1) continue;
+
+        /* B_merge 终止指令是 br v_phi, b_taken, b_not_taken */
+        if (!b_merge->instrs || b_merge->instrs->len == 0) continue;
+        Instr *term = (Instr *)list_get(b_merge->instrs, b_merge->instrs->len - 1);
+        if (!term || term->op != IROP_BR) continue;
+        if (!term->args || term->args->len < 1) continue;
+        ValueName br_cond = *(ValueName *)list_get(term->args, 0);
+        if (br_cond != v_phi) continue;
+        if (!term->labels || term->labels->len < 2) continue;
+
+        const char *lbl_taken = (const char *)list_get(term->labels, 0);
+        const char *lbl_not   = (const char *)list_get(term->labels, 1);
+        if (!lbl_taken || !lbl_not) continue;
+
+        /* 确认 B_merge 除了 br 只有 NOP/CONST/PHI（phi 可能同时存在于 instrs 中） */
+        for (int ii = 0; ii < b_merge->instrs->len - 1; ii++) {
+            Instr *ci = (Instr *)list_get(b_merge->instrs, ii);
+            if (ci && ci->op != IROP_NOP && ci->op != IROP_CONST && ci->op != IROP_PHI) goto next_block;
+        }
+
+        {
+            /* 找出哪个 arm 是 const 非零，哪个是 cond */
+            int const_arm = -1; /* 0 或 1 */
+            int cond_arm  = -1;
+            int64_t cv0 = 0, cv1 = 0;
+            bool is_const0 = get_const_value(f, v0, &cv0);
+            bool is_const1 = get_const_value(f, v1, &cv1);
+
+            if (is_const0 && cv0 != 0 && !is_const1) {
+                const_arm = 0; cond_arm = 1;
+            } else if (is_const1 && cv1 != 0 && !is_const0) {
+                const_arm = 1; cond_arm = 0;
+            } else {
+                continue; /* 不符合模式 */
+            }
+
+            const char *lbl_const_arm = (const_arm == 0) ? lbl0 : lbl1;
+            const char *lbl_cond_arm  = (cond_arm  == 0) ? lbl0 : lbl1;
+            ValueName v_cond = (cond_arm == 0) ? v0 : v1;
+
+            int id_const_blk = -1, id_cond_blk = -1;
+            sscanf(lbl_const_arm, "block%d", &id_const_blk);
+            sscanf(lbl_cond_arm,  "block%d", &id_cond_blk);
+            if (id_const_blk < 0 || id_cond_blk < 0) continue;
+
+            Block *b_const_blk = find_block_by_id(f, id_const_blk);
+            Block *b_cond_blk  = find_block_by_id(f, id_cond_blk);
+            if (!b_const_blk || !b_cond_blk) continue;
+
+            /* 两个前驱块的终止指令都必须是 jmp B_merge */
+            if (!b_const_blk->instrs || b_const_blk->instrs->len == 0) continue;
+            if (!b_cond_blk->instrs  || b_cond_blk->instrs->len == 0)  continue;
+            Instr *t_const = (Instr *)list_get(b_const_blk->instrs, b_const_blk->instrs->len - 1);
+            Instr *t_cond  = (Instr *)list_get(b_cond_blk->instrs,  b_cond_blk->instrs->len - 1);
+            if (!t_const || t_const->op != IROP_JMP) continue;
+            if (!t_cond  || t_cond->op  != IROP_JMP) continue;
+            if (!t_const->labels || t_const->labels->len < 1) continue;
+            if (!t_cond->labels  || t_cond->labels->len  < 1) continue;
+            {
+                int t_const_tid = -1, t_cond_tid = -1;
+                sscanf((char *)list_get(t_const->labels, 0), "block%d", &t_const_tid);
+                sscanf((char *)list_get(t_cond->labels,  0), "block%d", &t_cond_tid);
+                if (t_const_tid != (int)b_merge->id || t_cond_tid != (int)b_merge->id) continue;
+            }
+
+            /* 解析 lbl_taken / lbl_not 中的 block id */
+            int id_taken = -1, id_not = -1;
+            sscanf(lbl_taken, "block%d", &id_taken);
+            sscanf(lbl_not,   "block%d", &id_not);
+            if (id_taken < 0 || id_not < 0) continue;
+
+            /* 安全检查：b_taken 和 b_not 的 phi（如果有）不引用 b_merge 作为前驱 */
+            Block *b_taken = find_block_by_id(f, id_taken);
+            Block *b_not   = find_block_by_id(f, id_not);
+            if (!b_taken || !b_not) continue;
+
+            /* 如果 b_taken 或 b_not 有 phi 且依赖 b_merge，暂不处理（保守） */
+            bool b_taken_has_phi_from_merge = false, b_not_has_phi_from_merge = false;
+            char merge_label[32];
+            snprintf(merge_label, sizeof(merge_label), "block%d", (int)b_merge->id);
+            if (b_taken->phis) {
+                for (Iter pi = list_iter(b_taken->phis); !iter_end(pi);) {
+                    Instr *pp = iter_next(&pi);
+                    if (!pp || !pp->labels) continue;
+                    for (int k = 0; k < pp->labels->len; k++) {
+                        if (strcmp((char *)list_get(pp->labels, k), merge_label) == 0)
+                            b_taken_has_phi_from_merge = true;
+                    }
+                }
+            }
+            if (b_not->phis) {
+                for (Iter pi = list_iter(b_not->phis); !iter_end(pi);) {
+                    Instr *pp = iter_next(&pi);
+                    if (!pp || !pp->labels) continue;
+                    for (int k = 0; k < pp->labels->len; k++) {
+                        if (strcmp((char *)list_get(pp->labels, k), merge_label) == 0)
+                            b_not_has_phi_from_merge = true;
+                    }
+                }
+            }
+            if (b_taken_has_phi_from_merge || b_not_has_phi_from_merge) continue;
+
+            /* ========== 执行变换 ========== */
+
+            /* 1. b_const_blk: jmp b_merge → jmp b_taken */
+            {
+                char *new_lbl = pass_alloc(strlen(lbl_taken) + 1);
+                strcpy(new_lbl, lbl_taken);
+                list_clear(t_const->labels);
+                list_push(t_const->labels, new_lbl);
+                /* 更新前驱关系 */
+                if (b_merge->preds) b_merge->preds = preds_remove(b_merge->preds, b_const_blk);
+                if (b_taken->preds) list_unique_push(b_taken->preds, b_const_blk, block_ptr_eq);
+            }
+
+            /* 2. b_cond_blk: jmp b_merge → br v_cond, b_taken, b_not */
+            {
+                t_cond->op = IROP_BR;
+                /* 设置条件操作数 */
+                if (t_cond->args) list_clear(t_cond->args);
+                else t_cond->args = make_list();
+                ValueName *pv = pass_alloc(sizeof(ValueName));
+                *pv = v_cond;
+                list_push(t_cond->args, pv);
+                /* 设置标签 */
+                if (t_cond->labels) list_clear(t_cond->labels);
+                else t_cond->labels = make_list();
+                char *l_t = pass_alloc(strlen(lbl_taken) + 1);
+                char *l_n = pass_alloc(strlen(lbl_not) + 1);
+                strcpy(l_t, lbl_taken);
+                strcpy(l_n, lbl_not);
+                list_push(t_cond->labels, l_t);
+                list_push(t_cond->labels, l_n);
+                /* 更新前驱关系 */
+                if (b_merge->preds) b_merge->preds = preds_remove(b_merge->preds, b_cond_blk);
+                if (b_taken->preds) list_unique_push(b_taken->preds, b_cond_blk, block_ptr_eq);
+                if (b_not->preds)   list_unique_push(b_not->preds,   b_cond_blk, block_ptr_eq);
+            }
+
+            /* 3. 清空 B_merge（phi + instrs），使其变为死块 */
+            {
+                list_clear_shallow(b_merge->phis);
+                b_merge->phis = make_list();
+                list_clear_shallow(b_merge->instrs);
+                b_merge->instrs = make_list();
+                /* b_merge 失去所有前驱，后继也删除 */
+                if (b_taken->preds) b_taken->preds = preds_remove(b_taken->preds, b_merge);
+                if (b_not->preds)   b_not->preds   = preds_remove(b_not->preds,   b_merge);
+            }
+
+            if (s) s->fold++;
+            changed = true;
+        }
+        next_block:;
+    }
+
+    return changed;
+}
+
 /*---------- 确保所有跳转目标块存在 ----------*/
 static bool ensure_block_targets_exist(Func *f) {
     bool changed = false;
@@ -2982,6 +3187,7 @@ void ssa_optimize_func(Func *f, int level) {
         RUN_PASS(pass_const_branch);
         RUN_PASS(pass_br_same_target);
         RUN_PASS(pass_jump_threading);
+        RUN_PASS(pass_phi_const_true_fold);
         RUN_PASS(pass_jmp_only_elim);
         RUN_PASS(pass_entry_jmp_inline);
         RUN_PASS(pass_entry_jmp_ret_fold);

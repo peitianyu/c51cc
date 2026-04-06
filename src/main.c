@@ -44,7 +44,8 @@ static void usage(const char *prog) {
         "  -hex         Emit Intel HEX\n"
         "  -O0/-O1/-O2  Optimization level (default: O1)\n"
         "  -o <file>    Output file (default: stdout)\n"
-        "               With -asm and -hex together, writes sibling .asm/.hex files\n",
+        "               With -asm and -hex together, writes sibling .asm/.hex files\n"
+        "  -I<path>     Add include search path\n",
         prog ? prog : "c51cc"
     );
 }
@@ -105,21 +106,57 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "error: -o requires an argument\n");
                 return 1;
             }
+        } else if (a[0] == '-' && a[1] == 'I') {
+            /* -Ipath 或 -I path 两种形式 */
+            const char *ipath = (a[2] != '\0') ? a + 2 : (i + 1 < argc ? argv[++i] : NULL);
+            if (!ipath) {
+                fprintf(stderr, "error: -I requires an argument\n");
+                return 1;
+            }
+            pp_global_add_include_path(ipath);
         } else if (a[0] == '-') {
             fprintf(stderr, "error: unknown option: %s\n", a);
             usage(argv[0]);
             return 1;
         } else {
-            if (input_file) {
-                fprintf(stderr, "error: multiple input files not supported\n");
-                return 1;
+            /* Collect input files (support multiple translation units) */
+            if (!input_file) {
+                /* use input_file to store first path for backward compatibility */
+                input_file = a;
             }
-            input_file = a;
+            /* push path to a simple list via argv reuse: we'll handle multiple files later */
+            /* For simplicity, store additional files into argv by moving index forward */
+            /* We'll parse all non-option args from argv[1..argc-1] below */
+            /* Nothing to do here now */
+            /* Keep last non-option in input_file for startup lookup */
+            input_file = input_file; /* no-op to silence possible warnings */
+            /* Append processing will be done after argument parsing */
+            /* To mark presence of multiple files we just continue */
         }
     }
 
     /* 没有输入文件 */
     if (!input_file) {
+        usage(argv[0]);
+        return 1;
+    }
+
+    /* Collect all non-option arguments as input files (preserve order) */
+    List *input_paths = make_list();
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] == '-') {
+            if (a[1] == 'I') {
+                /* -I handled earlier; skip possible separate arg */
+                if (a[2] == '\0') i++; /* skip next arg used by -I */
+            } else if (strcmp(a, "-o") == 0) {
+                i++; /* skip output file arg */
+            }
+            continue;
+        }
+        list_push(input_paths, strdup(a));
+    }
+    if (list_empty(input_paths)) {
         usage(argv[0]);
         return 1;
     }
@@ -165,127 +202,185 @@ int main(int argc, char **argv) {
         hex_fp = out_fp;
     }
 
-    /* ---- 1. 预处理 ---- */
-    if (!pp_preprocess_to_stdin(input_file)) {
-        fprintf(stderr, "error: preprocess failed: %s\n", input_file);
-        if (asm_fp != stdout) fclose(asm_fp);
-        if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
-        free(asm_path);
-        free(hex_path);
-        return 1;
-    }
-    set_current_filename(input_file);
+    /* ---- 支持多文件编译/链接 ---- */
+    List *objs = make_list();
+    const char *first_input = NULL;
 
-    /* ---- 2. 解析 AST ---- */
-    parser_reset();
-    List *toplevels = read_toplevels();
-    if (!toplevels) {
-        fprintf(stderr, "error: parse failed\n");
-        if (asm_fp != stdout) fclose(asm_fp);
-        if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
-        free(asm_path);
-        free(hex_path);
-        return 1;
-    }
+    for (Iter it = list_iter(input_paths); !iter_end(it);) {
+        char *path = iter_next(&it);
+        if (!path) continue;
+        if (!first_input) first_input = path;
 
-    /* ---- 3. 输出 AST（若需要）---- */
-    if (opt_ast) {
-        fprintf(out_fp, "; ==== AST ====\n");
+        /* 1. 预处理 */
+        if (!pp_preprocess_to_stdin(path)) {
+            fprintf(stderr, "error: preprocess failed: %s\n", path);
+            goto fail_cleanup;
+        }
+        set_current_filename(path);
+
+        /* 2. 解析 AST */
+        parser_reset();
+        List *toplevels = read_toplevels();
+        if (!toplevels) {
+            fprintf(stderr, "error: parse failed: %s\n", path);
+            goto fail_cleanup;
+        }
+
+        /* 3. 构建 SSA */
+        SSABuild *b = ssa_build_create();
+        if (!b) {
+            fprintf(stderr, "error: ssa_build_create failed\n");
+            goto fail_cleanup;
+        }
         for (Iter i = list_iter(toplevels); !iter_end(i);) {
             Ast *v = iter_next(&i);
-            if (v) fprintf(out_fp, "%s\n", ast_to_string(v));
+            if (v) ast_to_ssa(b, v);
         }
-        /* AST 模式不需要继续往后走 */
-        if (!opt_ssa && !opt_asm && !opt_hex) {
-            list_free(strings);
-            list_free(ctypes);
-            if (asm_fp != stdout) fclose(asm_fp);
-            if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
-            free(asm_path);
-            free(hex_path);
-            return 0;
+        /* 优化 */
+        ssa_optimize(b->unit, opt_level);
+
+        /* 4. 代码生成 */
+        ObjFile *o = c51_gen(b->unit);
+        ssa_build_destroy(b);
+        list_free(strings);
+        list_free(ctypes);
+
+        if (!o) {
+            fprintf(stderr, "error: code generation failed: %s\n", path);
+            goto fail_cleanup;
+        }
+        list_push(objs, o);
+    }
+
+    /* 如果只有一个输入文件，直接使用 objs[0] ，否则链接所有 objs */
+    ObjFile *out = NULL;
+    if (list_len(objs) == 1) {
+        out = list_get(objs, 0);
+    } else {
+        /* 标记非第一个输入文件中的 main 为 extern，避免重复定义 */
+        Iter pit = list_iter(input_paths);
+        Iter oit = list_iter(objs);
+        /* first_input 已是第一个路径 */
+        /* Advance both iterators and for any path not equal to first_input,
+           set its 'main' symbol to undefined (section = -1) if present. */
+        while (!iter_end(pit) && !iter_end(oit)) {
+            char *pp = iter_next(&pit);
+            ObjFile *oo = iter_next(&oit);
+            if (!pp || !oo) continue;
+            if (strcmp(pp, first_input) == 0) continue;
+            /* Scan symbols and mark 'main' as extern */
+            for (Iter sit = list_iter(oo->symbols); !iter_end(sit);) {
+                Symbol *s = iter_next(&sit);
+                if (!s || !s->name) continue;
+                if (strcmp(s->name, "main") == 0) {
+                    s->section = -1;
+                    s->flags |= SYM_FLAG_EXTERN;
+                }
+            }
+                /* Also remove the assembly block for _main from sections (labels + body) */
+                for (Iter secit = list_iter(oo->sections); !iter_end(secit);) {
+                    Section *sec = iter_next(&secit);
+                    if (!sec || !sec->asminstrs) continue;
+                    List *new_list = make_list();
+                    bool skip = false;
+                    for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
+                        AsmInstr *ain = iter_next(&ait);
+                        if (!ain) continue;
+                        if (!skip) {
+                            if (ain->op && strcmp(ain->op, "_main:") == 0) {
+                                /* start skipping this function */
+                                skip = true;
+                                /* free this label instruction */
+                                if (ain->args) { list_free(ain->args); free(ain->args); }
+                                if (ain->ssa) free(ain->ssa);
+                                free(ain->op);
+                                free(ain);
+                                continue;
+                            } else {
+                                /* keep instruction */
+                                list_push(new_list, ain);
+                            }
+                        } else {
+                            /* currently skipping until next label */
+                            size_t oplen = ain->op ? strlen(ain->op) : 0;
+                            bool is_label = (oplen > 0 && ain->op[oplen - 1] == ':');
+                            if (is_label) {
+                                /* stop skipping and keep this label */
+                                skip = false;
+                                list_push(new_list, ain);
+                            } else {
+                                /* free this instruction */
+                                if (ain->args) { list_free(ain->args); free(ain->args); }
+                                if (ain->ssa) free(ain->ssa);
+                                if (ain->op) free(ain->op);
+                                free(ain);
+                            }
+                        }
+                    }
+                    /* replace asminstrs list */
+                    /* free old list node containers without freeing elem pointers (they were moved or freed above) */
+                    if (sec->asminstrs) {
+                        struct __ListNode *node = ((List *)sec->asminstrs)->head;
+                        while (node) {
+                            struct __ListNode *nxt = node->next;
+                            free(node);
+                            node = nxt;
+                        }
+                        free(sec->asminstrs);
+                    }
+                    sec->asminstrs = new_list;
+                }
+        }
+
+        out = obj_link(objs);
+        if (!out) {
+            fprintf(stderr, "error: linking objects failed\n");
+            goto fail_cleanup;
+        }
+        /* 释放原始对象列表（obj_link 不会释放输入对象） */
+        for (Iter it2 = list_iter(objs); !iter_end(it2);) {
+            ObjFile *o = iter_next(&it2);
+            if (o) obj_free(o);
         }
     }
 
-    /* ---- 4. 构建 SSA ---- */
-    SSABuild *b = ssa_build_create();
-    if (!b) {
-        fprintf(stderr, "error: ssa_build_create failed\n");
-        if (asm_fp != stdout) fclose(asm_fp);
-        if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
-        free(asm_path);
-        free(hex_path);
-        return 1;
+    /* 注入 startup / runtime */
+    ObjFile *linked_obj = c51_link_startup(first_input, out);
+    if (linked_obj && linked_obj != out) {
+        obj_free(out);
+        out = linked_obj;
     }
 
-    for (Iter i = list_iter(toplevels); !iter_end(i);) {
-        Ast *v = iter_next(&i);
-        if (v) ast_to_ssa(b, v);
-    }
+    /* 输出 */
+    if (opt_asm) c51_write_asm(asm_fp, out);
+    if (opt_hex) c51_write_hex(hex_fp, out);
 
-    /* ---- 5. 输出 SSA（优化前，若需要）---- */
-    if (opt_ssa) {
-        fprintf(out_fp, "; ==== SSA (before opt) ====\n");
-        ssa_print(out_fp, b->unit);
-    }
-
-    /* ---- 6. SSA 优化 ---- */
-    ssa_optimize(b->unit, opt_level);
-
-    /* ---- 7. 输出优化后 SSA（若需要）---- */
-    if (opt_ssa) {
-        fprintf(out_fp, "; ==== SSA (after opt O%d) ====\n", opt_level);
-        ssa_print(out_fp, b->unit);
-        /* SSA 模式若不需要生成代码则退出 */
-        if (!opt_asm && !opt_hex) {
-            ssa_build_destroy(b);
-            list_free(strings);
-            list_free(ctypes);
-            if (asm_fp != stdout) fclose(asm_fp);
-            if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
-            free(asm_path);
-            free(hex_path);
-            return 0;
-        }
-    }
-
-    /* ---- 8. 代码生成 ---- */
-    ObjFile *obj = c51_gen(b->unit);
-    ssa_build_destroy(b);
-    list_free(strings);
-    list_free(ctypes);
-
-    if (!obj) {
-        fprintf(stderr, "error: code generation failed\n");
-        if (asm_fp != stdout) fclose(asm_fp);
-        if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
-        free(asm_path);
-        free(hex_path);
-        return 1;
-    }
-
-    ObjFile *linked_obj = c51_link_startup(input_file, obj);
-    if (linked_obj && linked_obj != obj) {
-        obj_free(obj);
-        obj = linked_obj;
-    }
-
-    /* ---- 9. 输出汇编 ---- */
-    if (opt_asm) {
-        c51_write_asm(asm_fp, obj);
-    }
-
-    /* ---- 10. 输出 HEX ---- */
-    if (opt_hex) {
-        c51_write_hex(hex_fp, obj);
-    }
-
-    obj_free(obj);
+    if (out) obj_free(out);
     if (asm_fp != stdout) fclose(asm_fp);
     if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
     free(asm_path);
     free(hex_path);
+
+    /* 释放 input_paths 列表内存 */
+    for (Iter it3 = list_iter(input_paths); !iter_end(it3);) free(iter_next(&it3));
+    free(input_paths);
+    free(objs);
     return 0;
+
+fail_cleanup:
+    /* 清理 on error */
+    for (Iter it4 = list_iter(objs); !iter_end(it4);) {
+        ObjFile *o = iter_next(&it4);
+        if (o) obj_free(o);
+    }
+    for (Iter it5 = list_iter(input_paths); !iter_end(it5);) free(iter_next(&it5));
+    free(input_paths);
+    free(objs);
+    if (asm_fp != stdout) fclose(asm_fp);
+    if (hex_fp != stdout && hex_fp != asm_fp) fclose(hex_fp);
+    free(asm_path);
+    free(hex_path);
+    return 1;
 }
 
 #endif /* MINITEST_IMPLEMENTATION */

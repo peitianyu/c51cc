@@ -1947,6 +1947,12 @@ bool pp_global_push_file(const char *filename)
     return pp_push_file(g_pp, filename);
 }
 
+void pp_global_add_include_path(const char *path)
+{
+    if (!g_pp) pp_global_init();
+    list_push(g_pp->include_paths, strdup(path));
+}
+
 char *pp_global_read_line(void)
 {
     if (!g_pp) return NULL;
@@ -1971,7 +1977,8 @@ bool pp_preprocess_to_stdin(const char *filename)
     FILE *tmp = pp_tmpfile();
     if (!tmp) return false;
     
-    pp_global_init();
+    /* 若已通过 pp_global_add_include_path 等接口提前初始化，则不再重置 */
+    if (!g_pp) pp_global_init();
     if (!pp_global_push_file(filename)) {
         fclose(tmp);
         pp_global_free();

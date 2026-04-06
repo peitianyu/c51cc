@@ -19,7 +19,9 @@ char* int_to_key(int n) {
 }
 
 /* 默认推断的整型类型（用于比较类指令） */
-static const Ctype g_inferred_int_type = {0, CTYPE_INT, 2, NULL};
+static const Ctype g_inferred_int_type  = {0, CTYPE_INT,  2, NULL};
+/* 默认推断的无符号字节类型（用于小常量，attr=32 = ctype_unsigned=1 在第5位） */
+static const Ctype g_inferred_uchar_type = {32, CTYPE_CHAR, 1, NULL};
 
 char* instr_to_ssa_str(Instr *ins) {
     if (!ins) return strdup("");
@@ -359,6 +361,14 @@ bool isel_can_keep_in_acc(ISelContext* isel, Instr* ins, Instr* next) {
 
 static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
     if (!isel || !ins) return NULL;
+    /* 对于值在 0-255 范围内的常量，推断为 unsigned char（节省寄存器） */
+    if (ins->op == IROP_CONST) {
+        if (ins->imm.ival >= 0 && ins->imm.ival <= 255) {
+            return (Ctype*)&g_inferred_uchar_type;
+        }
+        if (ins->type) return ins->type;
+        return (Ctype*)&g_inferred_int_type;
+    }
     if (ins->type) return ins->type;
 
     if (ins->op == IROP_SELECT && ins->args && ins->args->len >= 3) {
@@ -371,6 +381,32 @@ static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
     }
 
     if (ins->op == IROP_PHI && ins->args && ins->args->len > 0) {
+        /* 取所有 arms 中最窄的类型（优先使用 1 字节类型，避免 phi 被推断为 int）。
+         * 若 arm 是 int 类型的常量但值在 0-255 范围内，视为不影响宽度（跳过）。 */
+        Ctype* narrowest = NULL;
+        int narrowest_size = 999;
+        Func* phi_func = isel && isel->ctx ? isel->ctx->current_func : NULL;
+        for (int ai = 0; ai < ins->args->len; ai++) {
+            ValueName src = *(ValueName*)list_get(ins->args, ai);
+            Ctype* t = get_value_type(isel, src);
+            if (t) {
+                int sz = c51_abi_type_size(t);
+                /* 若该 arm 是 int 类型的常量且值 <= 255，跳过（不让它扩宽 phi 类型） */
+                if (sz >= 2 && phi_func) {
+                    Instr* arm_def = find_def_instr_in_func(phi_func, src);
+                    if (arm_def && arm_def->op == IROP_CONST &&
+                        arm_def->imm.ival >= 0 && arm_def->imm.ival <= 255) {
+                        continue; /* 小常量不扩宽 phi 类型 */
+                    }
+                }
+                if (sz < narrowest_size) {
+                    narrowest_size = sz;
+                    narrowest = t;
+                }
+            }
+        }
+        if (narrowest) return narrowest;
+        /* 若所有 arms 类型未知或均被跳过，回退到第一个 arm */
         ValueName src = *(ValueName*)list_get(ins->args, 0);
         return get_value_type(isel, src);
     }
@@ -442,9 +478,16 @@ static void seed_value_types_for_func(C51GenContext* ctx, Func* func) {
                     char* key = int_to_key(ins->dest);
                     Ctype* old_type = (Ctype*)dict_get(ctx->value_type, key);
                     Ctype* new_type = infer_dest_type(&probe, ins);
-                    if (!old_type && new_type) {
-                        dict_put(ctx->value_type, key, new_type);
-                        changed = true;
+                    if (new_type) {
+                        /* 允许类型向更窄方向更新（如 int→uchar），以减少寄存器压力 */
+                        int old_size = old_type ? c51_abi_type_size(old_type) : 999;
+                        int new_size = c51_abi_type_size(new_type);
+                        if (!old_type || new_size < old_size) {
+                            dict_put(ctx->value_type, key, new_type);
+                            changed = true;
+                        } else {
+                            free(key);
+                        }
                     } else {
                         free(key);
                     }

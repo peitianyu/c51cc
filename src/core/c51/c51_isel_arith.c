@@ -49,7 +49,9 @@ static bool value_is_zero_extended_byte_in_func(Func* func, ValueName value, Val
 }
 
 void emit_const(ISelContext* isel, Instr* ins, Instr* next) {
-    int size = ins->type ? c51_abi_type_size(ins->type) : 1;
+    /* 优先使用 value_type 字典中推断的类型大小（可能比 ins->type 更窄） */
+    int size = get_value_size(isel, ins->dest);
+    if (size <= 0) size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int val = (int)(ins->imm.ival & 0xFFFF);
 
     if (isel && isel->last_const_reg != -100 && isel->last_const_size == size && isel->last_const_val == val) {
@@ -398,6 +400,87 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
 
 
 
+/* 判断一个 SHL/SHR 指令是否是 rotate8 idiom 的一部分。
+ * rotate8 idiom: (v << n) | (v >> (8-n))，其中 v 是 8-bit 值。
+ * 如果是，则 emit_shift 应该跳过代码生成（由 emit_bitwise 的 ORL 路径统一处理）。
+ * 条件：
+ *   1. 该 shift 的结果 dest 在函数里有且仅有一个使用者，是一个 IROP_OR 指令
+ *   2. 该 OR 的另一个操作数也是一个 shift（SHL 或 SHR）
+ *   3. 两个 shift 的源操作数相同
+ *   4. 两个 shift 的移位量之和 == 8（mod 8 == 0，且都非 0）
+ *   5. 两个 shift 的类型都是 size==1（或者源操作数是 size==1）
+ */
+static bool shift_is_rotate8_part(ISelContext* isel, Instr* ins) {
+    if (!isel || !isel->ctx || !isel->ctx->current_func) return false;
+    Func* func = isel->ctx->current_func;
+    if (!ins) return false;
+    ValueName my_dest = ins->dest;
+    if (my_dest <= 0) return false;
+
+    /* ins 本身必须是 size==1 shift */
+    int my_size = ins->type ? c51_abi_type_size(ins->type) : 1;
+    if (my_size != 1) return false;
+
+    /* 获取移位量 */
+    int64_t my_cnt = 0;
+    if (!is_imm_operand(ins, &my_cnt) && !try_get_value_const(isel, get_src2_value(ins), &my_cnt))
+        return false;
+    my_cnt &= 7;
+    if (my_cnt == 0) return false;
+
+    /* 查找 func 中使用 my_dest 的所有指令，必须恰好只有一个 OR */
+    Instr* or_ins = NULL;
+    for (Iter it = list_iter(func->blocks); !iter_end(it);) {
+        Block* b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr* candidate = iter_next(&jt);
+            if (!candidate || candidate->op == IROP_NOP) continue;
+            if (!candidate->args) continue;
+            bool uses_me = false;
+            for (int i = 0; i < candidate->args->len; i++) {
+                ValueName* pv = list_get(candidate->args, i);
+                if (pv && *pv == my_dest) { uses_me = true; break; }
+            }
+            if (uses_me) {
+                if (or_ins != NULL) return false; /* 多个使用者，不确定 */
+                or_ins = candidate;
+            }
+        }
+    }
+    if (!or_ins || or_ins->op != IROP_OR) return false;
+
+    /* OR 的另一个操作数必须也是一个 shift */
+    ValueName or_lhs = get_src1_value(or_ins);
+    ValueName or_rhs = get_src2_value(or_ins);
+    ValueName other_val = (or_lhs == my_dest) ? or_rhs : or_lhs;
+    if (other_val <= 0) return false;
+    Instr* other_def = find_def_instr_in_func(func, other_val);
+    if (!other_def) return false;
+    if (other_def->op != IROP_SHL && other_def->op != IROP_SHR) return false;
+
+    /* 两个 shift 必须方向相反 */
+    if (ins->op == other_def->op) return false;
+
+    /* 两个 shift 的源操作数必须相同 */
+    ValueName my_src = get_src1_value(ins);
+    ValueName other_src = get_src1_value(other_def);
+    if (my_src != other_src) return false;
+
+    /* 源操作数必须是 8-bit */
+    if (get_value_size(isel, my_src) != 1) return false;
+
+    /* 移位量之和必须 == 8 */
+    int64_t other_cnt = 0;
+    if (!is_imm_operand(other_def, &other_cnt) && !try_get_value_const(isel, get_src2_value(other_def), &other_cnt))
+        return false;
+    other_cnt &= 7;
+    if (other_cnt == 0) return false;
+    if (((my_cnt + other_cnt) & 7) != 0) return false;
+
+    return true;
+}
+
 void emit_neg(ISelContext* isel, Instr* ins) {
     ValueName src = get_src1_value(ins);
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
@@ -425,6 +508,12 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
     ValueName src = get_src1_value(ins);
     int size = ins->type ? c51_abi_type_size(ins->type) : 1;
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
+
+    /* 如果这个 shift 是 rotate8 idiom 的一部分（由 ORL 统一处理），跳过代码生成 */
+    if (size == 1 && shift_is_rotate8_part(isel, ins)) {
+        return;
+    }
+
     int phys_dst_reg = dst_reg;
     bool temp_result = false;
 
