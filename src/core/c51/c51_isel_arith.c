@@ -716,6 +716,57 @@ void emit_shift(ISelContext* isel, Instr* ins, Instr* next, bool is_shr) {
             int cnt = (int)(imm & 0x1F);
             bool is_unsigned = false;
             if (ins && ins->type) is_unsigned = get_attr(ins->type->attr).ctype_unsigned;
+
+            /* ---- 16-bit shift 特殊情况优化 ---- */
+            if (cnt == 0) {
+                store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+                if (temp_result) free_temp_reg(isel, phys_dst_reg, size);
+                return;
+            }
+            if (cnt >= 16) {
+                /* 移位 >= 16: 结果为 0 (无符号/左移) 或符号扩展 (有符号右移) */
+                if (is_shr && !is_unsigned) {
+                    emit_mov(isel, "A", dst_hi, NULL);
+                    isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+                    isel_emit(isel, "MOV", "A", "#0", NULL);
+                    isel_emit(isel, "SUBB", "A", "#0", NULL);
+                    emit_mov(isel, dst_lo, "A", NULL);
+                    emit_mov(isel, dst_hi, "A", NULL);
+                } else {
+                    emit_mov(isel, dst_lo, "#0", NULL);
+                    emit_mov(isel, dst_hi, "#0", NULL);
+                }
+                store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+                if (temp_result) free_temp_reg(isel, phys_dst_reg, size);
+                return;
+            }
+            if (cnt == 8) {
+                /* 移位 8 位: lo/hi 字节交换 + 其中一半清零/符号扩展 */
+                if (is_shr) {
+                    if (is_unsigned) {
+                        /* unsigned >>8: result_lo = src_hi, result_hi = 0 */
+                        emit_mov(isel, "A", dst_hi, NULL);
+                        emit_mov(isel, dst_lo, "A", NULL);
+                        emit_mov(isel, dst_hi, "#0", NULL);
+                    } else {
+                        /* signed >>8: result_lo = src_hi, result_hi = sign(src_hi) */
+                        emit_mov(isel, "A", dst_hi, NULL);
+                        emit_mov(isel, dst_lo, "A", NULL);
+                        isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+                        isel_emit(isel, "MOV", "A", "#0", NULL);
+                        isel_emit(isel, "SUBB", "A", "#0", NULL);
+                        emit_mov(isel, dst_hi, "A", NULL);
+                    }
+                } else {
+                    /* <<8: result_hi = src_lo, result_lo = 0 */
+                    emit_mov(isel, "A", dst_lo, NULL);
+                    emit_mov(isel, dst_hi, "A", NULL);
+                    emit_mov(isel, dst_lo, "#0", NULL);
+                }
+                store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+                if (temp_result) free_temp_reg(isel, phys_dst_reg, size);
+                return;
+            }
             for (int i = 0; i < cnt; i++) {
                 if (is_shr) {
                     if (is_unsigned) {

@@ -160,6 +160,23 @@ echo ===== BUILD SUMMARY =====
 echo c51cc : %C51CC_OK% ok, %C51CC_FAIL% fail
 echo Keil  : %KEIL_OK% ok, %KEIL_FAIL% fail
 echo.
+
+REM ===== HEX SIZE COMPARISON =====
+if "%HAS_C51CC%"=="1" if "%HAS_KEIL%"=="1" (
+    echo ===== HEX SIZE COMPARISON (hex file bytes) =====
+    echo  %-28s %8s %8s %8s
+    for /d %%d in ("%C51CC_OUT%\*") do (
+        set "_CMP_C51CC=%%d\main.hex"
+        set "_CMP_KEIL=%KEIL_OUT%\%%~nd\main.hex"
+        if exist "!_CMP_C51CC!" if exist "!_CMP_KEIL!" (
+            for %%a in ("!_CMP_C51CC!")  do set "_SZ_C51=%%~za"
+            for %%a in ("!_CMP_KEIL!") do set "_SZ_KEIL=%%~za"
+            set /a "_SZ_DIFF=!_SZ_C51!-!_SZ_KEIL!"
+            echo  %%~nd : c51cc=!_SZ_C51!B  keil=!_SZ_KEIL!B  diff=!_SZ_DIFF!B
+        )
+    )
+    echo.
+)
 goto :eof
 
 :build_example
@@ -170,23 +187,32 @@ echo ----- %_C51CC_NAME% -----
 
 REM --- c51cc build ---
 if "%HAS_C51CC%"=="1" (
-    set "_SRC=%C51CC_EXAMPLES%\%_C51CC_NAME%\main.c"
+    set "_SRCDIR=%C51CC_EXAMPLES%\%_C51CC_NAME%"
     set "_OUT=%C51CC_OUT%\%_C51CC_NAME%"
     if not exist "!_OUT!" mkdir "!_OUT!" >nul 2>nul
-    if exist "!_SRC!" (
-        pushd "!_OUT!"
-        "%C51CC%" -asm -hex -o main -I"%INCLUDE_DIR%" "!_SRC!" >build.log 2>&1
+    if exist "!_SRCDIR!\*.c" (
+        set "_C51CC_TMP=%TMP_ROOT%\%_C51CC_NAME%"
+        if not exist "!_C51CC_TMP!" mkdir "!_C51CC_TMP!" >nul 2>nul
+        copy /y "!_SRCDIR!\*.c" "!_C51CC_TMP!\" >nul 2>nul
+        pushd "!_C51CC_TMP!"
+        set "_C51CC_SRCS="
+        for %%f in (*.c) do (
+            set "_C51CC_SRCS=!_C51CC_SRCS! %%f"
+        )
+        "%C51CC%" -asm -hex -o main -I"%TMP_ROOT%\include" !_C51CC_SRCS! >"%_OUT%\build.log" 2>&1
         if !errorlevel! equ 0 (
+            copy /y main.hex "!_OUT!\main.hex" >nul 2>nul
+            copy /y main.asm "!_OUT!\main.asm" >nul 2>nul
             echo [OK ] c51cc: %_C51CC_NAME%
             set /a C51CC_OK+=1
         ) else (
             echo [FAIL] c51cc: %_C51CC_NAME%
-            type build.log
+            type "%_OUT%\build.log"
             set /a C51CC_FAIL+=1
         )
         popd
     ) else (
-        echo [SKIP] c51cc: no src !_SRC!
+        echo [SKIP] c51cc: no src !_SRCDIR!\*.c
         set /a C51CC_FAIL+=1
     )
 )
