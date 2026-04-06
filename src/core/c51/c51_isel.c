@@ -102,7 +102,15 @@ const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
                 if (size == 2) return isel_reg_name(r + 1);
                 return isel_reg_name(r);
             }
-            const char* sym = lookup_value_addr_symbol(isel, val);
+            /* Prefer value_to_spill for the spill slot symbol to avoid
+             * picking up a sbit/ADDR name that shares the value_to_addr entry. */
+            const char* sym = NULL;
+            if (isel->ctx && isel->ctx->value_to_spill) {
+                char* k = int_to_key(val);
+                sym = (const char*)dict_get(isel->ctx->value_to_spill, k);
+                free(k);
+            }
+            if (!sym) sym = lookup_value_addr_symbol(isel, val);
             if (sym) {
                 emit_load_symbol_byte(isel, sym, 0, "A", NULL);
                 return "A";
@@ -131,7 +139,14 @@ const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
             if (size >= 3) return isel_reg_name(r + 1);
             return isel_reg_name(r);
         }
-        const char* sym = lookup_value_addr_symbol(isel, val);
+        /* Prefer value_to_spill for the spill slot symbol */
+        const char* sym = NULL;
+        if (isel->ctx && isel->ctx->value_to_spill) {
+            char* k = int_to_key(val);
+            sym = (const char*)dict_get(isel->ctx->value_to_spill, k);
+            free(k);
+        }
+        if (!sym) sym = lookup_value_addr_symbol(isel, val);
         if (sym) {
             emit_load_symbol_byte(isel, sym, size == 2 ? 1 : 0, "A", NULL);
             return "A";
@@ -752,6 +767,7 @@ void isel_block(ISelContext* isel, Block* block) {
     }
 
     precompute_sbit_br(isel, instrs, num_instrs);
+    precompute_sbit_cpl(isel, instrs, num_instrs);
     precompute_br_simplify(isel, instrs, num_instrs);
 
     for (int i = 0; i < num_instrs; i++) {
@@ -793,6 +809,7 @@ void isel_function(C51GenContext* ctx, Func* func) {
     isel.label_counter = 0;
     isel.br_bitinfo = make_dict(NULL);
     isel.br_invert = make_dict(NULL);
+    isel.sbit_cpl_stores = make_dict(NULL);
     isel.last_const_reg = -100;
     isel.last_const_val = 0;
     isel.last_const_size = 0;
@@ -839,6 +856,10 @@ void isel_function(C51GenContext* ctx, Func* func) {
     if (isel.br_invert) {
         dict_free(isel.br_invert, free);
         isel.br_invert = NULL;
+    }
+    if (isel.sbit_cpl_stores) {
+        dict_free(isel.sbit_cpl_stores, free);
+        isel.sbit_cpl_stores = NULL;
     }
 
     linscan_destroy(lsc);

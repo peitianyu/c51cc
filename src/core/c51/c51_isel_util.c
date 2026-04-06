@@ -57,6 +57,21 @@ BrBitInfo* br_bitinfo_get(ISelContext* isel, Instr* br) {
     return (BrBitInfo*)dict_get(isel->br_bitinfo, buf);
 }
 
+/* sbit_cpl_store_put: record STORE instr -> bit name for CPL optimisation */
+void sbit_cpl_store_put(ISelContext* isel, Instr* store, const char* bit) {
+    if (!isel || !isel->sbit_cpl_stores || !store || !bit) return;
+    char* key = instr_ptr_key(store);
+    dict_put(isel->sbit_cpl_stores, key, strdup(bit));
+}
+
+/* sbit_cpl_store_get: look up bit name for a STORE instr (NULL if not recorded) */
+const char* sbit_cpl_store_get(ISelContext* isel, Instr* store) {
+    if (!isel || !isel->sbit_cpl_stores || !store) return NULL;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%p", (const void*)store);
+    return (const char*)dict_get(isel->sbit_cpl_stores, buf);
+}
+
 int reg_index_from_name(const char* s) {
     if (!s) return -1;
     if (s[0] == 'R' && s[1] >= '0' && s[1] <= '7' && s[2] == '\0') {
@@ -356,7 +371,12 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
     if (!isel || !isel->ctx) return -2;
     char* key = int_to_key(val);
     char* var_name = NULL;
-    if (isel->ctx->value_to_addr) {
+    /* Prefer value_to_spill to get the spill slot symbol (avoids using a
+     * sbit/ADDR name that may share the same value_to_addr entry). */
+    if (isel->ctx->value_to_spill) {
+        var_name = (char*)dict_get(isel->ctx->value_to_spill, key);
+    }
+    if (!var_name && isel->ctx->value_to_addr) {
         var_name = (char*)dict_get(isel->ctx->value_to_addr, key);
     }
     free(key);
@@ -414,7 +434,13 @@ void isel_store_spill_from_reg(ISelContext* isel, ValueName val, int reg, int si
     if (!isel || !isel->ctx || reg < 0 || !isel_value_is_spilled(isel, val)) return;
 
     char* key = int_to_key(val);
-    const char* var_name = isel->ctx->value_to_addr ? (const char*)dict_get(isel->ctx->value_to_addr, key) : NULL;
+    const char* var_name = NULL;
+    if (isel->ctx->value_to_spill) {
+        var_name = (const char*)dict_get(isel->ctx->value_to_spill, key);
+    }
+    if (!var_name && isel->ctx->value_to_addr) {
+        var_name = (const char*)dict_get(isel->ctx->value_to_addr, key);
+    }
     free(key);
     if (!var_name) return;
 

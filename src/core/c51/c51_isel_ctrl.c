@@ -637,6 +637,134 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
     }
 }
 
+/* precompute_sbit_cpl: detect "sbit = !sbit" pattern and record it in the
+ * sbit_cpl_stores dict.  All intermediate instructions (LNOT / TRUNC / NE /
+ * EQ wrappers) plus the source LOAD are NOP'd so they produce no code.
+ * emit_store() checks sbit_cpl_stores first and emits a single CPL. */
+void precompute_sbit_cpl(ISelContext* isel, Instr** instrs, int n) {
+    if (!isel || !instrs || n <= 0 || !isel->ctx || !isel->ctx->current_func) return;
+    if (!isel->sbit_cpl_stores) return;
+    Func* func = isel->ctx->current_func;
+
+    for (int i = 0; i < n; i++) {
+        Instr* store = instrs[i];
+        if (!store || store->op != IROP_STORE) continue;
+        if (!is_sbit_type(store->mem_type)) continue;
+        if (!store->args || store->args->len < 2) continue;
+
+        ValueName ptr = *(ValueName*)list_get(store->args, 0);
+        ValueName val = *(ValueName*)list_get(store->args, 1);
+
+        /* Resolve the sbit name for the destination pointer.
+         * At precompute time value_to_addr is not yet populated (it is filled
+         * by emit_addr during code generation).  Try three sources in order:
+         *  1. ADDR instr in current block (fast)
+         *  2. ADDR instr anywhere in function (handles cross-block ADDR)
+         *  3. STORE labels */
+        const char* store_name = resolve_addr_symbol_in_block(instrs, n, ptr);
+        if (!store_name) {
+            Instr* addr_def = find_def_instr_in_func(func, ptr);
+            if (addr_def && addr_def->op == IROP_ADDR &&
+                addr_def->labels && addr_def->labels->len > 0) {
+                const char* lbl = (const char*)list_get(addr_def->labels, 0);
+                if (lbl && lbl[0] == '@') lbl++;
+                store_name = lbl;
+            }
+        }
+        if (!store_name && store->labels && store->labels->len > 0) {
+            const char* lbl = (const char*)list_get(store->labels, 0);
+            if (lbl && lbl[0] == '@') lbl++;
+            store_name = lbl;
+        }
+        if (!store_name) continue;
+
+        /* Walk def chain through LNOT / TRUNC / NE / EQ to reach LOAD sbit */
+        ValueName chain = val;
+        bool found_not = false;
+        Instr* chain_instrs[8];
+        int chain_len = 0;
+
+        for (int depth = 0; depth < 8; depth++) {
+            Instr* def = find_def_instr_in_func(func, chain);
+            if (!def) break;
+            if (def->op == IROP_LNOT) {
+                found_not = !found_not;
+                chain_instrs[chain_len++] = def;
+                chain = get_src1_value(def);
+            } else if (def->op == IROP_TRUNC || def->op == IROP_ZEXT || def->op == IROP_SEXT) {
+                chain_instrs[chain_len++] = def;
+                chain = get_src1_value(def);
+            } else if (def->op == IROP_NE || def->op == IROP_EQ) {
+                ValueName other = -1;
+                if (ne_is_compare_zero_def(func, def, &other)) {
+                    if (def->op == IROP_EQ) found_not = !found_not;
+                    chain_instrs[chain_len++] = def;
+                    chain = other;
+                } else break;
+            } else {
+                break;
+            }
+        }
+
+        if (!found_not) continue;
+
+        /* chain must now point to a LOAD sbit from the same sbit variable */
+        Instr* src_load = find_def_instr_in_func(func, chain);
+        if (!src_load || src_load->op != IROP_LOAD || !is_sbit_type(src_load->mem_type)) continue;
+        if (!src_load->args || src_load->args->len < 1) continue;
+
+        /* Verify same sbit */
+        ValueName src_ptr = *(ValueName*)list_get(src_load->args, 0);
+        bool same_sbit = (src_ptr == ptr);
+        if (!same_sbit) {
+            /* Resolve src sbit name from block/function (value_to_addr not yet available) */
+            const char* src_name = resolve_addr_symbol_in_block(instrs, n, src_ptr);
+            if (!src_name) {
+                Instr* src_addr_def = find_def_instr_in_func(func, src_ptr);
+                if (src_addr_def && src_addr_def->op == IROP_ADDR &&
+                    src_addr_def->labels && src_addr_def->labels->len > 0) {
+                    const char* lbl = (const char*)list_get(src_addr_def->labels, 0);
+                    if (lbl && lbl[0] == '@') lbl++;
+                    src_name = lbl;
+                }
+            }
+            if (src_name && src_name[0] == '@') src_name++;
+            if (src_name && store_name && strcmp(src_name, store_name) == 0)
+                same_sbit = true;
+        }
+        if (!same_sbit) continue;
+
+        /* All intermediate values and the src_load must be single-use in this
+         * block so it is safe to NOP them. */
+        bool all_single_use = true;
+        for (int ci = 0; ci < chain_len; ci++) {
+            if (chain_instrs[ci]->dest > 0 &&
+                count_value_uses(instrs, n, chain_instrs[ci]->dest) > 1) {
+                all_single_use = false;
+                break;
+            }
+        }
+        if (all_single_use && src_load->dest > 0 &&
+            count_value_uses(instrs, n, src_load->dest) > 1)
+            all_single_use = false;
+
+        if (!all_single_use) continue;
+
+        /* Record this STORE in the dict so emit_store can emit CPL */
+        sbit_cpl_store_put(isel, store, store_name);
+
+        /* NOP all intermediate chain instructions (they produce no useful code
+         * after CPL optimisation – the sbit is read and written atomically). */
+        for (int ci = 0; ci < chain_len; ci++) {
+            chain_instrs[ci]->op = IROP_NOP;
+        }
+
+        /* NOP the src_load (no longer needed – CPL reads+writes the bit) */
+        src_load->op = IROP_NOP;
+    }
+}
+
+
 void precompute_br_simplify(ISelContext* isel, Instr** instrs, int n) {
     if (!isel || !instrs || n <= 0) return;
     for (int i = 0; i < n; i++) {

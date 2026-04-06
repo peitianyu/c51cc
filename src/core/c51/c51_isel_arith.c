@@ -1087,7 +1087,58 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
         }
     }
 
-    fprintf(stderr, "c51 backend: only 8/16-bit DIV/MOD supported\n");
+    /* 32-bit (4-byte) DIV/MOD via Keil runtime:
+     * unsigned: ?C?ULDIV  -- R4:R5:R6:R7 / R0:R1:R2:R3 -> quotient R4:R5:R6:R7, remainder R0:R1:R2:R3
+     * signed:   ?C?SLDIV  -- same convention
+     *
+     * For larger types we fall back to the unsigned 32-bit path (truncate to 4 bytes).
+     */
+    if (size >= 3 && size <= 4) {
+        /* Reload operands into register pairs */
+        int num_reg = isel_get_value_reg(isel, num);
+        int den_reg = (den == num) ? num_reg : isel_get_value_reg(isel, den);
+
+        if (num_reg < 0) {
+            num_reg = isel_reload_spill(isel, num, 4, ins);
+            if (num_reg < 0) num_reg = 4;
+        }
+        if (den_reg < 0) {
+            den_reg = (den == num) ? num_reg : isel_reload_spill(isel, den, 4, ins);
+            if (den_reg < 0) den_reg = 0;
+        }
+
+        /* Convention: dividend -> R4:R5:R6:R7, divisor -> R0:R1:R2:R3 */
+        RegMove moves[8] = {
+            {.dst = 4, .src = num_reg},
+            {.dst = 5, .src = num_reg + 1},
+            {.dst = 6, .src = num_reg + 2},
+            {.dst = 7, .src = num_reg + 3},
+            {.dst = 0, .src = den_reg},
+            {.dst = 1, .src = den_reg + 1},
+            {.dst = 2, .src = den_reg + 2},
+            {.dst = 3, .src = den_reg + 3},
+        };
+        emit_parallel_reg_moves(isel, moves, 8, ins);
+
+        const char *runtime = is_unsigned ? "?C?ULDIV" : "?C?SLDIV";
+        isel_emit(isel, "LCALL", runtime, NULL, instr_to_ssa_str(ins));
+
+        /* quotient in R4:R5:R6:R7, remainder in R0:R1:R2:R3 */
+        int result_base = want_mod ? 0 : 4;
+        int out_size = (size < 4) ? size : 4;
+
+        if (dst_reg < 0) dst_reg = result_base;
+        if (dst_reg != result_base) {
+            for (int k = 0; k < out_size; k++) {
+                RegMove rm = {.dst = dst_reg + k, .src = result_base + k};
+                emit_parallel_reg_moves(isel, &rm, 1, ins);
+            }
+        }
+        store_spilled_dest_if_needed(isel, ins->dest, dst_reg, out_size, ins);
+        return;
+    }
+
+    fprintf(stderr, "c51 backend: only 8/16/32-bit DIV/MOD supported (got size=%d)\n", size);
     exit(1);
 }
 

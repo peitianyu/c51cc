@@ -1134,6 +1134,15 @@ static int encode_bit_op(EncodeState *state, const InstrView *view, unsigned cha
 		out[view->pc - state->start_offset] = entry->carry_opcode;
 		return view->size;
 	}
+	/* CLR Rn is not a valid 8051 instruction; treat as MOV Rn, #0 */
+	if (view->arg1 && strcmp(view->op, "CLR") == 0) {
+		int reg = reg_index(view->arg1);
+		if (reg >= 0) {
+			out[view->pc - state->start_offset] = 0x78 + reg; /* MOV Rn, imm */
+			out[view->pc - state->start_offset + 1] = 0x00;
+			return view->size;
+		}
+	}
 	out[view->pc - state->start_offset] = entry->bit_opcode;
 	if (!eval_bit(state, view->arg1, &expr) || !emit_abs8_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
 	return view->size;
@@ -1472,6 +1481,190 @@ static void record_labels(EncodeState *state)
  * that follows the SJMP (next_pc = sjmp_pc + 2).
  * Runs before record_labels so label positions are correct.
  */
+/* 将超出 rel8 范围的条件跳转扩展为 J(inv) $+5; LJMP target 形式
+ * SJMP 超范围时直接替换为 LJMP。
+ * 由于扩展会改变指令大小，需要迭代直到收敛。
+ */
+static void expand_short_branch_if_out_of_range(Section *sec, int start_offset)
+{
+    if (!sec || !sec->asminstrs) return;
+
+    /* 逆条件映射 */
+    static const char *inv_pairs[][2] = {
+        {"JZ",  "JNZ"},
+        {"JNZ", "JZ"},
+        {"JC",  "JNC"},
+        {"JNC", "JC"},
+        {NULL,  NULL}
+    };
+
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+
+        /* Step 1: 计算所有标签的 PC */
+        Dict *label_pcs = make_dict(NULL);
+        int pc = start_offset;
+        for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+            AsmInstr *ins = iter_next(&it);
+            if (!ins || !ins->op) continue;
+            size_t oplen = strlen(ins->op);
+            if (oplen > 0 && ins->op[oplen - 1] == ':') {
+                char *name = malloc(oplen);
+                if (!name) { dict_free(label_pcs, free); return; }
+                memcpy(name, ins->op, oplen - 1);
+                name[oplen - 1] = '\0';
+                int *ppc = malloc(sizeof(int));
+                if (!ppc) { free(name); dict_free(label_pcs, free); return; }
+                *ppc = pc;
+                dict_put(label_pcs, name, ppc);
+            } else {
+                int sz = instruction_size(ins);
+                if (sz > 0) pc += sz;
+            }
+        }
+
+        /* Step 2: 扫描超范围的短跳转 */
+        pc = start_offset;
+
+        /* 使用 List 的节点遍历——我们需要在迭代时插入节点，
+         * 所以先把需要扩展的指令收集起来，再分步替换 */
+        /* 用更简单的两遍扫描：先找，再替换 */
+        AsmInstr *expand_ins = NULL;
+        int expand_is_sjmp = 0;
+        const char *expand_inv = NULL;
+
+        pc = start_offset;
+        for (Iter it = list_iter(sec->asminstrs); !iter_end(it);) {
+            AsmInstr *ins = iter_next(&it);
+            if (!ins || !ins->op) continue;
+            size_t oplen = strlen(ins->op);
+            if (oplen > 0 && ins->op[oplen - 1] == ':') continue;
+
+            int sz = instruction_size(ins);
+
+            /* 只关心短跳转 */
+            int is_short = 0;
+            int is_sjmp = (strcmp(ins->op, "SJMP") == 0);
+            const char *inv = NULL;
+            if (is_sjmp) {
+                is_short = 1;
+            } else {
+                for (int i = 0; inv_pairs[i][0]; i++) {
+                    if (strcmp(ins->op, inv_pairs[i][0]) == 0) {
+                        is_short = 1;
+                        inv = inv_pairs[i][1];
+                        break;
+                    }
+                }
+            }
+
+            if (is_short && sz == 2 && ins->args && ins->args->len > 0) {
+                const char *target_lbl = (const char *)list_get(ins->args, 0);
+                if (target_lbl) {
+                    int *ptarget = (int *)dict_get(label_pcs, target_lbl);
+                    if (ptarget) {
+                        int next_pc = pc + 2;
+                        int rel = *ptarget - next_pc;
+                        if (rel < -128 || rel > 127) {
+                            expand_ins = ins;
+                            expand_is_sjmp = is_sjmp;
+                            expand_inv = inv;
+                            break; /* 每次只处理第一个超范围跳转，然后重新计算 */
+                        }
+                    }
+                }
+            }
+
+            if (sz > 0) pc += sz;
+        }
+
+        dict_free(label_pcs, free);
+
+        if (!expand_ins) break; /* 没有需要扩展的，完成 */
+
+        /* 对 expand_ins 进行扩展 */
+        const char *target_lbl = (const char *)list_get(expand_ins->args, 0);
+        char *saved_target = strdup(target_lbl);
+
+        if (expand_is_sjmp) {
+            /* SJMP target → LJMP target */
+            free(expand_ins->op);
+            expand_ins->op = strdup("LJMP");
+            /* args 保持不变（仍是 target_lbl）*/
+        } else {
+            /* JZ target → JNZ $+5; LJMP target
+             * 先把此指令变成 JNZ（跳过 LJMP）：arg 变为局部标签 __skip_N
+             * 再在其后插入 LJMP target 指令 */
+            static int skip_counter = 0;
+            char skip_lbl[64];
+            snprintf(skip_lbl, sizeof(skip_lbl), "__bskip_%d", skip_counter++);
+
+            /* 更新当前指令为逆条件跳转到 skip_lbl */
+            free(expand_ins->op);
+            expand_ins->op = strdup(expand_inv);
+            /* 更新 args[0] 为 skip_lbl */
+            free((char *)expand_ins->args->head->elem);
+            expand_ins->args->head->elem = strdup(skip_lbl);
+
+            /* 在 expand_ins 后面插入：
+             *   LJMP saved_target
+             *   __bskip_N: (标签)
+             * 由于 List 没有 insert_after 操作，我们使用一个辅助方法：
+             * 将剩余部分接到新指令后面 */
+
+            /* 为 LJMP 创建新指令 */
+            AsmInstr *ljmp_ins = calloc(1, sizeof(AsmInstr));
+            ljmp_ins->op = strdup("LJMP");
+            ljmp_ins->args = make_list();
+            list_push(ljmp_ins->args, strdup(saved_target));
+            ljmp_ins->ssa = NULL;
+
+            /* 为标签创建新指令 */
+            char skip_lbl_colon[70];
+            snprintf(skip_lbl_colon, sizeof(skip_lbl_colon), "%s:", skip_lbl);
+            AsmInstr *lbl_ins = calloc(1, sizeof(AsmInstr));
+            lbl_ins->op = strdup(skip_lbl_colon);
+            lbl_ins->args = make_list();
+            lbl_ins->ssa = NULL;
+
+            /* 在 expand_ins 之后插入这两条指令
+             * 遍历链表找到 expand_ins 的节点 */
+            ListNode *node = sec->asminstrs->head;
+            while (node && node->elem != expand_ins) {
+                node = node->next;
+            }
+            if (node) {
+                /* 先插 lbl_ins（在 node 后面）*/
+                ListNode *lbl_node = malloc(sizeof(ListNode));
+                lbl_node->elem = lbl_ins;
+                lbl_node->next = node->next;
+                lbl_node->prev = node;
+                if (node->next) node->next->prev = lbl_node;
+                node->next = lbl_node;
+                if (sec->asminstrs->tail == node) sec->asminstrs->tail = lbl_node;
+                sec->asminstrs->len++;
+
+                /* 再在 node 和 lbl_node 之间插 ljmp_ins */
+                ListNode *ljmp_node = malloc(sizeof(ListNode));
+                ljmp_node->elem = ljmp_ins;
+                ljmp_node->next = lbl_node;
+                ljmp_node->prev = node;
+                lbl_node->prev = ljmp_node;
+                node->next = ljmp_node;
+                sec->asminstrs->len++;
+            } else {
+                /* 找不到节点，直接追加（保底） */
+                list_push(sec->asminstrs, ljmp_ins);
+                list_push(sec->asminstrs, lbl_ins);
+            }
+        }
+
+        free(saved_target);
+        changed = 1;
+    }
+}
+
 static void relax_ljmp_to_sjmp(Section *sec, int start_offset)
 {
     if (!sec || !sec->asminstrs) return;
@@ -1559,6 +1752,8 @@ static void encode_section(ObjFile *obj, int sec_idx, Section *sec)
 	state.start_offset = sec->bytes_len;
 	state.labels = make_dict(NULL);
 
+	/* First expand short branches that are out of rel8 range into LJMP sequences */
+	expand_short_branch_if_out_of_range(sec, state.start_offset);
 	/* Relax LJMP→SJMP before computing label positions */
 	relax_ljmp_to_sjmp(sec, state.start_offset);
 

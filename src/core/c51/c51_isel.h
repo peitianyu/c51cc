@@ -43,6 +43,9 @@ typedef struct ISelContext {
 
     /* 记录可用的条件取反信息（用于优化 JZ/JNZ） */
     Dict* br_invert; /* key: Instr* ptr string, value: bool* */
+
+    /* 记录 sbit = !sbit 模式的 STORE 指令对应的 bit 名（用于优化 CPL） */
+    Dict* sbit_cpl_stores; /* key: Instr* ptr string, value: char* (bit name) */
 } ISelContext;
 
 /* 指令选择主入口 */

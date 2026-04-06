@@ -675,6 +675,152 @@ static const char *k_imul =
     "MOV R7, R0\n"           /* R7 = lo byte */
     "RET\n";
 
+/* ?C?ULDIV – Unsigned 32-bit division / modulo
+ * Entry:  R4:R5:R6:R7 = dividend (R4=MSB, R7=LSB)
+ *         R0:R1:R2:R3 = divisor  (R0=MSB, R3=LSB)
+ * Exit:   R4:R5:R6:R7 = quotient
+ *         R0:R1:R2:R3 = remainder
+ *
+ * Algorithm: 32-bit shift-and-subtract long division (32 iterations)
+ * Scratch:   IDATA bytes at 0x20-0x27 used as 8-byte rem+quot buffer,
+ *            but here we just use A and B as temporaries in-loop.
+ *
+ * Register layout during the loop:
+ *   R4:R5:R6:R7 = quot (starts as dividend, becomes quotient)
+ *   20H:21H:22H:23H = rem (4 bytes in direct-access RAM; starts 0)
+ *   R0:R1:R2:R3 = divisor (preserved)
+ *   24H = loop counter (32)
+ *
+ * Because 8051 has only 8 registers (R0-R7) and we need 4 for divisor +
+ * 4 for quot/dividend, remainder lives in direct-access internal RAM.
+ */
+/* ?C?ULDIV – Unsigned 32-bit division / modulo
+ * Entry:  R4:R5:R6:R7 = dividend (R4=MSB, R7=LSB)
+ *         R0:R1:R2:R3 = divisor  (R0=MSB, R3=LSB)
+ * Exit:   R4:R5:R6:R7 = quotient
+ *         R0:R1:R2:R3 = remainder
+ * Uses idata 20H..24H as scratch:
+ *   20H..23H = remainder (20H=MSB, 23H=LSB)
+ *   24H      = loop counter (32 iterations)
+ * All operations use A as temp; only standard A-src ALU forms used.
+ */
+static const char *k_uldiv =
+    "?C?ULDIV:\n"
+    /* remainder = 0 */
+    "MOV 20H, #0\n"
+    "MOV 21H, #0\n"
+    "MOV 22H, #0\n"
+    "MOV 23H, #0\n"
+    "MOV 24H, #32\n"
+    "Luld_loop:\n"
+    /* Shift [rem | quot/dividend] left by 1 bit.
+     * Order: CLR C, then RLC from LSB of quot (R7) up through MSB of rem (20H).
+     * After 32 iterations quot (R4..R7) contains the quotient bits. */
+    "CLR C\n"
+    "MOV A, R7\n"   "RLC A\n"   "MOV R7, A\n"
+    "MOV A, R6\n"   "RLC A\n"   "MOV R6, A\n"
+    "MOV A, R5\n"   "RLC A\n"   "MOV R5, A\n"
+    "MOV A, R4\n"   "RLC A\n"   "MOV R4, A\n"
+    "MOV A, 23H\n"  "RLC A\n"   "MOV 23H, A\n"
+    "MOV A, 22H\n"  "RLC A\n"   "MOV 22H, A\n"
+    "MOV A, 21H\n"  "RLC A\n"   "MOV 21H, A\n"
+    "MOV A, 20H\n"  "RLC A\n"   "MOV 20H, A\n"
+    /* Compare rem (20H:21H:22H:23H) with divisor (R0:R1:R2:R3).
+     * We do rem - divisor using SUBB; if borrow (C=1) rem < divisor. */
+    "MOV A, 23H\n"
+    "CLR C\n"
+    "SUBB A, R3\n"
+    "MOV A, 22H\n"
+    "SUBB A, R2\n"
+    "MOV A, 21H\n"
+    "SUBB A, R1\n"
+    "MOV A, 20H\n"
+    "SUBB A, R0\n"
+    /* C=1 means rem < divisor, skip subtraction */
+    "JC Luld_lt\n"
+    /* rem >= divisor: rem -= divisor, set bit0 of R7 */
+    "MOV A, 23H\n"
+    "CLR C\n"
+    "SUBB A, R3\n"
+    "MOV 23H, A\n"
+    "MOV A, 22H\n"
+    "SUBB A, R2\n"
+    "MOV 22H, A\n"
+    "MOV A, 21H\n"
+    "SUBB A, R1\n"
+    "MOV 21H, A\n"
+    "MOV A, 20H\n"
+    "SUBB A, R0\n"
+    "MOV 20H, A\n"
+    /* Set quotient bit (R7 bit 0) – the last RLC already shifted in a 0 there */
+    "MOV A, R7\n"
+    "ORL A, #1\n"
+    "MOV R7, A\n"
+    "Luld_lt:\n"
+    "DJNZ 24H, Luld_loop\n"
+    /* Quotient in R4:R5:R6:R7; copy remainder from 20H..23H to R0:R1:R2:R3 */
+    "MOV A, 20H\n"  "MOV R0, A\n"
+    "MOV A, 21H\n"  "MOV R1, A\n"
+    "MOV A, 22H\n"  "MOV R2, A\n"
+    "MOV A, 23H\n"  "MOV R3, A\n"
+    "RET\n";
+
+/* ?C?SLDIV – Signed 32-bit division / modulo (C99: truncate toward zero)
+ * Entry/Exit convention same as ?C?ULDIV.
+ * Uses 25H = sign_of_quotient, 26H = sign_of_dividend (= sign_of_remainder).
+ */
+static const char *k_sldiv =
+    "?C?SLDIV:\n"
+    "MOV 25H, #0\n"
+    "MOV 26H, #0\n"
+    /* Check sign of dividend (R4 MSB) */
+    "MOV A, R4\n"
+    "JNB ACC.7, Lsld_divpos\n"
+    /* Negate dividend: R4:R5:R6:R7 = -R4:R5:R6:R7 (two's complement) */
+    "MOV A, R7\n"  "CPL A\n"  "ADD A, #1\n"  "MOV R7, A\n"
+    "MOV A, R6\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R6, A\n"
+    "MOV A, R5\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R5, A\n"
+    "MOV A, R4\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R4, A\n"
+    "MOV 25H, #1\n"
+    "MOV 26H, #1\n"
+    "Lsld_divpos:\n"
+    /* Check sign of divisor (R0 MSB) */
+    "MOV A, R0\n"
+    "JNB ACC.7, Lsld_dvsor_pos\n"
+    /* Negate divisor: R0:R1:R2:R3 = -R0:R1:R2:R3 */
+    "MOV A, R3\n"  "CPL A\n"  "ADD A, #1\n"  "MOV R3, A\n"
+    "MOV A, R2\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R2, A\n"
+    "MOV A, R1\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R1, A\n"
+    "MOV A, R0\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R0, A\n"
+    /* Flip quotient sign */
+    "MOV A, 25H\n"
+    "XRL A, #1\n"
+    "MOV 25H, A\n"
+    "Lsld_dvsor_pos:\n"
+    /* Perform unsigned division */
+    "LCALL ?C?ULDIV\n"
+    /* Result: quot in R4:R5:R6:R7, rem in R0:R1:R2:R3 */
+    /* Negate quotient if 25H != 0 */
+    "MOV A, 25H\n"
+    "JZ Lsld_qpos\n"
+    "MOV A, R7\n"  "CPL A\n"  "ADD A, #1\n"  "MOV R7, A\n"
+    "MOV A, R6\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R6, A\n"
+    "MOV A, R5\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R5, A\n"
+    "MOV A, R4\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R4, A\n"
+    "Lsld_qpos:\n"
+    /* Negate remainder if 26H != 0 and remainder != 0 */
+    "MOV A, 26H\n"
+    "JZ Lsld_rpos\n"
+    /* Check if remainder is zero */
+    "MOV A, R0\n"  "ORL A, R1\n"  "ORL A, R2\n"  "ORL A, R3\n"
+    "JZ Lsld_rpos\n"
+    "MOV A, R3\n"  "CPL A\n"  "ADD A, #1\n"  "MOV R3, A\n"
+    "MOV A, R2\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R2, A\n"
+    "MOV A, R1\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R1, A\n"
+    "MOV A, R0\n"  "CPL A\n"  "ADDC A, #0\n" "MOV R0, A\n"
+    "Lsld_rpos:\n"
+    "RET\n";
+
 /* Check whether any relocation in obj references the given symbol name */
 static int obj_needs_symbol(const ObjFile *obj, const char *sym)
 {
@@ -720,6 +866,8 @@ static int inject_runtime_libs(const ObjFile *main_obj, List *objs)
         { "?C?UIDIV", k_uidiv    },
         { "?C?SIDIV", k_sidiv    },
         { "?C?IMUL",  k_imul     },
+        { "?C?ULDIV", k_uldiv    },
+        { "?C?SLDIV", k_sldiv    },
     };
     int n = (int)(sizeof(table) / sizeof(table[0]));
 
@@ -759,6 +907,26 @@ ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj)
         }
         if (has_sidiv && !has_uidiv) {
             ObjFile *rt = build_runtime_obj("?C?UIDIV", k_uidiv);
+            if (rt) list_push(&objs, rt);
+        }
+    }
+
+    /* ?C?SLDIV calls ?C?ULDIV internally – if SLDIV was added, ensure ULDIV is present too */
+    {
+        int has_sldiv = 0, has_uldiv = 0;
+        for (Iter it = list_iter(&objs); !iter_end(it);) {
+            ObjFile *o = iter_next(&it);
+            if (!o) continue;
+            for (Iter sit = list_iter(o->symbols); !iter_end(sit);) {
+                Symbol *s = iter_next(&sit);
+                if (s && s->name) {
+                    if (strcmp(s->name, "?C?SLDIV") == 0) has_sldiv = 1;
+                    if (strcmp(s->name, "?C?ULDIV") == 0) has_uldiv = 1;
+                }
+            }
+        }
+        if (has_sldiv && !has_uldiv) {
+            ObjFile *rt = build_runtime_obj("?C?ULDIV", k_uldiv);
             if (rt) list_push(&objs, rt);
         }
     }

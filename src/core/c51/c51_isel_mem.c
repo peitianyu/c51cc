@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "c51_isel_regalloc.h"
+#include "c51_gen_global_var.h"
 
 static void emit_load_save_byte(ISelContext* isel, int dst_reg, int size, bool high_byte, const char* ssa) {
     if (!isel || dst_reg < 0) return;
@@ -50,7 +51,7 @@ static bool addr_value_needs_materialization(ISelContext* isel, ValueName value)
                         int64_t dummy = 0;
                         bool idx_const = try_get_value_const(isel, offidx, &dummy);
                         if (idx_const && !addr_value_needs_materialization(isel, user->dest)) {
-                            /* OFFSET result only used by load/store â†?foldable */
+                            /* OFFSET result only used by load/store ï¿½?foldable */
                         } else {
                             return true;
                         }
@@ -605,7 +606,7 @@ void emit_offset(ISelContext* isel, Instr* ins) {
     ValueName idx = *(ValueName*)list_get(ins->args, 1);
 
     /* Optimization: OFFSET(ADDR(sym)/direct-DATA-sym, const) where result only
-       used as ptr in LOAD/STORE â†?skip code generation entirely.
+       used as ptr in LOAD/STORE ï¿½?skip code generation entirely.
        emit_load/emit_store already handle OFFSET(ADDR(sym), const) via their
        look-through logic, so the pointer value never needs to be in a register. */
     if (isel && isel->ctx && isel->ctx->current_func) {
@@ -639,12 +640,12 @@ void emit_offset(ISelContext* isel, Instr* ins) {
             if (osym) {
                 SectionKind osec = get_symbol_section_kind(isel, osym);
                 if (osec == SEC_DATA || osec == SEC_IDATA || osec == SEC_XDATA) {
-                    /* Result value only used as LOAD/STORE pointer â†?no register needed */
+                    /* Result value only used as LOAD/STORE pointer ï¿½?no register needed */
                     if (!addr_value_needs_materialization(isel, ins->dest)) {
                         return;
                     }
                 }
-                /* CODE segment with constant offset â‰?255: emit_load handles this via
+                /* CODE segment with constant offset ï¿½?255: emit_load handles this via
                  * MOV DPTR,#sym; MOV A,#off; MOVC A,@A+DPTR directly, so no register
                  * materialization is needed. */
                 if (osec == SEC_CODE) {
@@ -753,7 +754,7 @@ void emit_offset(ISelContext* isel, Instr* ins) {
                 emit_mov(isel, dst_lo, "A", NULL);
             }
             /* high byte: MOV A, dst_hi; ADDC A, #hi; MOV dst_hi, A
-             * When low byte was 0 we skipped the ADD, so carry is clear â†?
+             * When low byte was 0 we skipped the ADD, so carry is clear ï¿½?
              * use ADD instead of ADDC to avoid spurious carry dependency. */
             int hi_byte = (total >> 8) & 0xFF;
             bool low_was_skipped = ((total & 0xFF) == 0);
@@ -823,7 +824,7 @@ void emit_store(ISelContext* isel, Instr* ins) {
             if (def && def->op == IROP_ADDR) {
                 allow_pointer_store = false;
             }
-            /* Optimization: STORE through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) â†?direct sym+off store */
+            /* Optimization: STORE through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) ï¿½?direct sym+off store */
             if (allow_pointer_store && def && def->op == IROP_OFFSET
                     && def->args && def->args->len >= 2) {
                 ValueName base = *(ValueName*)list_get(def->args, 0);
@@ -916,6 +917,66 @@ void emit_store(ISelContext* isel, Instr* ins) {
     }
 
     if (is_sbit_type(ins->mem_type)) {
+        /* Fast path: precompute_sbit_cpl already confirmed this is sbit = !sbit
+         * and recorded the bit name.  Emit a single CPL instruction. */
+        const char* cpl_bit = sbit_cpl_store_get(isel, ins);
+        if (cpl_bit) {
+            isel_emit(isel, "CPL", cpl_bit, NULL, instr_to_ssa_str(ins));
+            return;
+        }
+        /* Slow-path fallback: walk SSA def chain looking for LNOT(LOAD sbit same_ptr).
+         * This handles cases the precompute pass didn't cover (e.g. multi-use values). */
+        if (isel->ctx && isel->ctx->current_func && val > 0 && var_name) {
+            Func* cur_func = isel->ctx->current_func;
+            ValueName chain = val;
+            bool found_not = false;
+            for (int depth = 0; depth < 8; depth++) {
+                Instr* def = find_def_instr_in_func(cur_func, chain);
+                if (!def) break;
+                if (def->op == IROP_LNOT) {
+                    found_not = !found_not;
+                    chain = get_src1_value(def);
+                } else if (def->op == IROP_TRUNC || def->op == IROP_ZEXT || def->op == IROP_SEXT) {
+                    chain = get_src1_value(def);
+                } else if (def->op == IROP_NE || def->op == IROP_EQ) {
+                    ValueName other = -1;
+                    if (ne_is_compare_zero_def(cur_func, def, &other)) {
+                        if (def->op == IROP_EQ) found_not = !found_not;
+                        chain = other;
+                    } else break;
+                } else {
+                    break;
+                }
+            }
+            if (found_not) {
+                Instr* src_def = find_def_instr_in_func(cur_func, chain);
+                if (src_def && src_def->op == IROP_LOAD && is_sbit_type(src_def->mem_type)) {
+                    const char* src_bit = NULL;
+                    if (src_def->args && src_def->args->len > 0) {
+                        ValueName src_ptr = *(ValueName*)list_get(src_def->args, 0);
+                        if (src_ptr == ptr) {
+                            src_bit = var_name;
+                        } else {
+                            const char* src_name = get_sbit_var_name(isel, src_def);
+                            if (src_name && src_name[0] == '@') src_name++;
+                            if (!src_name && src_def->labels && src_def->labels->len > 0) {
+                                const char* lbl = list_get(src_def->labels, 0);
+                                src_name = (lbl && lbl[0] == '@') ? lbl + 1 : lbl;
+                            }
+                            const char* cmp_var = var_name;
+                            if (cmp_var && cmp_var[0] == '@') cmp_var++;
+                            if (src_name && cmp_var && strcmp(src_name, cmp_var) == 0)
+                                src_bit = var_name;
+                        }
+                    }
+                    if (src_bit) {
+                        if (src_bit[0] == '@') src_bit++;
+                        isel_emit(isel, "CPL", src_bit, NULL, instr_to_ssa_str(ins));
+                        return;
+                    }
+                }
+            }
+        }
         const char* val_reg = isel_get_lo_reg(isel, val);
         if (strcmp(val_reg, "A") != 0) {
             isel_emit(isel, "MOV", "A", val_reg, NULL);
@@ -953,9 +1014,44 @@ void emit_addr(ISelContext* isel, Instr* ins) {
         }
     }
 
+    /* Ensure the symbol exists in the object file.
+     * Local array/struct variables (e.g. unsigned char rowMask[4] = {...})
+     * generate IROP_ADDR with var_name as label, but no DATA section symbol
+     * is created for them during global variable processing (they are not
+     * in unit->globals).  If the symbol is missing, create it now. */
+    if (isel->ctx && isel->ctx->obj && var_name) {
+        bool sym_found = false;
+        for (Iter _sit = list_iter(isel->ctx->obj->symbols); !iter_end(_sit);) {
+            Symbol *_s = iter_next(&_sit);
+            if (_s && _s->name && strcmp(_s->name, var_name) == 0) {
+                sym_found = true;
+                break;
+            }
+        }
+        if (!sym_found && ins->mem_type && ins->mem_type->size > 0) {
+            /* Determine section kind from mem_type attributes */
+            SectionKind use_kind = SEC_DATA;
+            const char* sec_prefix = "?DT?";
+            CtypeAttr mattr = get_attr(ins->mem_type->attr);
+            if (mattr.ctype_data == CTYPE_DATA_IDATA) {
+                use_kind = SEC_IDATA; sec_prefix = "?ID?";
+            } else if (mattr.ctype_data == CTYPE_DATA_XDATA) {
+                use_kind = SEC_XDATA; sec_prefix = "?XD?";
+            }
+            int sec_idx = obj_add_section(isel->ctx->obj, sec_prefix, use_kind, 0, 1);
+            Section* sec = obj_get_section(isel->ctx->obj, sec_idx);
+            if (sec) {
+                int offset = sec->size;
+                section_append_zeros(sec, ins->mem_type->size);
+                obj_add_symbol(isel->ctx->obj, var_name, SYM_DATA, sec_idx,
+                               offset, ins->mem_type->size, SYM_FLAG_LOCAL);
+            }
+        }
+    }
+
     if (!addr_value_needs_materialization(isel, ins->dest)) {
         /* Skip materialization for symbols whose address is only used as a
-           base in OFFSET(addr, const) chains â†?downstream emit_load/emit_store
+           base in OFFSET(addr, const) chains ï¿½?downstream emit_load/emit_store
            already fold those patterns directly.
            For CODE symbols this holds too, since emit_offset now skips
            CODE-segment OFFSET materialization and emit_load handles it. */
@@ -998,7 +1094,7 @@ void emit_load(ISelContext* isel, Instr* ins) {
                 allow_pointer_deref = false;
                 /* Optimization: load(addr(sym)) where result only used as base in
                    offset(result, const, scale) and all those offsets are only used
-                   by load/store â†?skip emitting this load entirely.
+                   by load/store ï¿½?skip emitting this load entirely.
                    emit_load/emit_store already look through LOAD(ADDR(sym)) chains. */
                 if (ins->dest > 0) {
                     const char *sym_early = NULL;
@@ -1053,7 +1149,7 @@ void emit_load(ISelContext* isel, Instr* ins) {
                     }
                 }
             }
-            /* Optimization: LOAD through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) â†?direct sym+off load */
+            /* Optimization: LOAD through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) ï¿½?direct sym+off load */
             if (allow_pointer_deref && def && def->op == IROP_OFFSET
                     && def->args && def->args->len >= 2) {
                 ValueName obase = *(ValueName*)list_get(def->args, 0);

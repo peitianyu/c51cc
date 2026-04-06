@@ -283,7 +283,16 @@ static int apply_relocs(ObjFile *out)
         Symbol *sym = find_symbol_by_name(out, rel->symbol);
         
         if (!sec || !sym || sym->section == -1) {
-            fprintf(stderr, "obj: undefined symbol '%s' for relocation\n", rel->symbol);
+            /* If the symbol looks like a runtime library call (?C?XXX) or
+             * starts with an underscore (C extern), leave this reloc
+             * unresolved so that inject_runtime_libs can add it later.
+             * Any other undefined symbol is a hard error. */
+            const char *sname = rel ? rel->symbol : NULL;
+            int is_runtime = sname && (sname[0] == '?' ||
+                                       (sname[0] == '_' && sname[1] != '_'));
+            if (is_runtime) continue; /* leave for later resolution */
+            fprintf(stderr, "obj: undefined symbol '%s' for relocation\n",
+                    rel->symbol ? rel->symbol : "(null)");
             return -1;
         }
         
@@ -352,6 +361,17 @@ ObjFile *obj_link(List *objs)
             list_push(maps, m);
         }
         
+        /* 为该编译单元中的 LOCAL 符号建立重命名映射表：
+         * 如果目标已有同名 LOCAL 符号，则加 _L<N> 后缀以避免冲突。
+         * 重命名表在本轮符号处理及后续 reloc 处理时使用。 */
+        static int local_rename_serial = 0;
+        /* 简单哈希表的替代：用两个并行数组记录 old_name -> new_name */
+        /* 最多 64 个需要重命名的 LOCAL 符号已足够 */
+#define MAX_RENAMES 256
+        const char *rename_old[MAX_RENAMES];
+        char *rename_new[MAX_RENAMES];
+        int rename_count = 0;
+
         // 处理符号
         for (Iter sit = list_iter(obj->symbols); !iter_end(sit);) {
             Symbol *sym = iter_next(&sit);
@@ -361,6 +381,26 @@ ObjFile *obj_link(List *objs)
             if (sec >= 0) { // 正常符号
                 SectionMap *m = find_map(maps, obj, sec);
                 if (m) { sec = m->out_sec; val = m->base + sym->value; }
+            }
+
+            const char *emit_name = sym->name;
+
+            /* LOCAL 符号：允许同名重复——重命名后独立存储 */
+            if (sym->flags & SYM_FLAG_LOCAL) {
+                Symbol *existing = find_symbol_by_name(out, sym->name);
+                if (existing && sec >= 0 && existing->section >= 0) {
+                    /* 重命名：加 _L<serial> 后缀 */
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "%s_L%d", sym->name, ++local_rename_serial);
+                    if (rename_count < MAX_RENAMES) {
+                        rename_old[rename_count] = sym->name; /* 指向原符号名，生命期够用 */
+                        rename_new[rename_count] = obj_strdup(buf);
+                        rename_count++;
+                    }
+                    emit_name = buf; /* 用临时 buf，obj_add_symbol 内部会 strdup */
+                }
+                obj_add_symbol(out, emit_name, sym->kind, sec, val, sym->size, sym->flags);
+                continue;
             }
 
             /* 链接时符号合并：
@@ -386,6 +426,7 @@ ObjFile *obj_link(List *objs)
                 if (sec >= 0 && existing->section >= 0) {
                     fprintf(stderr, "link error: duplicate definition of symbol '%s'\n", sym->name);
                     /* 清理并返回 NULL 上层处理 */
+                    for (int ri = 0; ri < rename_count; ri++) free(rename_new[ri]);
                     for (Iter mit = list_iter(maps); !iter_end(mit);) free(iter_next(&mit));
                     free(maps);
                     obj_free(out);
@@ -396,17 +437,30 @@ ObjFile *obj_link(List *objs)
             obj_add_symbol(out, sym->name, sym->kind, sec, val, sym->size, sym->flags);
         }
         
-        // 处理重定位
+        // 处理重定位（同时应用 LOCAL 符号重命名）
         for (Iter rit = list_iter(obj->relocs); !iter_end(rit);) {
             Reloc *rel = iter_next(&rit);
             if (!rel) continue;
             
             SectionMap *m = find_map(maps, obj, rel->section);
             if (m) {
+                /* 查找是否需要将符号名替换为重命名后的名字 */
+                const char *emit_sym = rel->symbol;
+                for (int ri = 0; ri < rename_count; ri++) {
+                    if (rename_old[ri] && rel->symbol &&
+                        strcmp(rename_old[ri], rel->symbol) == 0) {
+                        emit_sym = rename_new[ri];
+                        break;
+                    }
+                }
                 obj_add_reloc(out, m->out_sec, m->base + rel->offset, 
-                                 rel->kind, rel->symbol, rel->addend);
+                                 rel->kind, emit_sym, rel->addend);
             }
         }
+
+        /* 释放重命名表 */
+        for (int ri = 0; ri < rename_count; ri++) free(rename_new[ri]);
+#undef MAX_RENAMES
     }
     
     // 清理映射表

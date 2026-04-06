@@ -25,6 +25,8 @@ void br_invert_put(ISelContext* isel, Instr* br, bool invert);
 bool br_invert_get(ISelContext* isel, Instr* br, bool* out_invert);
 void br_bitinfo_put(ISelContext* isel, Instr* br, const char* bit, bool invert);
 BrBitInfo* br_bitinfo_get(ISelContext* isel, Instr* br);
+void sbit_cpl_store_put(ISelContext* isel, Instr* store, const char* bit);
+const char* sbit_cpl_store_get(ISelContext* isel, Instr* store);
 
 int reg_index_from_name(const char* s);
 int alloc_temp_reg(ISelContext* isel, ValueName val, int size);
@@ -86,6 +88,7 @@ Block* find_block_by_id(Func* f, int id);
 int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, int size);
 void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr* ins);
 void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n);
+void precompute_sbit_cpl(ISelContext* isel, Instr** instrs, int n);
 void precompute_br_simplify(ISelContext* isel, Instr** instrs, int n);
 
 void emit_const(ISelContext* isel, Instr* ins, Instr* next);

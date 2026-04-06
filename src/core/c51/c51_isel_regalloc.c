@@ -560,9 +560,11 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                         ensure_local_value_symbol(genctx, slot_name, interval->size, use_kind);
                     }
 
-                    char* key = int_to_key(interval->val);
-                    dict_put(genctx->value_to_addr, key, strdup(slot_name));
-
+                    /* Write spill slot to value_to_spill only.
+                     * Do NOT write to value_to_addr: that dict is filled by
+                     * emit_addr() during code generation and maps ptr values
+                     * to sbit/SFR names.  Writing "__spill_N" there would
+                     * corrupt sbit name lookups (e.g. get_sbit_var_name). */
                     char* key2 = int_to_key(interval->val);
                     dict_put(genctx->value_to_spill, key2, strdup(slot_name));
 
@@ -627,6 +629,103 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
         free(spill_slots[i].name);
     }
     free(spill_slots);
+
+    /* ============================================================
+     * Phi Coalescing: after linear scan, try to eliminate Phi copies
+     * by reusing the Phi-dest register for the Phi-source value.
+     *
+     * For each Phi node:  dest = phi(src_i from pred_i)
+     *   If dest and src_i are in different registers, check whether
+     *   the src_i interval only lives up to the edge (no other users
+     *   conflict with dest's register after src_i's definition ends).
+     *   If safe, rebind src_i to the same register as dest.
+     * ============================================================ */
+    if (genctx && genctx->current_func && genctx->value_to_reg) {
+        Func* coalesce_func = genctx->current_func;
+
+        /* Build val -> interval index map for fast lookup */
+        const int kMaxVal = 1000000;
+        int* val_iv_map = malloc(sizeof(int) * kMaxVal);
+        for (int i = 0; i < kMaxVal; i++) val_iv_map[i] = -1;
+        for (int i = 0; i < lsc->interval_count; i++) {
+            LiveInterval* iv = &lsc->intervals[i];
+            if (iv->val > 0 && iv->val < kMaxVal) val_iv_map[iv->val] = i;
+        }
+
+        for (Iter bit = list_iter(coalesce_func->blocks); !iter_end(bit);) {
+            Block* blk = iter_next(&bit);
+            if (!blk || !blk->phis) continue;
+
+            for (Iter pit = list_iter(blk->phis); !iter_end(pit);) {
+                Instr* phi = iter_next(&pit);
+                if (!phi || phi->op != IROP_PHI || !phi->args) continue;
+
+                int dst_val = phi->dest;
+                if (dst_val <= 0 || dst_val >= kMaxVal) continue;
+
+                /* Get destination register */
+                int dst_iv = val_iv_map[dst_val];
+                if (dst_iv < 0) continue;
+                int dst_reg = lsc->intervals[dst_iv].reg;
+                int dst_size = lsc->intervals[dst_iv].size;
+                if (dst_reg < 0 || dst_reg == SPILL_REG) continue;
+
+                /* For each source of this phi */
+                for (int ai = 0; ai < phi->args->len; ai++) {
+                    ValueName* psrc = list_get(phi->args, ai);
+                    if (!psrc || *psrc <= 0 || *psrc >= kMaxVal) continue;
+                    int src_val = *psrc;
+
+                    int src_iv = val_iv_map[src_val];
+                    if (src_iv < 0) continue;
+                    int src_reg = lsc->intervals[src_iv].reg;
+                    if (src_reg == dst_reg) continue;              /* already same */
+                    if (src_reg < 0 || src_reg == SPILL_REG) continue; /* spilled */
+                    if (lsc->intervals[src_iv].size != dst_size) continue; /* size mismatch */
+
+                    /* Check: does rebinding src to dst_reg cause any conflict?
+                     * A conflict exists if there is another value (≠ dst_val, ≠ src_val)
+                     * that is assigned to dst_reg and whose live interval overlaps
+                     * src's live interval [src_start, src_end]. */
+                    int src_start = lsc->intervals[src_iv].start;
+                    int src_end   = lsc->intervals[src_iv].end;
+                    bool conflict = false;
+                    for (int ci = 0; ci < lsc->interval_count && !conflict; ci++) {
+                        if (ci == src_iv || ci == dst_iv) continue;
+                        LiveInterval* other = &lsc->intervals[ci];
+                        if (other->val <= 0) continue;
+                        /* Check if other occupies any of dst_reg..dst_reg+dst_size-1 */
+                        bool other_uses_dst_reg = false;
+                        if (other->reg >= 0 && other->reg != SPILL_REG) {
+                            for (int ri = 0; ri < other->size; ri++) {
+                                int r = other->reg + ri;
+                                for (int dr = 0; dr < dst_size; dr++) {
+                                    if (r == dst_reg + dr) { other_uses_dst_reg = true; break; }
+                                }
+                                if (other_uses_dst_reg) break;
+                            }
+                        }
+                        if (!other_uses_dst_reg) continue;
+                        /* Overlap check: [src_start, src_end] vs [other_start, other_end] */
+                        if (other->end >= src_start && other->start <= src_end) {
+                            conflict = true;
+                        }
+                    }
+
+                    if (!conflict) {
+                        /* Safe to rebind: change src_val's register to dst_reg */
+                        lsc->intervals[src_iv].reg = dst_reg;
+                        /* Also update value_to_reg dict */
+                        char* k = int_to_key(src_val);
+                        int* rp = malloc(sizeof(int));
+                        *rp = dst_reg;
+                        dict_put(genctx->value_to_reg, k, rp);
+                    }
+                }
+            }
+        }
+        free(val_iv_map);
+    }
 
     /* DEBUG: print interval allocations */
     if (genctx && genctx->current_func && getenv("C51CC_REGDEBUG")) {

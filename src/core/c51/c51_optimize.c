@@ -2382,11 +2382,12 @@ static int peephole_sbit_bool_materialize(List* instrs, int start) {
      * skip_label:
      */
 
-    /* 新指令1: CLR Rx */
+    /* 新指令1: MOV Rx, #0 (CLR Rn is not a valid 8051 instruction) */
     AsmInstr* new_clr = calloc(1, sizeof(AsmInstr));
-    new_clr->op = strdup("CLR");
+    new_clr->op = strdup("MOV");
     new_clr->args = make_list();
     list_push(new_clr->args, strdup(dst3));
+    list_push(new_clr->args, strdup("#0"));
 
     /* 新指令2: JNB sbit_addr, skip_label */
     AsmInstr* new_jnb = calloc(1, sizeof(AsmInstr));
