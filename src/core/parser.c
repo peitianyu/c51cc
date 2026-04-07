@@ -2089,6 +2089,9 @@ static Ast *read_decl_multi(Ctype *ctype, Token first_name)
     Ctype *base_ctype = ctype;
     Token varname = first_name;
     Ctype *var_base = base_ctype;
+
+    /* Detect static local variable: ctype_static==1 inside a function scope */
+    bool is_static_local = localenv && get_attr(ctype->attr).ctype_static;
     
     while (1) {
         if (ctype->type == CTYPE_VOID)
@@ -2097,7 +2100,23 @@ static Ast *read_decl_multi(Ctype *ctype, Token first_name)
             error("Fuction redefine local val: %s", token_to_string(varname));
         
         Ctype *var_ctype = read_array_dimensions(var_base);
-        Ast *var = ast_lvar(var_ctype, get_ident(varname));
+
+        Ast *var;
+        if (is_static_local) {
+            /* Static local variable: allocate as a global (persistent storage),
+             * but register under original name in localenv for local scope lookup.
+             * Use a unique internal name to avoid collisions across functions. */
+            char namebuf[128];
+            snprintf(namebuf, sizeof(namebuf), "__sloc_%d", labelseq++);
+            char *gname = strdup(namebuf);
+            var = ast_gvar(var_ctype, gname, false);
+            var->varname = gname;  /* use unique name for global storage */
+            /* Also register under original name in localenv */
+            dict_put(localenv, get_ident(varname), var);
+        } else {
+            var = ast_lvar(var_ctype, get_ident(varname));
+        }
+
         Ast *decl = read_decl_init_single(var);
         list_push(decls, decl);
         

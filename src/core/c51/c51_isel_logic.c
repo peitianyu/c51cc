@@ -1996,6 +1996,11 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
     ValueName rhs = is_ge ? b : a;
     bool unsigned_cmp = is_unsigned_compare(isel, lhs, rhs);
 
+    /* Check if rhs is encoded as an inline immediate in the instruction */
+    int64_t rhs_imm_val = 0;
+    bool rhs_is_imm = is_imm_operand(ins, &rhs_imm_val)
+                      || (rhs > 0 && try_get_value_const(isel, rhs, &rhs_imm_val));
+
     int size = ins && ins->type ? c51_abi_type_size(ins->type) : get_value_size(isel, ins->dest);
     if (size < 1) size = 1;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, size);
@@ -2005,7 +2010,9 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
         temp_result = dst_reg >= 0;
     }
     if (dst_reg < 0) dst_reg = 0;
-    int w = (get_value_size(isel, lhs) == 2 || get_value_size(isel, rhs) == 2) ? 2 : 1;
+    int w = (get_value_size(isel, lhs) == 2 || (!rhs_is_imm && get_value_size(isel, rhs) == 2)) ? 2 : 1;
+    /* If rhs is an immediate >= 256, it must be treated as 16-bit */
+    if (rhs_is_imm && (rhs_imm_val > 0xFF || rhs_imm_val < 0)) w = 2;
 
     char* l_true = isel_new_label(isel, "Lcmp_true");
     char* l_end = isel_new_label(isel, "Lcmp_end");
@@ -2038,30 +2045,42 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
                 next->op = IROP_NOP;
                 return;
             } else {
-                const char* rhi = save_acc_operand_in_b(isel, isel_get_extended_hi_reg(isel, rhs, 2));
+                /* 16-bit unsigned GE/LE: must use carry-propagation (lo first, then hi).
+                 * CLR C; MOV A,llo; SUBB A,rlo; MOV A,lhi; SUBB A,rhi
+                 * After this, JNC = no borrow = lhs >= rhs (for GE),
+                 *              JC  = borrow   = lhs <  rhs (for LE). */
+                char rlo_imm_buf[16], rhi_imm_buf[16];
+                const char* rlo;
+                const char* rhi;
+                int rlo_tmp = -1;
+                int rhi_tmp = -1;
+                if (rhs_is_imm) {
+                    snprintf(rlo_imm_buf, sizeof(rlo_imm_buf), "#%d", (int)(rhs_imm_val & 0xFF));
+                    snprintf(rhi_imm_buf, sizeof(rhi_imm_buf), "#%d", (int)((rhs_imm_val >> 8) & 0xFF));
+                    rlo = rlo_imm_buf;
+                    rhi = rhi_imm_buf;
+                } else {
+                    rlo = save_acc_operand_for_cmp(isel,
+                        isel_get_extended_lo_reg(isel, rhs, 2), &rlo_tmp);
+                    rhi = save_acc_operand_for_cmp(isel,
+                        isel_get_extended_hi_reg(isel, rhs, 2), &rhi_tmp);
+                }
+                const char* llo = isel_get_extended_lo_reg(isel, lhs, 2);
                 const char* lhi = isel_get_extended_hi_reg(isel, lhs, 2);
 
                 isel_emit(isel, "CLR", "C", NULL, NULL);
-                emit_mov(isel, "A", lhi, ins);
+                emit_mov(isel, "A", llo, ins);
+                isel_emit(isel, "SUBB", "A", rlo, NULL);
+                emit_mov(isel, "A", lhi, NULL);
                 isel_emit(isel, "SUBB", "A", rhi, NULL);
 
+                free_saved_cmp_operand(isel, rlo_tmp);
+                free_saved_cmp_operand(isel, rhi_tmp);
+
                 if (is_ge) {
-                    char* l_true = isel_new_label(isel, "Lcmp_far_true");
-                    char* l_false = isel_new_label(isel, "Lcmp_far_false");
                     char* ssa = instr_to_ssa_str(ins);
-                    isel_emit(isel, "JNC", l_true, NULL, ssa);
+                    emit_far_cond_jump1(isel, "JNC", id_t, id_f, ins, ssa);
                     free(ssa);
-                    isel_emit(isel, "JZ", l_false, NULL, NULL);
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
-                    isel_emit(isel, "LJMP", target_t, NULL, NULL);
-                    isel_emit_label(isel, l_false);
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_f, ins);
-                    isel_emit(isel, "LJMP", target_f, NULL, NULL);
-                    isel_emit_label(isel, l_true);
-                    emit_phi_copies_for_edge(isel, isel->current_block_id, id_t, ins);
-                    isel_emit(isel, "LJMP", target_t, NULL, NULL);
-                    free(l_true);
-                    free(l_false);
                 } else {
                     char* ssa = instr_to_ssa_str(ins);
                     emit_far_cond_jump1(isel, "JC", id_t, id_f, ins, ssa);
@@ -2108,10 +2127,20 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
         emit_mov(isel, "A", llo, ins);
         isel_emit(isel, "SUBB", "A", rlo, NULL);
     } else {
+        char rlo_imm_buf[16], rhi_imm_buf[16];
+        const char* rlo;
+        const char* rhi;
         int rlo_tmp = -1;
         int rhi_tmp = -1;
-        const char* rlo = save_acc_operand_for_cmp(isel, isel_get_extended_lo_reg(isel, rhs, 2), &rlo_tmp);
-        const char* rhi = save_acc_operand_for_cmp(isel, isel_get_extended_hi_reg(isel, rhs, 2), &rhi_tmp);
+        if (rhs_is_imm) {
+            snprintf(rlo_imm_buf, sizeof(rlo_imm_buf), "#%d", (int)(rhs_imm_val & 0xFF));
+            snprintf(rhi_imm_buf, sizeof(rhi_imm_buf), "#%d", (int)((rhs_imm_val >> 8) & 0xFF));
+            rlo = rlo_imm_buf;
+            rhi = rhi_imm_buf;
+        } else {
+            rlo = save_acc_operand_for_cmp(isel, isel_get_extended_lo_reg(isel, rhs, 2), &rlo_tmp);
+            rhi = save_acc_operand_for_cmp(isel, isel_get_extended_hi_reg(isel, rhs, 2), &rhi_tmp);
+        }
         const char* llo = isel_get_extended_lo_reg(isel, lhs, 2);
         const char* lhi = isel_get_extended_hi_reg(isel, lhs, 2);
         isel_emit(isel, "CLR", "C", NULL, NULL);
