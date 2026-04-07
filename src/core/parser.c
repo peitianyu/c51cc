@@ -521,7 +521,13 @@ static Ctype *clone_ctype_with_attr(Ctype *ctype, int attr)
 {
     Ctype *r = malloc(sizeof(Ctype));
     memcpy(r, ctype, sizeof(Ctype));
-    r->attr = attr;
+    /* 继承原始类型中的 unsigned 属性（通过 typedef 传递），但不继承 typedef/static/extern 等限定 */
+    union { CtypeAttr c_attr; int i_attr; } old_a = {0};
+    old_a.i_attr = ctype->attr;
+    union { CtypeAttr c_attr; int i_attr; } new_a = {0};
+    new_a.i_attr = attr;
+    if (old_a.c_attr.ctype_unsigned) new_a.c_attr.ctype_unsigned = 1;
+    r->attr = new_a.i_attr;
     list_push(ctypes, r);
     return r;
 }
@@ -1871,19 +1877,6 @@ static Ctype *read_decl_spec(void)
         if (!is_punct(tok, '*')) {
             while(read_decl_ctype_attr(tok, &attr)) tok = read_token();
             unget_token(tok);
-            /* 合并 typedef 原有的"类型属性"（如 unsigned、ctype_data 地址空间）与新增修饰符
-             * （如 const/volatile），但不传播存储类别（typedef/static/extern）。
-             * 这样 typedef unsigned char u8; 中的 unsigned 属性不会被 attr=0 覆盖。 */
-            {
-                union { CtypeAttr c; int i; } base = {0}, extra = {0};
-                base.i = ctype->attr;
-                extra.i = attr;
-                /* 只继承"类型属性"：unsigned 和地址空间（ctype_data），
-                 * 其余属性（typedef/static/extern/inline 等）不传播 */
-                extra.c.ctype_unsigned = extra.c.ctype_unsigned | base.c.ctype_unsigned;
-                extra.c.ctype_data     = extra.c.ctype_data     ? extra.c.ctype_data : base.c.ctype_data;
-                attr = extra.i;
-            }
             return clone_ctype_with_attr(ctype, attr);
         }
         ctype = make_ptr_type(ctype);
