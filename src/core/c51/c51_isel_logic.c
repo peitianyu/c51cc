@@ -2291,6 +2291,16 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
             isel_emit(isel, "SUBB", "A", rlo, NULL);
         }
     } else {
+        if (!unsigned_cmp) {
+            emit_signed_cmp16_result(isel, ins, dst_reg, size, lhs, rhs,
+                                     is_ge ? SIGNED_CMP_GE : SIGNED_CMP_LE);
+            free(l_true); free(l_end);
+            if (temp_result) {
+                free_temp_reg(isel, dst_reg, size);
+            }
+            return;
+        }
+
         char rlo_imm_buf[16], rhi_imm_buf[16];
         char llo_imm_buf[16], lhi_imm_buf[16];
         const char* rlo;

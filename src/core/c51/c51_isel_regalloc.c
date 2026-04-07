@@ -416,6 +416,12 @@ static const char* ensure_local_value_symbol(C51GenContext* genctx, const char* 
 
     int sec_idx = obj_add_section(genctx->obj, sec_name, use_kind, 0, 1);
     Section* sec = obj_get_section(genctx->obj, sec_idx);
+    /* 8051 IRAM 0x00-0x07 are physical register bank 0 (R0-R7).
+     * Reserve the first 8 bytes so that IDATA spill slots start at 0x08+,
+     * preventing aliasing with the register file. */
+    if (use_kind == SEC_IDATA && sec && sec->size < 8) {
+        section_append_zeros(sec, 8 - sec->size);
+    }
     int offset = sec->size;
     section_append_zeros(sec, size);
     obj_add_symbol(genctx->obj, name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_LOCAL);

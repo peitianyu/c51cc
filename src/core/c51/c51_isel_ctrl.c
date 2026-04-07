@@ -122,6 +122,17 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
             const char* lbl = (const char*)list_get(phi->labels, i);
             if (lbl && strcmp(lbl, pred_label) == 0) { idx = i; break; }
         }
+        /* SSA 优化 pass（pass_jump_threading/pass_merge_empty_block）可能将 pred_id 的
+         * PHI label 替换为 succ_id（块合并/threading 后出现自指 label）。
+         * 当 pred_label 找不到时，用 succ_id 作为 fallback 重新搜索。 */
+        if (idx < 0) {
+            char succ_label[32];
+            snprintf(succ_label, sizeof(succ_label), "block%d", succ_id);
+            for (int i = 0; i < n; i++) {
+                const char* lbl = (const char*)list_get(phi->labels, i);
+                if (lbl && strcmp(lbl, succ_label) == 0) { idx = i; break; }
+            }
+        }
         if (idx < 0 || idx >= phi->args->len) continue;
 
         ValueName src = *(ValueName*)list_get(phi->args, idx);
@@ -140,6 +151,12 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
 
         if (dst_base < 0) {
             const char* dst_sym = lookup_value_addr_symbol(isel, dst);
+            /* SPILL 值存储在 value_to_spill 而非 value_to_addr，需要单独查找 */
+            if (!dst_sym && isel->ctx && isel->ctx->value_to_spill) {
+                char* spill_key = int_to_key(dst);
+                dst_sym = (const char*)dict_get(isel->ctx->value_to_spill, spill_key);
+                free(spill_key);
+            }
             if (!dst_sym) continue;
 
             Instr* src_def = find_def_instr_in_func(f, src);

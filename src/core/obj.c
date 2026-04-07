@@ -196,7 +196,15 @@ static Section *ensure_out_section(ObjFile *out, SectionKind kind)
         if (sec && sec->kind == kind) return sec;
     }
     int idx = obj_add_section(out, section_default_name(kind), kind, 0, 1);
-    return obj_get_section(out, idx);
+    Section *sec = obj_get_section(out, idx);
+    /* 8051 IRAM 0x00-0x07 are occupied by register bank 0 (R0-R7).
+     * Reserve the first 8 bytes of the IDATA section so that all symbols
+     * placed in IDATA (spill slots, idata globals) start at 0x08 or later,
+     * avoiding aliasing with the physical register file. */
+    if (kind == SEC_IDATA && sec && sec->bytes_len == 0) {
+        section_append_zeros(sec, 8);
+    }
+    return sec;
 }
 
 typedef struct {

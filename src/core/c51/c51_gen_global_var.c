@@ -141,7 +141,13 @@ void handle_normal_global_var(C51GenContext *ctx, GlobalVar *g)
     
     int sec_idx = obj_add_section(ctx->obj, prefix, kind, 0, 1);
     Section *sec = obj_get_section(ctx->obj, sec_idx);
-    
+
+    /* 8051 IRAM 0x00-0x07 are occupied by register bank 0 (R0-R7).
+     * Reserve the first 8 bytes so no IDATA variable aliases a register. */
+    if (kind == SEC_IDATA && sec && sec->size < 8) {
+        section_append_zeros(sec, 8 - sec->size);
+    }
+
     unsigned int offset = sec->size;
     
     int flags = SYM_FLAG_GLOBAL;

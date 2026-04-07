@@ -226,6 +226,17 @@ int main(int argc, char **argv) {
             goto fail_cleanup;
         }
 
+        /* If user requested AST only, print and continue to next file. */
+        if (opt_ast) {
+            for (Iter i = list_iter(toplevels); !iter_end(i);) {
+                Ast *v = iter_next(&i);
+                if (v) printf("ast: %s\n", ast_to_string(v));
+            }
+            list_free(strings);
+            list_free(ctypes);
+            continue; /* next input file */
+        }
+
         /* 3. 构建 SSA */
         SSABuild *b = ssa_build_create();
         if (!b) {
@@ -236,6 +247,20 @@ int main(int argc, char **argv) {
             Ast *v = iter_next(&i);
             if (v) ast_to_ssa(b, v);
         }
+
+        /* If user requested SSA dump, print before/after optimization and skip codegen */
+        if (opt_ssa) {
+            printf("\n=== SSA Before Optimization ===\n");
+            ssa_print(stdout, b->unit);
+            ssa_optimize(b->unit, opt_level);
+            printf("\n=== Optimized SSA Output ===\n");
+            ssa_print(stdout, b->unit);
+            ssa_build_destroy(b);
+            list_free(strings);
+            list_free(ctypes);
+            continue; /* next input file */
+        }
+
         /* 优化 */
         ssa_optimize(b->unit, opt_level);
 

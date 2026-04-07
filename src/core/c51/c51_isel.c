@@ -22,6 +22,8 @@ char* int_to_key(int n) {
 static const Ctype g_inferred_int_type  = {0, CTYPE_INT,  2, NULL};
 /* 默认推断的无符号字节类型（用于小常量，attr=32 = ctype_unsigned=1 在第5位） */
 static const Ctype g_inferred_uchar_type = {32, CTYPE_CHAR, 1, NULL};
+/* 默认推断的有符号字节类型（用于有符号 phi） */
+static const Ctype g_inferred_char_type  = {0,  CTYPE_CHAR, 1, NULL};
 
 char* instr_to_ssa_str(Instr *ins) {
     if (!ins) return strdup("");
@@ -390,8 +392,11 @@ bool isel_can_keep_in_acc(ISelContext* isel, Instr* ins, Instr* next) {
 
 static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
     if (!isel || !ins) return NULL;
-    /* 对于值在 0-255 范围内的常量，推断为 unsigned char（节省寄存器） */
+    /* 对于值在 0-255 范围内的常量，推断为 unsigned char（节省寄存器）。
+     * 但若 ins->type 已指定且 size >= 2（如 int r = 0），优先用 ins->type，
+     * 避免把 int 类型的 0 缩小为 uchar 导致 PHI/ADD 后续类型推断出错。 */
     if (ins->op == IROP_CONST) {
+        if (ins->type && c51_abi_type_size(ins->type) >= 2) return ins->type;
         if (ins->imm.ival >= 0 && ins->imm.ival <= 255) {
             return (Ctype*)&g_inferred_uchar_type;
         }
@@ -410,15 +415,26 @@ static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
     }
 
     if (ins->op == IROP_PHI && ins->args && ins->args->len > 0) {
-        /* 取所有 arms 中最窄的类型（优先使用 1 字节类型，避免 phi 被推断为 int）。
-         * 若 arm 是 int 类型的常量但值在 0-255 范围内，视为不影响宽度（跳过）。 */
+        /* 对 PHI 的类型推断策略：
+         * 1. 若有 arm 是有符号类型（signed int/char），结果必须是有符号的，防止
+         *    loop-var 被错误推断为 unsigned（会导致有符号比较变成无符号比较）。
+         * 2. 在同符号的前提下，取最窄的类型（减少寄存器压力）。
+         * 3. 若 arm 是 int 类型的常量且值 <=255，跳过（不让它强行扩宽 phi 类型），
+         *    但如果该常量定义了符号性（有 ins->type 非 unsigned），则保留其符号性信息。
+         */
         Ctype* narrowest = NULL;
         int narrowest_size = 999;
+        bool any_signed = false;
         Func* phi_func = isel && isel->ctx ? isel->ctx->current_func : NULL;
         for (int ai = 0; ai < ins->args->len; ai++) {
             ValueName src = *(ValueName*)list_get(ins->args, ai);
             Ctype* t = get_value_type(isel, src);
             if (t) {
+                /* 记录是否有有符号 arm */
+                if (!get_attr(t->attr).ctype_unsigned &&
+                    t->type != CTYPE_PTR && t->type != CTYPE_BOOL) {
+                    any_signed = true;
+                }
                 int sz = c51_abi_type_size(t);
                 /* 若该 arm 是 int 类型的常量且值 <= 255，跳过（不让它扩宽 phi 类型） */
                 if (sz >= 2 && phi_func) {
@@ -434,7 +450,17 @@ static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
                 }
             }
         }
-        if (narrowest) return narrowest;
+        if (narrowest) {
+            /* 若有有符号 arm 但 narrowest 是无符号类型，提升为有符号以保持语义正确性 */
+            if (any_signed && get_attr(narrowest->attr).ctype_unsigned &&
+                narrowest->type != CTYPE_PTR && narrowest->type != CTYPE_BOOL) {
+                /* 返回同等大小但有符号的类型 */
+                if (narrowest_size == 1)
+                    return (Ctype*)&g_inferred_char_type;
+                return (Ctype*)&g_inferred_int_type;
+            }
+            return narrowest;
+        }
         /* 若所有 arms 类型未知或均被跳过，回退到第一个 arm */
         ValueName src = *(ValueName*)list_get(ins->args, 0);
         return get_value_type(isel, src);
