@@ -411,23 +411,24 @@ static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
 
     if (ins->op == IROP_PHI && ins->args && ins->args->len > 0) {
         /* 取所有 arms 中最窄的类型（优先使用 1 字节类型，避免 phi 被推断为 int）。
-         * 若 arm 是 int 类型的常量但值在 0-255 范围内，视为不影响宽度（跳过）。 */
+         * 跳过常量 arm（IROP_CONST）：常量的类型是推断出来的（如 0 → uchar），
+         * 不应让它决定 phi 节点的有符号性；优先使用非常量 arm 的真实声明类型。
+         * 例外：若所有 arm 都是常量，则回退到第一个 arm 的类型。 */
         Ctype* narrowest = NULL;
         int narrowest_size = 999;
         Func* phi_func = isel && isel->ctx ? isel->ctx->current_func : NULL;
         for (int ai = 0; ai < ins->args->len; ai++) {
             ValueName src = *(ValueName*)list_get(ins->args, ai);
+            /* 跳过常量 arm，避免推断类型（如 uchar）污染 phi 有符号性 */
+            if (phi_func) {
+                Instr* arm_def = find_def_instr_in_func(phi_func, src);
+                if (arm_def && arm_def->op == IROP_CONST) {
+                    continue; /* 常量 arm 不参与 phi 类型推断 */
+                }
+            }
             Ctype* t = get_value_type(isel, src);
             if (t) {
                 int sz = c51_abi_type_size(t);
-                /* 若该 arm 是 int 类型的常量且值 <= 255，跳过（不让它扩宽 phi 类型） */
-                if (sz >= 2 && phi_func) {
-                    Instr* arm_def = find_def_instr_in_func(phi_func, src);
-                    if (arm_def && arm_def->op == IROP_CONST &&
-                        arm_def->imm.ival >= 0 && arm_def->imm.ival <= 255) {
-                        continue; /* 小常量不扩宽 phi 类型 */
-                    }
-                }
                 if (sz < narrowest_size) {
                     narrowest_size = sz;
                     narrowest = t;
@@ -435,7 +436,7 @@ static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
             }
         }
         if (narrowest) return narrowest;
-        /* 若所有 arms 类型未知或均被跳过，回退到第一个 arm */
+        /* 若所有 arms 均为常量或类型未知，回退到第一个 arm 的类型 */
         ValueName src = *(ValueName*)list_get(ins->args, 0);
         return get_value_type(isel, src);
     }

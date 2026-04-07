@@ -2101,7 +2101,9 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
             if (w == 1) {
                 emit_signed_cmp8_branch(isel, ins, a, b, is_ge ? SIGNED_CMP_GE : SIGNED_CMP_LE, id_t, id_f);
             } else {
-                emit_signed_cmp16_branch(isel, ins, lhs, rhs,
+                /* Pass original a, b (not swapped lhs/rhs) so that emit_signed_cmp16_branch
+                 * computes a-b with the correct cmp_type direction. */
+                emit_signed_cmp16_branch(isel, ins, a, b,
                                          is_ge ? SIGNED_CMP_GE : SIGNED_CMP_LE, id_t, id_f);
             }
             next->op = IROP_NOP;
@@ -2127,6 +2129,19 @@ void emit_cmp_le_ge(ISelContext* isel, Instr* ins, Instr* next, bool is_ge) {
         emit_mov(isel, "A", llo, ins);
         isel_emit(isel, "SUBB", "A", rlo, NULL);
     } else {
+        /* 16-bit: signed comparison requires XRL sign-bit trick */
+        if (!unsigned_cmp) {
+            /* For signed 16-bit LE/GE, pass original a,b operands with the correct cmp_type.
+             * emit_signed_cmp16_result handles a LE b and a GE b directly (computes a-b). */
+            emit_signed_cmp16_result(isel, ins, dst_reg, size, a, b,
+                                     is_ge ? SIGNED_CMP_GE : SIGNED_CMP_LE);
+            free(l_true); free(l_end);
+            if (temp_result) {
+                free_temp_reg(isel, dst_reg, size);
+            }
+            return;
+        }
+
         char rlo_imm_buf[16], rhi_imm_buf[16];
         const char* rlo;
         const char* rhi;
