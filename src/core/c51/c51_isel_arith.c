@@ -947,12 +947,20 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
     if (size == 1) {
         if (is_unsigned) {
             // unsigned 8-bit: use DIV AB
-            const char* num_src = isel_get_lo_reg(isel, num);
-            const char* den_src = isel_get_lo_reg(isel, den);
+            char num_imm_buf[16], den_imm_buf[16];
+            int64_t num_imm_val = 0, den_imm_val = 0;
+            bool num_is_const = try_get_value_const(isel, num, &num_imm_val);
+            bool den_is_const = try_get_value_const(isel, den, &den_imm_val);
+            const char* num_src = num_is_const
+                ? (snprintf(num_imm_buf, sizeof(num_imm_buf), "#%d", (int)(num_imm_val & 0xFF)), num_imm_buf)
+                : isel_get_lo_reg(isel, num);
+            const char* den_src = den_is_const
+                ? (snprintf(den_imm_buf, sizeof(den_imm_buf), "#%d", (int)(den_imm_val & 0xFF)), den_imm_buf)
+                : isel_get_lo_reg(isel, den);
             int tnum = -1;
             const char* safe_num = num_src;
 
-            if (strcmp(num_src, "A") == 0 || strcmp(den_src, "A") == 0) {
+            if (!num_is_const && (strcmp(num_src, "A") == 0 || (!den_is_const && strcmp(den_src, "A") == 0))) {
                 tnum = alloc_temp_reg(isel, -1, 1);
                 if (tnum >= 0) {
                     safe_num = isel_reg_name(tnum);
@@ -975,12 +983,20 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
         // signed 8-bit: use Keil runtime ?C?SCDIV
         // Convention: A = num, B = den -> LCALL ?C?SCDIV -> A = quotient, B = remainder
         {
-            const char* num_src = isel_get_lo_reg(isel, num);
-            const char* den_src = isel_get_lo_reg(isel, den);
+            char snum_imm_buf[16], sden_imm_buf[16];
+            int64_t snum_imm_val = 0, sden_imm_val = 0;
+            bool snum_is_const = try_get_value_const(isel, num, &snum_imm_val);
+            bool sden_is_const = try_get_value_const(isel, den, &sden_imm_val);
+            const char* num_src = snum_is_const
+                ? (snprintf(snum_imm_buf, sizeof(snum_imm_buf), "#%d", (int)(int8_t)(snum_imm_val & 0xFF)), snum_imm_buf)
+                : isel_get_lo_reg(isel, num);
+            const char* den_src = sden_is_const
+                ? (snprintf(sden_imm_buf, sizeof(sden_imm_buf), "#%d", (int)(int8_t)(sden_imm_val & 0xFF)), sden_imm_buf)
+                : isel_get_lo_reg(isel, den);
 
             // If den is in A, save it to a temp first to avoid clobbering
             int tden = -1;
-            if (strcmp(den_src, "A") == 0) {
+            if (!sden_is_const && strcmp(den_src, "A") == 0) {
                 tden = alloc_temp_reg(isel, -1, 1);
                 const char* tmp = (tden >= 0) ? isel_reg_name(tden) : "R7";
                 emit_mov(isel, tmp, den_src, NULL);

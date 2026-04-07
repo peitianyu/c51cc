@@ -255,7 +255,24 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
     bool src2_is_imm = is_imm_operand(ins, &imm_val);
     ValueName src2 = get_src2_value(ins);
 
-    /* 检�?src2 是否�?IDATA spill：如果是，可以用 ANL/ORL/XRL A, sym 直接地址避免中转 */
+    /* Also treat src2 as immediate if it resolves to a compile-time constant
+     * (e.g. the result of a CONST instruction used directly as src2). */
+    if (!src2_is_imm && src2 > 0) {
+        src2_is_imm = try_get_value_const(isel, src2, &imm_val);
+    }
+    /* Likewise, if src1 is a constant and src2 is not, swap them so that
+     * the immediate-path handles the operation cleanly. */
+    if (!src2_is_imm) {
+        int64_t imm1 = 0;
+        if (try_get_value_const(isel, src1, &imm1)) {
+            imm_val = imm1;
+            src2_is_imm = true;
+            /* swap: src1 becomes the register operand, src2 was already it */
+            ValueName tmp_src = src1; src1 = src2; src2 = tmp_src;
+        }
+    }
+
+    /* 检查 src2 是否是 IDATA spill：如果是，可以用 ANL/ORL/XRL A, sym 直接地址避免中转 */
     const char* src2_sym = (!src2_is_imm) ? lookup_value_addr_symbol(isel, src2) : NULL;
     bool src2_spilled_mem = (!src2_is_imm) && src2_sym && isel_get_value_reg(isel, src2) == SPILL_REG;
     bool src2_idata_direct = false;

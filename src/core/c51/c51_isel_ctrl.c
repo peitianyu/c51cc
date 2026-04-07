@@ -494,11 +494,10 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
         if (i + 1 < n) {
             Instr* br = instrs[i + 1];
             if (br && br->op == IROP_BR && instr_uses_value(br, v0)) {
-                if (count_value_uses(instrs, n, v0) == 1) {
-                    br_bitinfo_put(isel, br, bit, false);
-                    ld->op = IROP_NOP;
-                    continue;
-                }
+                int uses = count_value_uses(instrs, n, v0);
+                br_bitinfo_put(isel, br, bit, false);
+                if (uses == 1) ld->op = IROP_NOP;
+                continue;
             }
         }
 
@@ -508,12 +507,12 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
             if (lnot && br && lnot->op == IROP_LNOT && br->op == IROP_BR) {
                 ValueName v1 = lnot->dest;
                 if (get_src1_value(lnot) == v0 && instr_uses_value(br, v1)) {
-                    if (count_value_uses(instrs, n, v0) == 1 && count_value_uses(instrs, n, v1) == 1) {
-                        br_bitinfo_put(isel, br, bit, true);
-                        ld->op = IROP_NOP;
-                        lnot->op = IROP_NOP;
-                        continue;
-                    }
+                    int uses0 = count_value_uses(instrs, n, v0);
+                    int uses1 = count_value_uses(instrs, n, v1);
+                    br_bitinfo_put(isel, br, bit, true);
+                    if (uses0 == 1) ld->op = IROP_NOP;
+                    if (uses1 == 1) lnot->op = IROP_NOP;
+                    continue;
                 }
             }
         }
@@ -526,12 +525,12 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
                 if (ne_is_compare_zero(instrs, n, ne, &other) && other == v0) {
                     ValueName v1 = ne->dest;
                     if (instr_uses_value(br, v1)) {
-                        if (count_value_uses(instrs, n, v0) == 1 && count_value_uses(instrs, n, v1) == 1) {
-                            br_bitinfo_put(isel, br, bit, false);
-                            ld->op = IROP_NOP;
-                            ne->op = IROP_NOP;
-                            continue;
-                        }
+                        int uses0 = count_value_uses(instrs, n, v0);
+                        int uses1 = count_value_uses(instrs, n, v1);
+                        br_bitinfo_put(isel, br, bit, false);
+                        if (uses0 == 1) ld->op = IROP_NOP;
+                        if (uses1 == 1) ne->op = IROP_NOP;
+                        continue;
                     }
                 }
             }
@@ -541,12 +540,39 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
                 if (ne_is_compare_zero(instrs, n, ne, &other) && other == v0) {
                     ValueName v1 = ne->dest;
                     if (instr_uses_value(br, v1)) {
-                        if (count_value_uses(instrs, n, v0) == 1 && count_value_uses(instrs, n, v1) == 1) {
-                            br_bitinfo_put(isel, br, bit, true);
-                            ld->op = IROP_NOP;
-                            ne->op = IROP_NOP;
-                            continue;
-                        }
+                        int uses0 = count_value_uses(instrs, n, v0);
+                        int uses1 = count_value_uses(instrs, n, v1);
+                        br_bitinfo_put(isel, br, bit, true);
+                        if (uses0 == 1) ld->op = IROP_NOP;
+                        if (uses1 == 1) ne->op = IROP_NOP;
+                        continue;
+                    }
+                }
+            }
+            /* LOAD(sbit) -> EQ(sbit, 1) -> BR: eq(sbit,1) is true when bit==1, use JB (invert=false) */
+            if (ne && br && ne->op == IROP_EQ && br->op == IROP_BR) {
+                ValueName other = -1;
+                int64_t cst = 0;
+                bool has_cst = false;
+                /* 检查内联立即数 */
+                if (is_imm_operand(ne, &cst)) {
+                    has_cst = true; other = get_src1_value(ne);
+                } else {
+                    /* 检查 args 里的常量 */
+                    ValueName a = get_src1_value(ne);
+                    ValueName b = get_src2_value(ne);
+                    if (find_const_in_block(instrs, n, b, &cst)) { has_cst = true; other = a; }
+                    else if (find_const_in_block(instrs, n, a, &cst)) { has_cst = true; other = b; }
+                }
+                if (has_cst && cst == 1 && other == v0) {
+                    ValueName v1 = ne->dest;
+                    if (instr_uses_value(br, v1)) {
+                        int uses0 = count_value_uses(instrs, n, v0);
+                        int uses1 = count_value_uses(instrs, n, v1);
+                        br_bitinfo_put(isel, br, bit, false);  /* EQ(bit,1): true when bit==1, no invert */
+                        if (uses0 == 1) ld->op = IROP_NOP;
+                        if (uses1 == 1) ne->op = IROP_NOP;
+                        continue;
                     }
                 }
             }
@@ -562,15 +588,14 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
                 if (get_src1_value(lnot) == v0 && ne_is_compare_zero(instrs, n, ne, &other) && other == v1) {
                     ValueName v2 = ne->dest;
                     if (instr_uses_value(br, v2)) {
-                        if (count_value_uses(instrs, n, v0) == 1 &&
-                            count_value_uses(instrs, n, v1) == 1 &&
-                            count_value_uses(instrs, n, v2) == 1) {
-                            br_bitinfo_put(isel, br, bit, true);
-                            ld->op = IROP_NOP;
-                            lnot->op = IROP_NOP;
-                            ne->op = IROP_NOP;
-                            continue;
-                        }
+                        int uses0 = count_value_uses(instrs, n, v0);
+                        int uses1 = count_value_uses(instrs, n, v1);
+                        int uses2 = count_value_uses(instrs, n, v2);
+                        br_bitinfo_put(isel, br, bit, true);
+                        if (uses0 == 1) ld->op = IROP_NOP;
+                        if (uses1 == 1) lnot->op = IROP_NOP;
+                        if (uses2 == 1) ne->op = IROP_NOP;
+                        continue;
                     }
                 }
             }
@@ -606,6 +631,26 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
                 def = find_def_instr_in_func(isel->ctx->current_func, cond);
             }
         }
+        /* EQ(sbit, 1): eq(x,1) is true when x==1, no invert needed */
+        if (def && def->op == IROP_EQ) {
+            int64_t eq_cst = 0;
+            bool eq_has_const = false;
+            if (is_imm_operand(def, &eq_cst)) {
+                eq_has_const = true;
+            } else {
+                ValueName eq_src2 = get_src2_value(def);
+                Instr* cdef2 = find_def_instr_in_func(isel->ctx->current_func, eq_src2);
+                if (cdef2 && cdef2->op == IROP_CONST) {
+                    eq_cst = cdef2->imm.ival; eq_has_const = true;
+                }
+            }
+            if (eq_has_const && eq_cst == 1) {
+                def_ne = def;  /* NOP this EQ instruction if use_count==1 */
+                cond = get_src1_value(def);
+                /* invert unchanged: EQ(sbit,1) is true when bit==1, same as direct sbit check */
+                def = find_def_instr_in_func(isel->ctx->current_func, cond);
+            }
+        }
 
         if (def && def->op == IROP_LNOT) {
             def_lnot = def;
@@ -626,13 +671,14 @@ void precompute_sbit_br(ISelContext* isel, Instr** instrs, int n) {
             bool ok = true;
             if (def_ne && count_value_uses(instrs, n, def_ne->dest) != 1) ok = false;
             if (def_lnot && count_value_uses(instrs, n, def_lnot->dest) != 1) ok = false;
-            if (def_load && count_value_uses(instrs, n, def_load->dest) != 1) ok = false;
+            /* Note: def_load use_count may be > 1 (e.g. loop with backedge PHI).
+             * JB/JNB reads the hardware bit directly so it is always safe. */
             if (!ok) continue;
 
             br_bitinfo_put(isel, br, bit, invert);
-            if (def_ne) def_ne->op = IROP_NOP;
-            if (def_lnot) def_lnot->op = IROP_NOP;
-            if (def_load) def_load->op = IROP_NOP;
+            if (def_ne && count_value_uses(instrs, n, def_ne->dest) == 1) def_ne->op = IROP_NOP;
+            if (def_lnot && count_value_uses(instrs, n, def_lnot->dest) == 1) def_lnot->op = IROP_NOP;
+            if (def_load && count_value_uses(instrs, n, def_load->dest) == 1) def_load->op = IROP_NOP;
         }
     }
 }

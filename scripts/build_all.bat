@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 call :resolve_path "%~dp0.." REPO_ROOT
 if "%~1"=="" (
-    call :resolve_path "%REPO_ROOT%\test" SOURCE_DIR
+    call :resolve_path "%REPO_ROOT%\code" SOURCE_DIR
 ) else (
     call :resolve_path "%~1" SOURCE_DIR
 )
@@ -16,7 +16,9 @@ if "%~2"=="" (
 
 set "KEIL_BIN=%REPO_ROOT%\_tools\keil\C51\BIN"
 set "KEIL_LIB=%REPO_ROOT%\_tools\keil\C51\LIB"
-set "SDCC_BIN=%REPO_ROOT%\_tools\sdcc\bin"
+set "KEIL_INC=%REPO_ROOT%\_tools\keil\C51\INC"
+set "KEIL_INC_ATMEL=%REPO_ROOT%\_tools\keil\C51\INC\Atmel"
+set "C51CC_EXE=%REPO_ROOT%\scripts\c51cc.exe"
 
 if not exist "%SOURCE_DIR%" (
     echo [ERROR] Source directory not found: %SOURCE_DIR%
@@ -33,29 +35,27 @@ call :require_file "%KEIL_BIN%\OH51.EXE"
 if errorlevel 1 exit /b 1
 call :require_file "%KEIL_LIB%\C51S.LIB"
 if errorlevel 1 exit /b 1
-call :require_file "%SDCC_BIN%\sdcc.exe"
-if errorlevel 1 exit /b 1
-call :require_file "%SDCC_BIN%\packihx.exe"
+call :require_file "%C51CC_EXE%"
 if errorlevel 1 exit /b 1
 
 for %%I in ("%SOURCE_DIR%") do set "SOURCE_TAG=%%~nxI"
 set "KEIL_OUT=%OUTPUT_ROOT%\keil\%SOURCE_TAG%"
-set "SDCC_OUT=%OUTPUT_ROOT%\sdcc\%SOURCE_TAG%"
+set "C51CC_OUT=%OUTPUT_ROOT%\c51cc\%SOURCE_TAG%"
 set "TMP_ROOT=%REPO_ROOT%\.tmp\build_all\%SOURCE_TAG%"
 
 if exist "%KEIL_OUT%" rmdir /s /q "%KEIL_OUT%"
-if exist "%SDCC_OUT%" rmdir /s /q "%SDCC_OUT%"
+if exist "%C51CC_OUT%" rmdir /s /q "%C51CC_OUT%"
 if exist "%TMP_ROOT%" rmdir /s /q "%TMP_ROOT%"
 
 mkdir "%KEIL_OUT%" >nul 2>nul
-mkdir "%SDCC_OUT%" >nul 2>nul
+mkdir "%C51CC_OUT%" >nul 2>nul
 mkdir "%TMP_ROOT%" >nul 2>nul
 
 set /a PROJECT_COUNT=0
 set /a KEIL_OK=0
 set /a KEIL_FAIL=0
-set /a SDCC_OK=0
-set /a SDCC_FAIL=0
+set /a C51CC_OK=0
+set /a C51CC_FAIL=0
 
 echo [INFO] Source : %SOURCE_DIR%
 echo [INFO] Output : %OUTPUT_ROOT%
@@ -66,10 +66,10 @@ for /r "%SOURCE_DIR%" %%F in (*.c) do call :dispatch_project "%%~fF"
 echo.
 echo [SUMMARY] Projects   : %PROJECT_COUNT%
 echo [SUMMARY] Keil       : %KEIL_OK% success, %KEIL_FAIL% failed
-echo [SUMMARY] SDCC       : %SDCC_OK% success, %SDCC_FAIL% failed
+echo [SUMMARY] C51CC      : %C51CC_OK% success, %C51CC_FAIL% failed
 
 if %KEIL_FAIL% GTR 0 set "HAS_FAILURE=1"
-if %SDCC_FAIL% GTR 0 set "HAS_FAILURE=1"
+if %C51CC_FAIL% GTR 0 set "HAS_FAILURE=1"
 
 if exist "%TMP_ROOT%" rmdir /s /q "%TMP_ROOT%"
 
@@ -108,7 +108,7 @@ if "%EXTRA_FILE%"=="" (
 set /a PROJECT_COUNT+=1
 echo [PROJECT %PROJECT_COUNT%] %PROJECT_NAME%
 call :build_keil "%PROJECT_NAME%" "%ENTRY_FILE%" "%EXTRA_FILE%"
-call :build_sdcc "%PROJECT_NAME%" "%ENTRY_FILE%" "%EXTRA_FILE%"
+call :build_c51cc "%PROJECT_NAME%" "%ENTRY_FILE%" "%EXTRA_FILE%"
 echo.
 exit /b 0
 
@@ -120,6 +120,16 @@ set "EXTRA_FILE=%~3"
 call :prepare_paths "%PROJECT_NAME%" "%ENTRY_FILE%" "%KEIL_OUT%" "keil"
 call :stage_source_tree "%ENTRY_DIR%" "%WORK_DIR%\src"
 if errorlevel 1 goto :keil_fail
+
+REM Also stage include dir if it exists alongside source tree
+set "PARENT_INCLUDE=%ENTRY_DIR%\..\include"
+if exist "%PARENT_INCLUDE%\" (
+    call :stage_source_tree "%PARENT_INCLUDE%" "%WORK_DIR%\include"
+
+    if exist "%REPO_ROOT%\STARTUP.A51" (
+        copy /y "%REPO_ROOT%\STARTUP.A51" "%WORK_DIR%\STARTUP.A51" >nul
+    )
+)
 
 pushd "%WORK_DIR%\src" >nul
 
@@ -137,6 +147,18 @@ if not "%EXTRA_FILE%"=="" (
     echo   [Keil] compiling %EXTRA_FILE_NAME%
     call :keil_compile_one "%EXTRA_FILE_NAME%"
     if errorlevel 1 goto :keil_fail_pop
+)
+
+REM Auto-include delay.c from ../include if present and not already an EXTRA_FILE
+if "%EXTRA_BASE%"=="" (
+    if exist "..\include\delay.c" (
+        copy /y "..\include\delay.c" "delay.c" >nul
+        set "EXTRA_BASE=delay"
+        set "EXTRA_FILE_NAME=delay.c"
+        echo   [Keil] compiling delay.c (from include)
+        call :keil_compile_one "delay.c"
+        if errorlevel 1 goto :keil_fail_pop
+    )
 )
 
 if exist "STARTUP.A51" (
@@ -180,58 +202,69 @@ set /a KEIL_FAIL+=1
 echo   [Keil] failed
 exit /b 0
 
-:build_sdcc
+
+:build_c51cc
 set "PROJECT_NAME=%~1"
 set "ENTRY_FILE=%~2"
 set "EXTRA_FILE=%~3"
 
-call :prepare_paths "%PROJECT_NAME%" "%ENTRY_FILE%" "%SDCC_OUT%" "sdcc"
+call :prepare_paths "%PROJECT_NAME%" "%ENTRY_FILE%" "%C51CC_OUT%" "c51cc"
 call :stage_source_tree "%ENTRY_DIR%" "%WORK_DIR%\src"
-if errorlevel 1 goto :sdcc_fail
+if errorlevel 1 goto :c51cc_fail
+
+set "PARENT_INCLUDE=%ENTRY_DIR%\..\include"
+if exist "%PARENT_INCLUDE%\" (
+    call :stage_source_tree "%PARENT_INCLUDE%" "%WORK_DIR%\include"
+)
+
+if exist "%REPO_ROOT%\STARTUP.A51" (
+    copy /y "%REPO_ROOT%\STARTUP.A51" "%WORK_DIR%\src\STARTUP.A51" >nul
+)
 
 pushd "%WORK_DIR%\src" >nul
-set "OLD_PATH=%PATH%"
-set "PATH=%SDCC_BIN%;%PATH%"
 
-set "EXTRA_BASE="
-set "EXTRA_FILE_NAME="
+echo   [C51CC] compiling %PROJECT_NAME%
+
+set "C51CC_IFLAGS=-I..\include"
+if not exist "..\include\" set "C51CC_IFLAGS="
+
+set "C51CC_EXTRA_SRC="
 if not "%EXTRA_FILE%"=="" (
-    for %%I in ("%EXTRA_FILE%") do (
-        set "EXTRA_BASE=%%~nI"
-        set "EXTRA_FILE_NAME=%%~nxI"
-    )
+    for %%I in ("%EXTRA_FILE%") do set "C51CC_EXTRA_SRC=%%~nxI"
 )
 
-echo   [SDCC] compiling %PROJECT_NAME%
-if defined EXTRA_FILE_NAME (
-    "%SDCC_BIN%\sdcc.exe" -mmcs51 --model-small --out-fmt-ihx "%ENTRY_FILE_NAME%" "%EXTRA_FILE_NAME%"
+REM Check for delay.c in include dir when no extra file is given
+if "%C51CC_EXTRA_SRC%"=="" (
+    if exist "..\include\delay.c" set "C51CC_EXTRA_SRC=..\include\delay.c"
+)
+
+if defined C51CC_EXTRA_SRC (
+    "%C51CC_EXE%" -asm -hex -o "%PROJECT_NAME%" %C51CC_IFLAGS% "%ENTRY_FILE_NAME%" "%C51CC_EXTRA_SRC%"
 ) else (
-    "%SDCC_BIN%\sdcc.exe" -mmcs51 --model-small --out-fmt-ihx "%ENTRY_FILE_NAME%"
+    "%C51CC_EXE%" -asm -hex -o "%PROJECT_NAME%" %C51CC_IFLAGS% "%ENTRY_FILE_NAME%"
 )
-if errorlevel 1 goto :sdcc_fail_pop
-if not exist "%ENTRY_BASE%.ihx" goto :sdcc_fail_pop
-
-cmd /c ""%SDCC_BIN%\packihx.exe" "%ENTRY_BASE%.ihx" > "%PROJECT_NAME%.hex""
-if errorlevel 1 goto :sdcc_fail_pop
-if not exist "%PROJECT_NAME%.hex" goto :sdcc_fail_pop
+if errorlevel 1 goto :c51cc_fail_pop
+if not exist "%PROJECT_NAME%.hex" goto :c51cc_fail_pop
 
 mkdir "%DEST_DIR%" >nul 2>nul
-copy /y "%ENTRY_BASE%.asm" "%DEST_DIR%\%ENTRY_BASE%.asm" >nul
-if defined EXTRA_BASE copy /y "%EXTRA_BASE%.asm" "%DEST_DIR%\%EXTRA_BASE%.asm" >nul
+copy /y "%PROJECT_NAME%.asm" "%DEST_DIR%\%PROJECT_NAME%.asm" >nul 2>nul
+copy /y "%ENTRY_BASE%.asm" "%DEST_DIR%\%ENTRY_BASE%.asm" >nul 2>nul
 copy /y "%PROJECT_NAME%.hex" "%DEST_DIR%\%PROJECT_NAME%.hex" >nul
+if exist "..\include\" (
+    robocopy "..\include" "%DEST_DIR%\include" /E /NFL /NDL /NJH /NJS /NC /NS >nul
+)
+if exist "STARTUP.A51" copy /y "STARTUP.A51" "%DEST_DIR%\STARTUP.A51" >nul
 
-set "PATH=%OLD_PATH%"
 popd >nul
-set /a SDCC_OK+=1
-echo   [SDCC] done
+set /a C51CC_OK+=1
+echo   [C51CC] done
 exit /b 0
 
-:sdcc_fail_pop
-set "PATH=%OLD_PATH%"
+:c51cc_fail_pop
 popd >nul
-:sdcc_fail
-set /a SDCC_FAIL+=1
-echo   [SDCC] failed
+:c51cc_fail
+set /a C51CC_FAIL+=1
+echo   [C51CC] failed
 exit /b 0
 
 :prepare_paths
@@ -289,7 +322,9 @@ exit /b 0
 :keil_compile_one
 set "SRC_FILE=%~1"
 for %%I in ("%SRC_FILE%") do set "SRC_BASE=%%~nI"
-"%KEIL_BIN%\C51.exe" "%SRC_FILE%" "OBJECT(%SRC_BASE%.obj)" "SRC"
+set "KEIL_INCDIR=%KEIL_INC%;%KEIL_INC_ATMEL%"
+if exist "..\include\" set "KEIL_INCDIR=..\include;%KEIL_INC%;%KEIL_INC_ATMEL%"
+"%KEIL_BIN%\C51.exe" "%SRC_FILE%" "INCDIR(%KEIL_INCDIR%)" "OBJECT(%SRC_BASE%.obj)" "SRC"
 if not exist "%SRC_BASE%.SRC" exit /b 1
 "%KEIL_BIN%\A51.EXE" "%SRC_BASE%.SRC" "OBJECT(%SRC_BASE%.obj)"
 if not exist "%SRC_BASE%.obj" exit /b 1

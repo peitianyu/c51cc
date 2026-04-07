@@ -937,6 +937,8 @@ static bool pass_const_fold(Func *f, Stats *s) {
             bool u = is_unsigned_type(i->type);
             bool ok = false;
 
+
+
             /* 如果第二个操作数是通过标签内联的立即数（例如 pass_binop_const_inline 使用的 "imm"
              * 或者其他 pass 使用的 "imm1=<val>"），这里也把它视为常量，以便后续折叠。
              */
@@ -1795,6 +1797,34 @@ static bool pass_dead_local_store_elim(Func *f, Stats *s) {
                 if (resolve_base_offset(f, get_arg(i, 0), &base, &off)) {
                     BaseInfo *bi = get_base_info(bases, &base_count, base, f);
                     if (bi) bi->used = true;
+                } else {
+                    /* resolve_base_offset fails when offset is non-constant (e.g. array[var]).
+                     * Walk the ADD/OFFSET chain ignoring non-const offsets to find the ADDR base,
+                     * and mark it as 'used' so we don't eliminate the initialization stores. */
+                    ValueName cur = get_arg(i, 0);
+                    for (int depth = 0; depth < 8; ++depth) {
+                        Instr *def = find_def_instr(f, cur);
+                        if (!def) break;
+                        if (def->op == IROP_ADDR) {
+                            BaseInfo *bi = get_base_info(bases, &base_count, cur, f);
+                            if (bi) bi->used = true;
+                            break;
+                        }
+                        if (def->op == IROP_OFFSET) {
+                            cur = get_arg(def, 0);
+                        } else if (def->op == IROP_ADD) {
+                            /* pick whichever arg leads to ADDR */
+                            ValueName a0 = get_arg(def, 0), a1 = get_arg(def, 1);
+                            int64_t c = 0;
+                            if (get_const_value(f, a0, &c)) cur = a1;
+                            else cur = a0;
+                        } else if (def->op == IROP_TRUNC || def->op == IROP_ZEXT ||
+                                   def->op == IROP_SEXT || def->op == IROP_BITCAST) {
+                            cur = get_arg(def, 0);
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -2235,6 +2265,13 @@ static bool pass_binop_const_inline(Func *f, Stats *s) {
                 list_push(i->args, p);
                 i->op = IROP_TRUNC; /* 保持类型一致，表示单操作数传递 */
             } else if (!keep_args) {
+                list_clear(i->args);
+                ValueName *p = pass_alloc(sizeof *p); *p = lhs;
+                list_push(i->args, p);
+            } else {
+                /* keep_args=true（比如 int 类型的 OR/AND/XOR 或比较指令）:
+                 * 仍然需要把非常量操作数 lhs 放到 args[0]，让常量通过 imm 表示。
+                 * 这样 pass_const_fold 就不会误把 args[0] 的 CONST 和 imm 双重计算。 */
                 list_clear(i->args);
                 ValueName *p = pass_alloc(sizeof *p); *p = lhs;
                 list_push(i->args, p);

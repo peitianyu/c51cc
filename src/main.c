@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
 
 /* ---------------------------------------------------------------
  * 用法:
- *   c51cc [options] <input.c>
+ *   c51cc [options] <input0.c> <input1.c> ...
  *
  * options:
  *   -ast        仅输出 AST（解析后，不做 SSA/代码生成）
@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
 
 static void usage(const char *prog) {
     fprintf(stderr,
-        "Usage: %s [options] <input.c>\n"
+        "Usage: %s [options] <input0.c> <input1.c> ...\n"
         "Options:\n"
         "  -ast         Print AST\n"
         "  -ssa         Print SSA IR\n"

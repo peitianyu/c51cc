@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 上下文管理 */
+/* ????????*/
 C51GenContext* c51_ctx_new(void) {
     C51GenContext* ctx = calloc(1, sizeof(C51GenContext));
     if (!ctx) return NULL;
@@ -20,10 +20,10 @@ C51GenContext* c51_ctx_new(void) {
     ctx->value_to_const = make_dict(NULL);
     ctx->value_to_spill = make_dict(NULL);
     ctx->next_spill_id = 0;
-    /* spill 区统一使用 IDATA（内部 RAM），用直接寻址 MOV 代替 MOVX，
-     * 节省大量指令：每次 16 位 spill 从 6 条 MOVX 指令减为 2 条 MOV 指令。
-     * 注意：IDATA 只有 128 字节（0x00-0x7F），如果溢出太多变量，
-     * 可能需要回退到 XDATA（由 spill_use_xdata_for_large 控制）。*/
+    /* spill section: IDATA for small RAM, use MOV not MOVX.
+     * spill 6 regs, MOVX costs 2 MOV cycles.
+     * DATA range 128 bytes (0x00-0x7F).
+     * Use XDATA for large: spill_use_xdata_for_large */
     ctx->spill_section = SEC_IDATA;
     ctx->spill_use_xdata_for_large = 0;
     ctx->v16_regs = make_dict(NULL);
@@ -38,7 +38,7 @@ C51GenContext* c51_ctx_new(void) {
 void c51_ctx_free(C51GenContext* ctx) {
     if (!ctx) return;
     
-    // 注意: ctx->obj 由调用者管理
+    // ???: ctx->obj ??????????
     
     if (ctx->value_to_reg) {
         dict_free(ctx->value_to_reg, free);
@@ -76,7 +76,7 @@ void c51_ctx_free(C51GenContext* ctx) {
     free(ctx);
 }
 
-/* 处理全局变量 */
+/* ????????? */
 static void process_global_var(C51GenContext *ctx, GlobalVar *g)
 {
     if (!g || !g->name || !ctx) return;
@@ -87,7 +87,7 @@ static void process_global_var(C51GenContext *ctx, GlobalVar *g)
     handle_normal_global_var(ctx, g);
 }
 
-/* 处理函数 */
+/* ?????? */
 static void process_function(C51GenContext *ctx, Func *f)
 {
     isel_function(ctx, f);
@@ -107,7 +107,7 @@ static void process_top_level_asm(C51GenContext *ctx, SSAUnit *unit)
     }
 }
 
-/* 代码生成主入口 */
+/* ???????????*/
 ObjFile *c51_gen(SSAUnit *unit) {
     if(!unit) return NULL;
 
@@ -131,7 +131,7 @@ ObjFile *c51_gen(SSAUnit *unit) {
     c51_encode(ctx, ctx->obj);
 
     ObjFile* obj = ctx->obj;
-    ctx->obj = NULL;  // 防止被释放
+    ctx->obj = NULL;  // ????????
     c51_ctx_free(ctx);
     
     return obj;
@@ -148,7 +148,7 @@ static char *dup_dirname(const char *path)
     if (!path) return NULL;
     slash  = strrchr(path, '/');
     bslash = strrchr(path, '\\');
-    /* 选最靠右的分隔符（兼容 Windows 和 Unix 路径） */
+    /* ?????????????????Windows ??Unix ?????*/
     sep = (bslash && (!slash || bslash > slash)) ? bslash : slash;
     if (!sep) return strdup(".");
 
@@ -430,19 +430,19 @@ static ObjFile *compile_startup_file(const char *startup_path)
  * These functions replicate the Keil ?C? runtime routines so that the
  * generated hex is self-contained and does not require Keil libraries.
  *
- * ?C?SCDIV  – signed 8-bit divide/modulo
+ * ?C?SCDIV  ??signed 8-bit divide/modulo
  *   In:  A = dividend, B = divisor
  *   Out: A = quotient,  B = remainder  (C-style truncation-toward-zero)
  *
- * ?C?SIDIV  – signed 16-bit divide/modulo
+ * ?C?SIDIV  ??signed 16-bit divide/modulo
  *   In:  R6:R7 = dividend, R4:R5 = divisor
  *   Out: R6:R7 = quotient, R4:R5 = remainder
  *
- * ?C?UIDIV  – unsigned 16-bit divide/modulo
+ * ?C?UIDIV  ??unsigned 16-bit divide/modulo
  *   In:  R6:R7 = dividend, R4:R5 = divisor
  *   Out: R6:R7 = quotient, R4:R5 = remainder
  *
- * ?C?IMUL   – 16-bit multiply (signed and unsigned share the same low 16 bits)
+ * ?C?IMUL   ??16-bit multiply (signed and unsigned share the same low 16 bits)
  *   In:  R6:R7 = multiplicand, R4:R5 = multiplier
  *   Out: R6:R7 = product (low 16 bits)
  * ----------------------------------------------------------------------- */
@@ -451,13 +451,13 @@ static ObjFile *compile_startup_file(const char *startup_path)
  * Uses only standard 8051 mnemonics that c51cc's encoder already handles. */
 
 static const char *k_scdiv_v2 =
-    /* ?C?SCDIV – Signed 8-bit division (C99 truncate-toward-zero)
+    /* ?C?SCDIV ??Signed 8-bit division (C99 truncate-toward-zero)
      * Entry:  A = dividend,  B = divisor
      * Exit:   A = quotient,  B = remainder
      * Uses: R0 (sign_quot), R1 (sign_num), R2 (temp)
      */
     "?C?SCDIV:\n"
-    /* abs(dividend) → A; sign → R1 */
+    /* abs(dividend) ??A; sign ??R1 */
     "MOV R1, #0\n"
     "JNB ACC.7, Lsd_a\n"
     "CPL A\n"
@@ -465,7 +465,7 @@ static const char *k_scdiv_v2 =
     "MOV R1, #1\n"
     "Lsd_a:\n"
     "MOV R2, A\n"            /* R2 = |dividend| */
-    /* abs(divisor) via A; sign XOR → R0 */
+    /* abs(divisor) via A; sign XOR ??R0 */
     "MOV R0, R1\n"           /* R0 = sign_num */
     "MOV A, B\n"
     "JNB ACC.7, Lsd_b\n"
@@ -505,7 +505,7 @@ static const char *k_scdiv_v2 =
     "MOV A, R2\n"
     "RET\n";
 
-/* ?C?UIDIV – Unsigned 16-bit division
+/* ?C?UIDIV ??Unsigned 16-bit division
  * Entry:  R6:R7 = dividend (R6=hi, R7=lo), R4:R5 = divisor (R4=hi, R5=lo)
  * Exit:   R6:R7 = quotient,  R4:R5 = remainder
  * Uses: R0, R1, R2, R3 as scratch (loop count = 16 iterations of shift-subtract)
@@ -568,19 +568,19 @@ static const char *k_uidiv =
     "MOV R7, A\n"
     "Luid_lt:\n"
     "DJNZ R0, Luid_loop\n"
-    /* R6:R7 = quotient; move remainder R2:R3 → R4:R5 */
+    /* R6:R7 = quotient; move remainder R2:R3 ??R4:R5 */
     "MOV R4, R2\n"
     "MOV R5, R3\n"
     "RET\n";
 
-/* ?C?SIDIV – Signed 16-bit division
+/* ?C?SIDIV ??Signed 16-bit division
  * Entry:  R6:R7 = dividend, R4:R5 = divisor
  * Exit:   R6:R7 = quotient, R4:R5 = remainder  (C99 trunc)
  * Uses: R0 (sign_quot), R1 (sign_num), A
  */
 static const char *k_sidiv =
     "?C?SIDIV:\n"
-    /* abs(dividend R6:R7); sign → R1 */
+    /* abs(dividend R6:R7); sign ??R1 */
     "MOV R1, #0\n"
     "MOV A, R6\n"
     "JNB ACC.7, Lsid_a\n"
@@ -595,7 +595,7 @@ static const char *k_sidiv =
     "MOV R6, A\n"
     "MOV R1, #1\n"
     "Lsid_a:\n"
-    /* abs(divisor R4:R5); sign XOR → R0 */
+    /* abs(divisor R4:R5); sign XOR ??R0 */
     "MOV R0, R1\n"
     "MOV A, R4\n"
     "JNB ACC.7, Lsid_b\n"
@@ -644,7 +644,7 @@ static const char *k_sidiv =
     "Lsid_rp:\n"
     "RET\n";
 
-/* ?C?IMUL – 16-bit multiply (low 16 bits; same for signed & unsigned)
+/* ?C?IMUL ??16-bit multiply (low 16 bits; same for signed & unsigned)
  * Entry:  R6:R7 = a (a_hi=R6, a_lo=R7), R4:R5 = b (b_hi=R4, b_lo=R5)
  * Exit:   R6:R7 = product low 16 bits
  * Uses: A, B, R0, R1
@@ -675,7 +675,7 @@ static const char *k_imul =
     "MOV R7, R0\n"           /* R7 = lo byte */
     "RET\n";
 
-/* ?C?ULDIV – Unsigned 32-bit division / modulo
+/* ?C?ULDIV ??Unsigned 32-bit division / modulo
  * Entry:  R4:R5:R6:R7 = dividend (R4=MSB, R7=LSB)
  *         R0:R1:R2:R3 = divisor  (R0=MSB, R3=LSB)
  * Exit:   R4:R5:R6:R7 = quotient
@@ -694,7 +694,7 @@ static const char *k_imul =
  * Because 8051 has only 8 registers (R0-R7) and we need 4 for divisor +
  * 4 for quot/dividend, remainder lives in direct-access internal RAM.
  */
-/* ?C?ULDIV – Unsigned 32-bit division / modulo
+/* ?C?ULDIV ??Unsigned 32-bit division / modulo
  * Entry:  R4:R5:R6:R7 = dividend (R4=MSB, R7=LSB)
  *         R0:R1:R2:R3 = divisor  (R0=MSB, R3=LSB)
  * Exit:   R4:R5:R6:R7 = quotient
@@ -752,7 +752,7 @@ static const char *k_uldiv =
     "MOV A, 20H\n"
     "SUBB A, R0\n"
     "MOV 20H, A\n"
-    /* Set quotient bit (R7 bit 0) – the last RLC already shifted in a 0 there */
+    /* Set quotient bit (R7 bit 0) ??the last RLC already shifted in a 0 there */
     "MOV A, R7\n"
     "ORL A, #1\n"
     "MOV R7, A\n"
@@ -765,7 +765,7 @@ static const char *k_uldiv =
     "MOV A, 23H\n"  "MOV R3, A\n"
     "RET\n";
 
-/* ?C?SLDIV – Signed 32-bit division / modulo (C99: truncate toward zero)
+/* ?C?SLDIV ??Signed 32-bit division / modulo (C99: truncate toward zero)
  * Entry/Exit convention same as ?C?ULDIV.
  * Uses 25H = sign_of_quotient, 26H = sign_of_dividend (= sign_of_remainder).
  */
@@ -891,7 +891,7 @@ ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj)
     /* Always inject needed runtime functions first */
     inject_runtime_libs(main_obj, &objs);
 
-    /* ?C?SIDIV calls ?C?UIDIV internally – if SIDIV was added, ensure UIDIV is present too */
+    /* ?C?SIDIV calls ?C?UIDIV internally ??if SIDIV was added, ensure UIDIV is present too */
     {
         int has_sidiv = 0, has_uidiv = 0;
         for (Iter it = list_iter(&objs); !iter_end(it);) {
@@ -911,7 +911,7 @@ ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj)
         }
     }
 
-    /* ?C?SLDIV calls ?C?ULDIV internally – if SLDIV was added, ensure ULDIV is present too */
+    /* ?C?SLDIV calls ?C?ULDIV internally ??if SLDIV was added, ensure ULDIV is present too */
     {
         int has_sldiv = 0, has_uldiv = 0;
         for (Iter it = list_iter(&objs); !iter_end(it);) {
@@ -956,7 +956,7 @@ ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj)
     }
 
     if (objs.len <= 1) {
-        /* Only main_obj – nothing to link */
+        /* Only main_obj ??nothing to link */
         while (!list_empty(&objs)) list_shift(&objs);
         return main_obj;
     }
@@ -1004,7 +1004,7 @@ static ObjFile *compile_one(const char *path) {
     // fprintf(stdout, "=== SSA BEFORE OPT ===\n");
     // ssa_print(stdout, b->unit);
 
-    ssa_optimize(b->unit, OPT_O1);
+    // //ssa_optimize(b->unit, OPT_O1);
     fprintf(stdout, "=== SSA AFTER OPT ===\n");
     ssa_print(stdout, b->unit);
     ObjFile *o = c51_gen(b->unit);
@@ -1054,3 +1054,5 @@ TEST(test, c51_link) {
 }
 
 #endif
+
+

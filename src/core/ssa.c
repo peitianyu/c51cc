@@ -1481,8 +1481,23 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
 }
 
 static void gen_stmt(SSABuild *b, Ast *ast) {
-    if (!ast || !b->cur_block) return;
-    
+    if (!ast) return;
+    /* Allow label/compound/goto/break/continue even when cur_block is NULL
+     * (e.g. inside a switch body after the last case check's terminator).
+     * Other statement kinds genuinely require an active block. */
+    if (!b->cur_block) {
+        switch (ast->type) {
+        case AST_LABEL:
+        case AST_COMPOUND_STMT:
+        case AST_GOTO:
+        case AST_BREAK:
+        case AST_CONTINUE:
+            break; /* fall through to the main switch below */
+        default:
+            return;
+        }
+    }
+
     switch (ast->type) {
     case AST_LABEL: {
         Block *label_b = ssa_get_or_create_label_block(b, ast->label);
@@ -1520,8 +1535,8 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
                 }
             } else {
                 if (ast->declinit) {
-                    /* 如果解析错误把数组当作指针（例如 parser 将局部数组误识为指针），
-                       则把数组初始值放到一个合成的全局常量中，然后把局部指针指向该全局地址。*/
+                    /* Fallback: if parser misidentified a local array as a pointer,
+                       create a synthetic global constant and point the local pointer to it. */
                     if ((var->ctype->type == CTYPE_PTR) &&
                         (ast->declinit->type == AST_ARRAY_INIT || ast->declinit->type == AST_STRING)) {
                         Ctype *elem = var->ctype->ptr;
