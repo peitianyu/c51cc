@@ -127,7 +127,9 @@ ObjFile *c51_gen(SSAUnit *unit) {
         if (f) process_function(ctx, f);
     }
 
-    c51_optimize(ctx, ctx->obj);
+    if (getenv("C51CC_REGDEBUG"))
+        fprintf(stderr, "[c51_gen] C51CC_NO_OPT=%s\n", getenv("C51CC_NO_OPT") ? getenv("C51CC_NO_OPT") : "NULL");
+    if (!getenv("C51CC_NO_OPT")) c51_optimize(ctx, ctx->obj);
     c51_encode(ctx, ctx->obj);
 
     ObjFile* obj = ctx->obj;
@@ -530,6 +532,7 @@ static const char *k_uidiv =
     "MOV R2, #0\n"
     "MOV R3, #0\n"
     "MOV R0, #16\n"
+    "CLR C\n"                 /* ensure carry=0 before first RLC */
     "Luid_loop:\n"
     /* shift rem:quot left by 1; carry-in for rem is MSB of quot_hi (R6.7) */
     "MOV A, R7\n"
@@ -563,10 +566,12 @@ static const char *k_uidiv =
     "MOV A, R2\n"
     "SUBB A, R4\n"
     "MOV R2, A\n"
-    "ORL A, R7\n"
-    "ORL A, #1\n"             /* set LSB of quotient */
+    /* set LSB of quotient (R7) */
+    "MOV A, R7\n"
+    "ORL A, #1\n"
     "MOV R7, A\n"
     "Luid_lt:\n"
+    "CLR C\n"                 /* clear carry before next RLC shift (SUBB may leave C=1) */
     "DJNZ R0, Luid_loop\n"
     /* R6:R7 = quotient; move remainder R2:R3 ??R4:R5 */
     "MOV R4, R2\n"
@@ -611,8 +616,14 @@ static const char *k_sidiv =
     "XRL A, #1\n"
     "MOV R0, A\n"
     "Lsid_b:\n"
+    /* save R0 (sign_quot flag) across UIDIV call, since UIDIV clobbers R0 */
+    "MOV A, R0\n"
+    "PUSH ACC\n"
     /* call unsigned division */
     "LCALL ?C?UIDIV\n"
+    /* restore sign_quot flag */
+    "POP ACC\n"
+    "MOV R0, A\n"
     /* R6:R7 = |quotient|, R4:R5 = |remainder| */
     /* negate quotient if R0 != 0 */
     "MOV A, R0\n"

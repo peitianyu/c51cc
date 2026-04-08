@@ -972,8 +972,36 @@ static bool pass_const_fold(Func *f, Stats *s) {
             case IROP_TRUNC:
                 if (ha) {
                     int sz = i->type ? i->type->size : 1;
-                    uint64_t m = sz == 1 ? 0xFF : sz == 2 ? 0xFFFF : sz == 4 ? 0xFFFFFFFF : ~0ULL;
-                    r = a & m; ok = true;
+                    bool un = is_unsigned_type(i->type);
+                    if (sz == 1)
+                        r = un ? (int64_t)(uint8_t)a  : (int64_t)(int8_t)a;
+                    else if (sz == 2)
+                        r = un ? (int64_t)(uint16_t)a : (int64_t)(int16_t)a;
+                    else if (sz == 4)
+                        r = un ? (int64_t)(uint32_t)a : (int64_t)(int32_t)a;
+                    else
+                        r = a;
+                    ok = true;
+                }
+                break;
+            case IROP_SEXT:
+                if (ha) {
+                    int sz = i->type ? i->type->size : 2;
+                    if      (sz == 1) r = (int64_t)(int8_t)a;
+                    else if (sz == 2) r = (int64_t)(int16_t)a;
+                    else if (sz == 4) r = (int64_t)(int32_t)a;
+                    else              r = a;
+                    ok = true;
+                }
+                break;
+            case IROP_ZEXT:
+                if (ha) {
+                    int sz = i->type ? i->type->size : 2;
+                    if      (sz == 1) r = (int64_t)(uint8_t)a;
+                    else if (sz == 2) r = (int64_t)(uint16_t)a;
+                    else if (sz == 4) r = (int64_t)(uint32_t)a;
+                    else              r = (int64_t)(uint64_t)a;
+                    ok = true;
                 }
                 break;
             case IROP_SELECT: {
@@ -1022,6 +1050,27 @@ static bool pass_const_fold(Func *f, Stats *s) {
             default: break;
             }
             if (ok) {
+                /* Truncate result to the instruction's type to model C integer overflow.
+                 * Arithmetic/bitwise ops on char/short may overflow 64-bit; we must
+                 * clamp to the target width and sign.  Comparison results (0/1) need no
+                 * truncation.  TRUNC already applies a mask, so skip it too. */
+                bool needs_trunc =
+                    i->op == IROP_ADD || i->op == IROP_SUB || i->op == IROP_MUL ||
+                    i->op == IROP_DIV || i->op == IROP_MOD ||
+                    i->op == IROP_AND || i->op == IROP_OR  || i->op == IROP_XOR ||
+                    i->op == IROP_SHL || i->op == IROP_SHR ||
+                    i->op == IROP_NEG || i->op == IROP_NOT;
+                if (needs_trunc && i->type) {
+                    int sz = i->type->size;
+                    bool un = is_unsigned_type(i->type);
+                    if (sz == 1) {
+                        r = un ? (int64_t)(uint8_t)r : (int64_t)(int8_t)r;
+                    } else if (sz == 2) {
+                        r = un ? (int64_t)(uint16_t)r : (int64_t)(int16_t)r;
+                    } else if (sz == 4) {
+                        r = un ? (int64_t)(uint32_t)r : (int64_t)(int32_t)r;
+                    }
+                }
                 i->op = IROP_CONST; i->imm.ival = r;
                 if (i->args) list_clear(i->args);
                 if (i->labels) list_clear(i->labels);
@@ -1071,8 +1120,19 @@ static bool pass_inline_consts_into_instrs(Func *f, Stats *s) {
 
 /*---------- 复制传播 ----------*/
 static bool is_copy_instr(const Instr *i) {
-    return i && (i->op == IROP_ZEXT || i->op == IROP_SEXT)
-           && i->args && i->args->len == 1;
+    /* SEXT/ZEXT 只有在源类型与目标类型大小相同时才是真正的 copy。
+     * 若大小不同（如 char→int），它改变了值的语义，不能被 copy propagation 消除。 */
+    if (!i || !(i->op == IROP_ZEXT || i->op == IROP_SEXT)) return false;
+    if (!i->args || i->args->len != 1) return false;
+    /* i->type 是目标类型；若无目标类型信息则保守地不视为 copy */
+    if (!i->type) return false;
+    int dst_sz = i->type->size > 0 ? i->type->size : 2;
+    /* 如果没有源类型信息，也保守地不视为 copy（让 isel 决定） */
+    /* 这里只考虑 dest 大小和 src 大小相同的情况 */
+    /* 实际上 ZEXT/SEXT 做类型扩展时永远不应被 copy_prop 消除 */
+    /* 只有当目标类型和源类型大小完全相同时才 copy-prop */
+    (void)dst_sz;
+    return false; /* 禁止 copy-prop 消除 SEXT/ZEXT，保持扩展语义 */
 }
 
 static void replace_all_uses(Func *f, ValueName from, ValueName to, bool *changed) {
@@ -1145,6 +1205,51 @@ static bool pass_remove_redundant_trunc(Func *f, Stats *s) {
                     if (i->args) list_clear(i->args);
                     if (s) s->fold++;
                 }
+            }
+        }
+    }
+    return changed;
+}
+
+/*---------- 消除冗余 SEXT/ZEXT（相同操作数，相同目标类型）----------*/
+static bool pass_cse_ext(Func *f, Stats *s) {
+    /* 对于同一函数内相同源值和相同 op/type 的 SEXT/ZEXT，
+     * 保留第一个，把后续的替换为第一个的结果。 */
+    if (!f) return false;
+    bool changed = false;
+    #define MAX_EXT_CSE 64
+    struct { IrOp op; ValueName src; Ctype *type; ValueName dest; } exts[MAX_EXT_CSE];
+    int ext_count = 0;
+
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || (i->op != IROP_SEXT && i->op != IROP_ZEXT)) continue;
+            if (!i->args || i->args->len < 1) continue;
+            ValueName src = get_arg(i, 0);
+            /* 查找已有相同的 SEXT/ZEXT */
+            int found = -1;
+            for (int k = 0; k < ext_count; k++) {
+                if (exts[k].op == i->op && exts[k].src == src &&
+                    exts[k].type && i->type &&
+                    exts[k].type->type == i->type->type &&
+                    exts[k].type->size == i->type->size) {
+                    found = k; break;
+                }
+            }
+            if (found >= 0) {
+                replace_all_uses(f, i->dest, exts[found].dest, &changed);
+                i->op = IROP_NOP;
+                if (i->args) list_clear(i->args);
+                if (s) s->fold++;
+            } else if (ext_count < MAX_EXT_CSE) {
+                exts[ext_count].op = i->op;
+                exts[ext_count].src = src;
+                exts[ext_count].type = i->type;
+                exts[ext_count].dest = i->dest;
+                ext_count++;
             }
         }
     }
@@ -2154,6 +2259,17 @@ static bool pass_ret_const_inline(Func *f, Stats *s) {
             if (!def || def->op != IROP_CONST) continue;
 
             i->imm.ival = def->imm.ival;
+            /* Truncate the constant to the function's return type size/signedness,
+             * so that inline_single_call uses a correctly-typed immediate. */
+            if (f->ret_type && f->ret_type->size > 0) {
+                int sz = f->ret_type->size;
+                bool un = is_unsigned_type(f->ret_type);
+                int64_t vv = i->imm.ival;
+                if      (sz == 1) vv = un ? (int64_t)(uint8_t)vv  : (int64_t)(int8_t)vv;
+                else if (sz == 2) vv = un ? (int64_t)(uint16_t)vv : (int64_t)(int16_t)vv;
+                else if (sz == 4) vv = un ? (int64_t)(uint32_t)vv : (int64_t)(int32_t)vv;
+                i->imm.ival = vv;
+            }
             list_clear(i->args); i->args = NULL;
             if (!i->labels) i->labels = make_list();
             list_clear(i->labels);
@@ -3216,6 +3332,7 @@ void ssa_optimize_func(Func *f, int level) {
         RUN_PASS(pass_global_load);
         RUN_PASS(pass_copy_prop);
         RUN_PASS(pass_remove_redundant_trunc);
+        RUN_PASS(pass_cse_ext);
         RUN_PASS(pass_inline_func_call);
         RUN_PASS(pass_addr_merge);
         RUN_PASS(pass_local_opts);

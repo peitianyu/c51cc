@@ -56,6 +56,8 @@ typedef struct {
 ObjFile *obj_new(void);
 void obj_free(ObjFile *obj);
 int obj_add_section(ObjFile *obj, const char *name, SectionKind kind, int size, int align);
+int obj_find_section(const ObjFile *obj, const char *name, SectionKind kind);
+int obj_find_or_add_section(ObjFile *obj, const char *name, SectionKind kind, int align);
 Section *obj_get_section(const ObjFile *obj, int index);
 
 /* collection helpers */

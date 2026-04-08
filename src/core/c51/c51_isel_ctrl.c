@@ -425,6 +425,17 @@ void emit_br(ISelContext* isel, Instr* ins) {
     block_label_name(target_t, sizeof(target_t), id_t);
     block_label_name(target_f, sizeof(target_f), id_f);
 
+    if (isel && isel->ctx && isel->ctx->current_func) {
+        Instr* cond_def = find_def_instr_in_func(isel->ctx->current_func, cond);
+        if (cond_def && cond_def->op == IROP_ZEXT) {
+            ValueName zsrc = get_src1_value(cond_def);
+            int zsrc_size = get_value_size(isel, zsrc);
+            if (zsrc_size == 1) {
+                cond = zsrc;
+            }
+        }
+    }
+
     /* Fuse BR with preceding NE/EQ compare: emit XRL+ORL+JNZ/JZ directly
      * instead of reading the bool value materialized by emit_ne/emit_eq.
      * Only applies when src1 is 16-bit, src2 is a small constant (hi==0),
@@ -479,6 +490,9 @@ void emit_br(ISelContext* isel, Instr* ins) {
     }
 
     int size = get_value_size(isel, cond);
+    if (getenv("C51CC_REGDEBUG"))
+        fprintf(stderr, "[emit_br] general path: cond=v%d size=%d id_t=%d id_f=%d block=%d\n",
+                (int)cond, size, id_t, id_f, isel->current_block_id);
     if (size == 2) {
         const char* hi = isel_get_hi_reg(isel, cond);
         const char* lo = isel_get_lo_reg(isel, cond);
@@ -493,6 +507,9 @@ void emit_br(ISelContext* isel, Instr* ins) {
     char* l_skip_true = isel_new_label(isel, "Lbr_skip_true");
     char lb_skip_true[64];
     snprintf(lb_skip_true, sizeof(lb_skip_true), "%s:", l_skip_true);
+    if (getenv("C51CC_REGDEBUG"))
+        fprintf(stderr, "[emit_br] emitting JZ/JNZ %s then LJMP %s, LJMP %s\n",
+                l_skip_true, target_t, target_f);
     if (has_invert && invert) {
         isel_emit(isel, "JNZ", l_skip_true, NULL, instr_to_ssa_str(ins));
     } else {

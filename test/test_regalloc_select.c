@@ -20,5 +20,5 @@ int reg_select(int a, int b, int c) {
 
 int main() 
 {
-    return 0;
+    return reg_select(42, 17, 9);
 }

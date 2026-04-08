@@ -31,5 +31,5 @@ int addrspace_pointers_main(void) {
 
 int main()
 {
-    return 0;
+    return addrspace_pointers_main();
 }

@@ -8,14 +8,6 @@ int max(int a, int b) {
     return d;
 }
 
-int main() {
-    int x = 5;
-    int y = 7;
-    int m = max(x, y);
-
-    return m;
-}
-
 /* 测试循环结构 */
 int sum_loop(int n) {
     int sum = 0;
@@ -135,4 +127,11 @@ int complex_control_flow(int x, int y) {
     }
     
     return result;
+}
+
+int main() {
+    return max(5, 7) + sum_loop(10) + nested_if(3, 4) + find_first_even((int[]){1, 3, 5, 6, 7}, 5) +
+           complex_expr(2, 3, 4) + array_sum((int[]){1, 2, 3, 4, 5}, 5) + bit_operations(0xF0F0, 0x0F0F) +
+           factorial(5) + multi_return(-1) + count_positives((int[]){-1, 0, 1, 2, -2}, 5) +
+           complex_control_flow(10, 15);
 }

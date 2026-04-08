@@ -13,6 +13,32 @@ static void store_spilled_dest_if_needed(ISelContext* isel, ValueName val, int r
     }
 }
 
+static void store_acc_to_spilled_dest_if_needed(ISelContext* isel, ValueName val, int offset, Instr* ins) {
+    const char* spill_sym;
+    char ref[256];
+    SectionKind sym_sec;
+
+    if (!isel || val <= 0 || !isel_value_is_spilled(isel, val)) return;
+    spill_sym = lookup_value_addr_symbol(isel, val);
+    if (!spill_sym) return;
+    if (offset == 0) {
+        snprintf(ref, sizeof(ref), "%s", spill_sym);
+    } else {
+        snprintf(ref, sizeof(ref), "(%s + %d)", spill_sym, offset);
+    }
+    sym_sec = get_symbol_section_kind(isel, spill_sym);
+
+    if (sym_sec == SEC_XDATA) {
+        char dptr_val[256];
+        snprintf(dptr_val, sizeof(dptr_val), "#%s", ref);
+        isel_emit(isel, "MOV", "DPTR", dptr_val, NULL);
+        isel_emit(isel, "MOVX", "@DPTR", "A", NULL);
+        return;
+    }
+
+    isel_emit(isel, "MOV", ref, "A", NULL);
+}
+
 static bool value_is_zero_extended_byte_in_func(Func* func, ValueName value, ValueName* seen, int seen_count) {
     Instr* def;
 
@@ -119,11 +145,19 @@ void emit_add(ISelContext* isel, Instr* ins, Instr* next) {
         int dst_begin = dst_reg;
         int dst_end = dst_reg + size - 1;
         bool overlaps = !(dst_end < src1_begin || dst_begin > src1_end);
-        /* For INC-like operations (src2 == +1 immediate), in-place update is safe
-         * because we read src1 lo before writing dst lo, and read src1 hi after.
-         * Avoid reallocating to a different register which would cause PHI copies. */
-        bool is_inc_inplace = (src2_is_imm && imm_val == 1 && dst_reg == src1_base_reg);
-        if (overlaps && !is_inc_inplace) {
+        int src2_base_reg = src2_is_imm ? -1 : isel_get_value_reg(isel, src2);
+        int src2_size_local = src2_is_imm ? 0 : get_value_size(isel, src2);
+        bool src2_overlaps_dst = false;
+        if (src2_base_reg >= 0 && src2_size_local > 0) {
+            int src2_begin = src2_base_reg;
+            int src2_end = src2_base_reg + src2_size_local - 1;
+            src2_overlaps_dst = !(dst_end < src2_begin || dst_begin > src2_end);
+        }
+        /* In-place add into src1 is safe as long as src2 does not share the same
+         * destination registers. This keeps loop-carried values in place and avoids
+         * allocating scratch pairs that may clobber unrelated live values. */
+        bool safe_inplace = (dst_reg == src1_base_reg) && !src2_overlaps_dst;
+        if (overlaps && !safe_inplace) {
             int alt_reg = alloc_temp_reg(isel, ins->dest, size);
             if (alt_reg >= 0) {
                 dst_reg = alt_reg;
@@ -894,15 +928,20 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
         // Use Keil runtime ?C?IMUL: arg0 in R6:R7, arg1 in R4:R5 -> result in R6:R7
         // Low 16 bits of product are the same for signed/unsigned.
 
-        // Reload operands first (before allocating dst, to avoid register pressure issues)
-        int a_reg = isel_get_value_reg(isel, a);
-        int b_reg = (b == a) ? a_reg : isel_get_value_reg(isel, b);
+        int64_t a_imm = 0;
+        int64_t b_imm = 0;
+        bool a_is_const = try_get_value_const(isel, a, &a_imm);
+        bool b_is_const = try_get_value_const(isel, b, &b_imm);
 
-        if (a_reg < 0) {
+        // Reload operands first (before allocating dst, to avoid register pressure issues)
+        int a_reg = a_is_const ? -1 : isel_get_value_reg(isel, a);
+        int b_reg = b_is_const ? -1 : ((b == a) ? a_reg : isel_get_value_reg(isel, b));
+
+        if (!a_is_const && a_reg < 0) {
             a_reg = isel_reload_spill(isel, a, 2, ins);
             if (a_reg < 0) a_reg = 0;
         }
-        if (b_reg < 0) {
+        if (!b_is_const && b_reg < 0) {
             b_reg = (b == a) ? a_reg : isel_reload_spill(isel, b, 2, ins);
             if (b_reg < 0) b_reg = a_reg;
         }
@@ -912,14 +951,33 @@ void emit_mul(ISelContext* isel, Instr* ins, Instr* next) {
         // alloc_dest_reg may return a single-byte reg index; ensure it's the hi byte of a pair
         if (dst_reg > 6) dst_reg = 6;  // clamp to valid 16-bit pair start
 
-        // Parallel move: a->R6:R7, b->R4:R5
-        RegMove moves[4] = {
-            {.dst = 6, .src = a_reg},
-            {.dst = 7, .src = a_reg + 1},
-            {.dst = 4, .src = b_reg},
-            {.dst = 5, .src = b_reg + 1},
-        };
-        emit_parallel_reg_moves(isel, moves, 4, ins);
+        if (a_is_const) {
+            char imm_hi[20], imm_lo[20];
+            snprintf(imm_hi, sizeof(imm_hi), "#%d", (int)((a_imm >> 8) & 0xFF));
+            snprintf(imm_lo, sizeof(imm_lo), "#%d", (int)(a_imm & 0xFF));
+            emit_mov(isel, "R6", imm_hi, ins);
+            emit_mov(isel, "R7", imm_lo, NULL);
+        } else {
+            RegMove amoves[2] = {
+                {.dst = 6, .src = a_reg},
+                {.dst = 7, .src = a_reg + 1},
+            };
+            emit_parallel_reg_moves(isel, amoves, 2, ins);
+        }
+
+        if (b_is_const) {
+            char imm_hi[20], imm_lo[20];
+            snprintf(imm_hi, sizeof(imm_hi), "#%d", (int)((b_imm >> 8) & 0xFF));
+            snprintf(imm_lo, sizeof(imm_lo), "#%d", (int)(b_imm & 0xFF));
+            emit_mov(isel, "R4", imm_hi, NULL);
+            emit_mov(isel, "R5", imm_lo, NULL);
+        } else {
+            RegMove bmoves[2] = {
+                {.dst = 4, .src = b_reg},
+                {.dst = 5, .src = b_reg + 1},
+            };
+            emit_parallel_reg_moves(isel, bmoves, 2, NULL);
+        }
 
         isel_emit(isel, "LCALL", "?C?IMUL", NULL, instr_to_ssa_str(ins));
 
@@ -1015,48 +1073,85 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
         store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
         return;
     } else if (size == 2) {
+        // Helper: load a 16-bit value (const or register) into a target reg pair (hi_reg, lo_reg).
+        // Uses MOV Rn,#imm for constants or parallel reg moves for registers.
+        // Note: emit_comment is just the ins annotation; pass NULL if not needed.
+        #define LOAD16_INTO_REGS(val_name, hi_dst, lo_dst, annotation)  \
+        do { \
+            int64_t _imm = 0; \
+            if (try_get_value_const(isel, (val_name), &_imm)) { \
+                char _buf_hi[20], _buf_lo[20]; \
+                snprintf(_buf_hi, sizeof(_buf_hi), "#%d", (int)((_imm >> 8) & 0xFF)); \
+                snprintf(_buf_lo, sizeof(_buf_lo), "#%d", (int)(_imm & 0xFF)); \
+                isel_emit(isel, "MOV", isel_reg_name(hi_dst), _buf_hi, (annotation)); \
+                isel_emit(isel, "MOV", isel_reg_name(lo_dst), _buf_lo, NULL); \
+            } else { \
+                int _reg = isel_get_value_reg(isel, (val_name)); \
+                if (_reg < 0) { \
+                    _reg = isel_reload_spill(isel, (val_name), 2, ins); \
+                    if (_reg < 0) _reg = 0; \
+                } \
+                RegMove _mv[2] = {{.dst = (hi_dst), .src = _reg}, {.dst = (lo_dst), .src = _reg + 1}}; \
+                emit_parallel_reg_moves(isel, _mv, 2, (annotation) ? ins : NULL); \
+            } \
+        } while(0)
+
         if (!is_unsigned) {
             // signed 16-bit div/mod: use Keil runtime ?C?SIDIV
             // num -> R6:R7, den -> R4:R5; quotient R6:R7, remainder R4:R5
-            int num_reg = isel_get_value_reg(isel, num);
-            int den_reg = (den == num) ? num_reg : isel_get_value_reg(isel, den);
 
-            // Reload spilled operands
+            int64_t den_imm = 0;
+            // den can be a constant as IROP_CONST (try_get_value_const) OR
+            // as an inline immediate on the div instruction (is_imm_operand).
+            bool den_is_const = try_get_value_const(isel, den, &den_imm)
+                             || is_imm_operand(ins, &den_imm);
+            int num_reg = isel_get_value_reg(isel, num);
             if (num_reg < 0) {
                 num_reg = isel_reload_spill(isel, num, 2, ins);
                 if (num_reg < 0) num_reg = 0;
             }
-            if (den_reg < 0) {
-                den_reg = (den == num) ? num_reg : isel_reload_spill(isel, den, 2, ins);
-                if (den_reg < 0) den_reg = num_reg;
-            }
 
-            // Parallel move: num->R6:R7, den->R4:R5
-            RegMove moves[4] = {
-                {.dst = 6, .src = num_reg},
-                {.dst = 7, .src = num_reg + 1},
-                {.dst = 4, .src = den_reg},
-                {.dst = 5, .src = den_reg + 1},
-            };
-            emit_parallel_reg_moves(isel, moves, 4, ins);
+            if (den_is_const) {
+                // Load num -> R6:R7, then den constant -> R4:R5
+                RegMove nmov[2] = {{.dst = 6, .src = num_reg}, {.dst = 7, .src = num_reg + 1}};
+                emit_parallel_reg_moves(isel, nmov, 2, ins);
+                // Use pre-captured den_imm directly (handles both IROP_CONST and inline imm)
+                char buf_hi[20], buf_lo[20];
+                snprintf(buf_hi, sizeof(buf_hi), "#%d", (int)((den_imm >> 8) & 0xFF));
+                snprintf(buf_lo, sizeof(buf_lo), "#%d", (int)(den_imm & 0xFF));
+                isel_emit(isel, "MOV", "R4", buf_hi, NULL);
+                isel_emit(isel, "MOV", "R5", buf_lo, NULL);
+            } else {
+                int den_reg = (den == num) ? num_reg : isel_get_value_reg(isel, den);
+                if (den_reg < 0) {
+                    den_reg = isel_reload_spill(isel, den, 2, ins);
+                    if (den_reg < 0) den_reg = num_reg;
+                }
+                // Parallel move: num->R6:R7, den->R4:R5
+                RegMove moves[4] = {
+                    {.dst = 6, .src = num_reg},
+                    {.dst = 7, .src = num_reg + 1},
+                    {.dst = 4, .src = den_reg},
+                    {.dst = 5, .src = den_reg + 1},
+                };
+                emit_parallel_reg_moves(isel, moves, 4, ins);
+            }
 
             isel_emit(isel, "LCALL", "?C?SIDIV", NULL, instr_to_ssa_str(ins));
 
             // quotient in R6:R7, remainder in R4:R5
-            if (!want_mod) {
-                // quotient -> dst
-                if (dst_reg != 6) {
-                    RegMove rmov[2] = {{.dst = dst_reg, .src = 6}, {.dst = dst_reg + 1, .src = 7}};
-                    emit_parallel_reg_moves(isel, rmov, 2, ins);
-                }
+            int result_base = want_mod ? 4 : 6;
+            if (dst_reg == SPILL_REG || dst_reg < 0) {
+                // Result is spilled: store directly from result regs to spill slot
+                isel_store_spill_from_reg(isel, ins->dest, result_base, size, ins);
             } else {
-                // remainder -> dst
-                if (dst_reg != 4) {
-                    RegMove rmov[2] = {{.dst = dst_reg, .src = 4}, {.dst = dst_reg + 1, .src = 5}};
+                if (dst_reg != result_base) {
+                    RegMove rmov[2] = {{.dst = dst_reg, .src = result_base}, {.dst = dst_reg + 1, .src = result_base + 1}};
                     emit_parallel_reg_moves(isel, rmov, 2, ins);
                 }
+                store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
             }
-            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
+            #undef LOAD16_INTO_REGS
             return;
         }
 
@@ -1064,41 +1159,52 @@ void emit_div_mod(ISelContext* isel, Instr* ins, bool want_mod) {
         // Convention: num -> R6:R7, den -> R4:R5
         //   -> LCALL ?C?UIDIV -> quotient in R6:R7, remainder in R4:R5
         {
+            int64_t den_imm = 0;
+            bool den_is_const = try_get_value_const(isel, den, &den_imm)
+                             || is_imm_operand(ins, &den_imm);
             int num_reg = isel_get_value_reg(isel, num);
-            int den_reg = (den == num) ? num_reg : isel_get_value_reg(isel, den);
-
             if (num_reg < 0) {
                 num_reg = isel_reload_spill(isel, num, 2, ins);
                 if (num_reg < 0) num_reg = 0;
             }
-            if (den_reg < 0) {
-                den_reg = (den == num) ? num_reg : isel_reload_spill(isel, den, 2, ins);
-                if (den_reg < 0) den_reg = num_reg;
-            }
 
-            RegMove moves[4] = {
-                {.dst = 6, .src = num_reg},
-                {.dst = 7, .src = num_reg + 1},
-                {.dst = 4, .src = den_reg},
-                {.dst = 5, .src = den_reg + 1},
-            };
-            emit_parallel_reg_moves(isel, moves, 4, ins);
+            if (den_is_const) {
+                RegMove nmov[2] = {{.dst = 6, .src = num_reg}, {.dst = 7, .src = num_reg + 1}};
+                emit_parallel_reg_moves(isel, nmov, 2, ins);
+                char buf_hi[20], buf_lo[20];
+                snprintf(buf_hi, sizeof(buf_hi), "#%d", (int)((den_imm >> 8) & 0xFF));
+                snprintf(buf_lo, sizeof(buf_lo), "#%d", (int)(den_imm & 0xFF));
+                isel_emit(isel, "MOV", "R4", buf_hi, NULL);
+                isel_emit(isel, "MOV", "R5", buf_lo, NULL);
+            } else {
+                int den_reg = (den == num) ? num_reg : isel_get_value_reg(isel, den);
+                if (den_reg < 0) {
+                    den_reg = isel_reload_spill(isel, den, 2, ins);
+                    if (den_reg < 0) den_reg = num_reg;
+                }
+                RegMove moves[4] = {
+                    {.dst = 6, .src = num_reg},
+                    {.dst = 7, .src = num_reg + 1},
+                    {.dst = 4, .src = den_reg},
+                    {.dst = 5, .src = den_reg + 1},
+                };
+                emit_parallel_reg_moves(isel, moves, 4, ins);
+            }
 
             isel_emit(isel, "LCALL", "?C?UIDIV", NULL, instr_to_ssa_str(ins));
 
             // quotient in R6:R7, remainder in R4:R5
-            if (!want_mod) {
-                if (dst_reg != 6) {
-                    RegMove rmov[2] = {{.dst = dst_reg, .src = 6}, {.dst = dst_reg + 1, .src = 7}};
-                    emit_parallel_reg_moves(isel, rmov, 2, ins);
-                }
+            int result_base = want_mod ? 4 : 6;
+            if (dst_reg == SPILL_REG || dst_reg < 0) {
+                // Result is spilled: store directly from result regs to spill slot
+                isel_store_spill_from_reg(isel, ins->dest, result_base, size, ins);
             } else {
-                if (dst_reg != 4) {
-                    RegMove rmov[2] = {{.dst = dst_reg, .src = 4}, {.dst = dst_reg + 1, .src = 5}};
+                if (dst_reg != result_base) {
+                    RegMove rmov[2] = {{.dst = dst_reg, .src = result_base}, {.dst = dst_reg + 1, .src = result_base + 1}};
                     emit_parallel_reg_moves(isel, rmov, 2, ins);
                 }
+                store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
             }
-            store_spilled_dest_if_needed(isel, ins->dest, dst_reg, size, ins);
             return;
         }
     }
@@ -1305,6 +1411,99 @@ void emit_simple_cast(ISelContext* isel, Instr* ins, bool sign_extend) {
     int src_size = get_value_size(isel, src);
     int dst_size = ins->type ? c51_abi_type_size(ins->type) : src_size;
     int dst_reg = alloc_reg_for_value(isel, ins->dest, dst_size);
+
+    /* When dst is spilled, isel_reg_name(SPILL_REG) falls back to "R7" which
+     * corrupts live registers. For spilled dst, write directly to the spill
+     * symbol address using only the A register as scratch (avoids temp-reg
+     * conflicts with live phi variables). */
+    if (dst_reg < 0 || dst_reg + dst_size - 1 > 7) {
+        const char* spill_sym = lookup_value_addr_symbol(isel, ins->dest);
+        if (spill_sym && dst_size == 2) {
+            const char* src_lo = isel_get_lo_reg(isel, src);
+            char spill_lo[256], spill_hi[256];
+            snprintf(spill_lo, sizeof(spill_lo), "%s", spill_sym);
+            snprintf(spill_hi, sizeof(spill_hi), "(%s + 1)", spill_sym);
+
+            if (src_size == 2 && sign_extend) {
+                /* SEXT 2→2: copy both bytes as-is (same size, sign already propagated) */
+                const char* src_hi = isel_get_hi_reg(isel, src);
+                /* Write lo byte first via A */
+                isel_emit(isel, "MOV", "A", src_lo, instr_to_ssa_str(ins));
+                isel_emit(isel, "MOV", spill_lo, "A", NULL);
+                /* Write hi byte via A */
+                isel_emit(isel, "MOV", "A", src_hi, NULL);
+                isel_emit(isel, "MOV", spill_hi, "A", NULL);
+            } else if (src_size == 2) {
+                /* ZEXT 2→2 (or plain copy): lo=src_lo, hi=0.
+                 * Even though src already has hi=0 (bool/compare results),
+                 * emit #0 explicitly to avoid peephole forwarding the
+                 * hi-byte symbol reference (which confuses BR checks). */
+                isel_emit(isel, "MOV", "A", src_lo, instr_to_ssa_str(ins));
+                isel_emit(isel, "MOV", spill_lo, "A", NULL);
+                isel_emit(isel, "MOV", spill_hi, "#0", NULL);
+            } else if (sign_extend) {
+                /* SEXT: write lo, then derive hi from sign bit */
+                char* l_neg = isel_new_label(isel, "Lsext_neg");
+                char* l_end = isel_new_label(isel, "Lsext_end");
+                char lb_neg[64], lb_end[64];
+                snprintf(lb_neg, sizeof(lb_neg), "%s:", l_neg);
+                snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+                isel_emit(isel, "MOV", "A", src_lo, instr_to_ssa_str(ins));
+                isel_emit(isel, "MOV", spill_lo, "A", NULL);
+                isel_emit(isel, "ANL", "A", "#128", NULL);
+                isel_emit(isel, "JNZ", l_neg, NULL, NULL);
+                isel_emit(isel, "MOV", spill_hi, "#0", NULL);
+                isel_emit(isel, "SJMP", l_end, NULL, NULL);
+                isel_emit(isel, lb_neg, NULL, NULL, NULL);
+                isel_emit(isel, "MOV", spill_hi, "#255", NULL);
+                isel_emit(isel, lb_end, NULL, NULL, NULL);
+                free(l_neg); free(l_end);
+            } else {
+                /* ZEXT: write lo byte and set hi = 0 */
+                isel_emit(isel, "MOV", "A", src_lo, instr_to_ssa_str(ins));
+                isel_emit(isel, "MOV", spill_lo, "A", NULL);
+                isel_emit(isel, "MOV", spill_hi, "#0", NULL);
+            }
+            return;
+        }
+        /* Fallback: use a temp reg (not ideal but prevents isel_reg_name crash) */
+        int phys_dst_reg = alloc_temp_reg(isel, ins->dest, dst_size);
+        bool temp_result = phys_dst_reg >= 0;
+        if (phys_dst_reg < 0) phys_dst_reg = 0;
+
+        const char* dst_lo = isel_reg_name(phys_dst_reg + (dst_size == 2 ? 1 : 0));
+        const char* dst_hi = isel_reg_name(phys_dst_reg);
+        const char* src_lo = isel_get_lo_reg(isel, src);
+
+        emit_mov(isel, dst_lo, src_lo, ins);
+        if (dst_size == 2) {
+            if (src_size == 2) {
+                emit_mov(isel, dst_hi, isel_get_hi_reg(isel, src), NULL);
+            } else if (sign_extend) {
+                char* l_neg = isel_new_label(isel, "Lsext_neg");
+                char* l_end = isel_new_label(isel, "Lsext_end");
+                char lb_neg[64], lb_end[64];
+                snprintf(lb_neg, sizeof(lb_neg), "%s:", l_neg);
+                snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
+                emit_mov(isel, "A", dst_lo, NULL);
+                isel_emit(isel, "ANL", "A", "#128", NULL);
+                isel_emit(isel, "JNZ", l_neg, NULL, NULL);
+                emit_mov(isel, dst_hi, "#0", NULL);
+                isel_emit(isel, "SJMP", l_end, NULL, NULL);
+                isel_emit(isel, lb_neg, NULL, NULL, NULL);
+                emit_mov(isel, dst_hi, "#255", NULL);
+                isel_emit(isel, lb_end, NULL, NULL, NULL);
+                free(l_neg); free(l_end);
+            } else {
+                emit_mov(isel, dst_hi, "#0", NULL);
+            }
+        }
+        store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, dst_size, ins);
+        if (temp_result) free_temp_reg(isel, phys_dst_reg, dst_size);
+        return;
+    }
+
+    /* Normal case: dst is in a physical register pair */
     const char* dst_lo = isel_reg_name(dst_reg + (dst_size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(dst_reg);
     const char* src_lo = isel_get_lo_reg(isel, src);
@@ -1312,14 +1511,20 @@ void emit_simple_cast(ISelContext* isel, Instr* ins, bool sign_extend) {
     emit_mov(isel, dst_lo, src_lo, ins);
     if (dst_size == 2) {
         if (src_size == 2) {
-            emit_mov(isel, dst_hi, isel_get_hi_reg(isel, src), NULL);
+            const char* src_hi = isel_get_hi_reg(isel, src);
+            /* Guard: if dst_lo overwrote src_hi, use dst_lo instead */
+            const char* safe_src_hi = (src_hi && dst_lo && strcmp(dst_lo, src_hi) == 0)
+                                      ? dst_lo : src_hi;
+            emit_mov(isel, dst_hi, safe_src_hi, NULL);
         } else if (sign_extend) {
             char* l_neg = isel_new_label(isel, "Lsext_neg");
             char* l_end = isel_new_label(isel, "Lsext_end");
             char lb_neg[64], lb_end[64];
             snprintf(lb_neg, sizeof(lb_neg), "%s:", l_neg);
             snprintf(lb_end, sizeof(lb_end), "%s:", l_end);
-            emit_mov(isel, "A", src_lo, NULL);
+            /* Use dst_lo (already a copy of src_lo) so sign check is safe
+             * even when dst_hi == src_lo (original src value not clobbered). */
+            emit_mov(isel, "A", dst_lo, NULL);
             isel_emit(isel, "ANL", "A", "#128", NULL);
             isel_emit(isel, "JNZ", l_neg, NULL, NULL);
             emit_mov(isel, dst_hi, "#0", NULL);
@@ -1348,13 +1553,13 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
 
     const char* src1_lo = isel_get_lo_reg(isel, src1);
     int dst_reg = alloc_dest_reg(isel, ins, next, size, true);
+    bool spill_dest = isel_value_is_spilled(isel, ins->dest);
     int phys_dst_reg = dst_reg;
     bool temp_result = false;
-    if (phys_dst_reg < 0 || phys_dst_reg + size - 1 > 7) {
+    if (!spill_dest && (phys_dst_reg < 0 || phys_dst_reg + size - 1 > 7)) {
         phys_dst_reg = alloc_temp_reg(isel, ins->dest, size);
         temp_result = phys_dst_reg >= 0;
     }
-    if (phys_dst_reg < 0) phys_dst_reg = 0;
 
     /* If next instruction is RET, write result directly into return registers R7/R6
      * to avoid an extra MOV copy after the subtraction. */
@@ -1374,7 +1579,11 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         }
     }
 
-    const char* dst_lo = isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
+    bool direct_spill_write = spill_dest && !direct_to_ret && !temp_result;
+    const char* direct_spill_sym = direct_spill_write ? lookup_value_addr_symbol(isel, ins->dest) : NULL;
+    if (!direct_spill_write && phys_dst_reg < 0) phys_dst_reg = 0;
+
+    const char* dst_lo = direct_spill_write ? NULL : isel_reg_name(phys_dst_reg + (size == 2 ? 1 : 0));
     const char* src1_hi_preserved = NULL;
     const char* src2_hi_preserved = NULL;
     int src1_hi_tmp = -1;
@@ -1410,7 +1619,7 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
     }
     /* 16-bit sub-1 special case: use DEC Rlo; JNZ skip; DEC Rhi; skip:
      * This matches the compact pattern keil generates and avoids CLR C + SUBB pair. */
-    if (size == 2 && src2_is_imm && imm_val == 1 && src1_size == 2 && !src2_spilled_mem) {
+    if (!direct_spill_write && size == 2 && src2_is_imm && imm_val == 1 && src1_size == 2 && !src2_spilled_mem) {
         const char* src1_hi = src1_hi_preserved ? src1_hi_preserved : isel_get_hi_reg(isel, src1);
         const char* dst_hi = isel_reg_name(phys_dst_reg);
 
@@ -1505,10 +1714,14 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
         free(ssa);
     }
 
-    emit_mov(isel, dst_lo, "A", ins);
+    if (direct_spill_write) {
+        store_acc_to_spilled_dest_if_needed(isel, ins->dest, 0, ins);
+    } else {
+        emit_mov(isel, dst_lo, "A", ins);
+    }
 
     if (size == 2) {
-        const char* dst_hi = isel_reg_name(phys_dst_reg);
+        const char* dst_hi = direct_spill_write ? NULL : isel_reg_name(phys_dst_reg);
 
         if (src1_size == 2) {
             const char* src1_hi = src1_hi_preserved ? src1_hi_preserved : isel_get_hi_reg(isel, src1);
@@ -1530,9 +1743,17 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
                         snprintf(ref, sizeof(ref), "(%s + 1)", src2_sym);
                         isel_emit(isel, "SUBB", "A", ref, NULL);
                     } else {
-                        emit_mov(isel, dst_hi, "A", NULL);
+                        if (dst_hi) {
+                            emit_mov(isel, dst_hi, "A", NULL);
+                        } else if (direct_spill_sym) {
+                            store_acc_to_spilled_dest_if_needed(isel, ins->dest, 1, NULL);
+                        }
                         emit_load_symbol_byte(isel, src2_sym, 1, "B", NULL);
-                        emit_mov(isel, "A", dst_hi, NULL);
+                        if (dst_hi) {
+                            emit_mov(isel, "A", dst_hi, NULL);
+                        } else if (direct_spill_sym) {
+                            emit_load_symbol_byte(isel, direct_spill_sym, 1, "A", NULL);
+                        }
                         isel_emit(isel, "SUBB", "A", "B", NULL);
                     }
                 } else {
@@ -1544,10 +1765,16 @@ void emit_sub(ISelContext* isel, Instr* ins, Instr* next) {
             }
         }
 
-        emit_mov(isel, dst_hi, "A", ins);
+        if (direct_spill_write) {
+            store_acc_to_spilled_dest_if_needed(isel, ins->dest, 1, ins);
+        } else {
+            emit_mov(isel, dst_hi, "A", ins);
+        }
     }
 
-    store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+    if (!direct_spill_write) {
+        store_spilled_dest_if_needed(isel, ins->dest, phys_dst_reg, size, ins);
+    }
 
     if (src1_hi_tmp >= 0) free_temp_reg(isel, src1_hi_tmp, 1);
     if (src2_hi_tmp >= 0) free_temp_reg(isel, src2_hi_tmp, 1);

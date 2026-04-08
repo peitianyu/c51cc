@@ -4,5 +4,5 @@ char mod_op(char a, char b) {
 
 int main()
 {
-    return 0;
+    return mod_op(42, 5) + mod_op(-42, 5) + mod_op(42, -5) + mod_op(-42, -5);
 }

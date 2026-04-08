@@ -28,5 +28,5 @@ int addrspace_calls_main(void) {
 }
 int main()
 {
-    return 0;
+    return addrspace_calls_main();
 }

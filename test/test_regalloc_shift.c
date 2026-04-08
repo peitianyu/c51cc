@@ -15,5 +15,5 @@ int reg_shift(int a, int b) {
 
 int main() 
 {
-    return 0;
+    return reg_shift(42, 17);
 }

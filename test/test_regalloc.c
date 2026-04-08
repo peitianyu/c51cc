@@ -4,8 +4,13 @@
 // =====================================================
 
 // 测试SFR定义
+#ifdef __C51__
+sfr P1 = 0x90;
+sfr P0 = 0x80;
+#else
 register char P1 = 0x90;
 register char P0 = 0x80;
+#endif
 
 // 测试全局变量
 unsigned char g_temp1 = 0;
@@ -62,11 +67,13 @@ int test_sfr_multiple_ops(int v) {
 int test_live_ranges(int a, int b, int c) {
     int x = a + b;        // x用于一个操作后就不再用
     int result = x * 2;   // 立即使用x
+    int y;
+    int z;
     
-    int y = b + c;        // y是独立的生命周期
+    y = b + c;        // y是独立的生命周期
     result += y;
     
-    int z = a - c;        // z再次独立
+    z = a - c;        // z再次独立
     result += z;
     
     return result;
@@ -119,10 +126,12 @@ int test_ternary_expr(int a, int b, int c) {
 int test_loop_regs(int n) {
     int sum = 0;
     int i;
+    int x;
+    int y;
     
     for (i = 0; i < n; i++) {
-        int x = i * 2;
-        int y = x + 1;
+        x = i * 2;
+        y = x + 1;
         sum += y;
     }
     
@@ -139,12 +148,14 @@ int test_nested_expr(int a, int b, int c, int d) {
 int test_sfr_with_locals(int v1, int v2) {
     int a = v1 + 10;
     int b = v2 + 20;
+    int c;
+    int d;
     
     P1 = (char)a;
-    int c = (int)P1 + b;
+    c = (int)P1 + b;
     
     P1 = (char)c;
-    int d = (int)P1 + a;
+    d = (int)P1 + a;
     
     return c + d;
 }

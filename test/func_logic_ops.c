@@ -4,5 +4,5 @@ char logic_ops(char a, char b) {
 
 int main()
 {
-    return 0;
+    return logic_ops(1, 2) + logic_ops(-1, -1) + logic_ops(127, 127) + logic_ops(-128, 127);
 }

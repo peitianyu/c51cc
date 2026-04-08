@@ -68,7 +68,5 @@ int test_sfr_ops()
 }
 
 int main() {
-    
-
-    return test_sfr_ops();
+    return test_basic_arith() + test_if() + add(1, 2) + test_sfr_ops();
 }

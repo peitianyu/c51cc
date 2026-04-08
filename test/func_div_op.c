@@ -4,5 +4,5 @@ char div_op(char a, char b) {
 
 int main()
 {
-    return 0;
+    return div_op(42, 2) + div_op(-42, 2) + div_op(42, -2) + div_op(-42, -2);
 }

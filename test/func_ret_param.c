@@ -4,5 +4,5 @@ char ret_param(char x) {
 
 int main()
 {
-    return 0;
+    return ret_param(42) + ret_param(-1) + ret_param(127) + ret_param(-128);
 }

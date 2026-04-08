@@ -4,5 +4,5 @@ char mul_div_mod(char a, char b) {
 
 int main()
 {
-    return 0;
+    return mul_div_mod(42, 5) + mul_div_mod(-42, 5) + mul_div_mod(42, -5) + mul_div_mod(-42, -5);
 }

@@ -919,11 +919,59 @@ class CPU8051:
             v -= 0x10000
         return v
 
+    def run_until_halt_or_sjmp_self(self, max_steps=500_000):
+        """Run until halt OR until main() returns.
 
-def run_hex(path, max_steps=200_000):
+        Two termination strategies:
+        1. c51cc STARTUP: SP drops below 7 (main's RET pops below initial SP=7)
+        2. Keil STARTUP: uses LJMP to main (not LCALL), so startup sets SP to some
+           value S, then LJMP. When main does RET, SP drops from S back to S-2.
+           We detect this by tracking the 'baseline SP' = SP just before the first
+           call instruction, and stopping when any RET causes SP < baseline.
+        3. SJMP $ (0x80 0xFE) fallback for safety.
+
+        Returns timed_out bool (True = exceeded max_steps)."""
+        # The initial SP is 7 (set in __init__).
+        # After startup runs MOV SP,#xx, the new SP becomes the baseline.
+        # We capture baseline_sp as the SP value seen just before the first LCALL/ACALL.
+        baseline_sp = None
+        first_call_seen = False
+
+        for _ in range(max_steps):
+            cur_pc = self.pc
+            op = self.code[cur_pc]
+            cur_sp = self.sfr[self.SP_ADDR]
+
+            # Record baseline SP on first LCALL (0x12) or ACALL (0x11,0x31,...0xF1)
+            if not first_call_seen and (op == 0x12 or (op & 0x1F) == 0x11):
+                baseline_sp = cur_sp
+                first_call_seen = True
+
+            # SJMP $ = 0x80 0xFE  (rel = -2) — safety fallback
+            if op == 0x80 and self.code[(cur_pc + 1) & 0xFFFF] == 0xFE:
+                self.halted = True
+                break
+
+            if not self.step():
+                break
+
+            # After a RET (0x22), check if SP dropped below baseline (main returned)
+            if op == 0x22 and baseline_sp is not None:
+                new_sp = self.sfr[self.SP_ADDR]
+                # After main's RET, SP should be baseline_sp - 2
+                # (Keil LJMP pattern: no return address pushed by startup,
+                #  but the iram at baseline_sp held the caller's pushed state)
+                if new_sp < baseline_sp - 1:
+                    self.halted = True
+                    break
+
+        return not self.halted  # True = timed out
+
+
+def run_hex(path, max_steps=500_000):
     code = load_hex(path)
     cpu = CPU8051(code)
-    timed_out = cpu.run(max_steps)
+    timed_out = cpu.run_until_halt_or_sjmp_self(max_steps)
     return cpu.get_return_signed(), cpu._icount, timed_out
 
 
@@ -931,10 +979,30 @@ def run_hex(path, max_steps=200_000):
 # Main comparison
 # ──────────────────────────────────────────────
 def main():
-    keil_dir = r"D:\ws\test\C51CC\output\keil\test"
-    c51cc_dir = r"D:\ws\test\C51CC\output\c51cc\test"
+    import argparse
+
+    parser = argparse.ArgumentParser(description="8051 HEX semantic comparator")
+    parser.add_argument("--keil-dir", default=r"D:\ws\test\C51CC\output\keil\test")
+    parser.add_argument("--c51cc-dir", default=r"D:\ws\test\C51CC\output\c51cc\test")
+    parser.add_argument("--max-steps", type=int, default=2_000_000)
+    parser.add_argument(
+        "--filter", default=None, help="Only test projects containing this substring"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Show debug trace for failing tests"
+    )
+    args = parser.parse_args()
+
+    keil_dir = args.keil_dir
+    c51cc_dir = args.c51cc_dir
+
+    if not os.path.isdir(keil_dir):
+        print(f"[ERROR] keil dir not found: {keil_dir}")
+        sys.exit(1)
 
     projects = sorted(os.listdir(keil_dir))
+    if args.filter:
+        projects = [p for p in projects if args.filter in p]
 
     ok = []
     fail = []
@@ -949,13 +1017,22 @@ def main():
             continue
 
         try:
-            kr, kn, kt = run_hex(keil_hex)
-            cr, cn, ct = run_hex(c51cc_hex)
+            kr, kn, kt = run_hex(keil_hex, args.max_steps)
+            cr, cn, ct = run_hex(c51cc_hex, args.max_steps)
         except Exception as e:
             fail.append((proj, f"exception: {e}", 0, 0))
             continue
 
-        if kt or ct:
+        if kt and ct:
+            timeout.append((proj, kr, cr, kn, cn))
+            continue
+
+        if kt:
+            # Keil timed out but c51cc finished - use c51cc as reference only if both finish
+            timeout.append((proj, kr, cr, kn, cn))
+            continue
+
+        if ct:
             timeout.append((proj, kr, cr, kn, cn))
             continue
 
@@ -970,19 +1047,22 @@ def main():
 
     print(f"\n=== FAIL ({len(fail)}) ===")
     for p, msg, kn, cn in fail:
-        print(f"  FAIL {p:<40}  {msg}")
+        print(f"  FAIL {p:<40}  {msg}  (keil_insns={kn} c51cc_insns={cn})")
 
     print(f"\n=== TIMEOUT ({len(timeout)}) ===")
     for p, kr, cr, kn, cn in timeout:
-        print(f"  TOUT {p:<40}  keil_ret={kr} c51cc_ret={cr}")
+        match_tag = "match" if kr == cr else "MISMATCH"
+        print(f"  TOUT {p:<40}  keil_ret={kr} c51cc_ret={cr}  [{match_tag}]")
 
-    print(f"\n=== SKIP (no c51cc hex) ({len(skip)}) ===")
+    print(f"\n=== SKIP (no hex) ({len(skip)}) ===")
     for p in skip:
         print(f"  SKIP {p}")
 
     print(
         f"\n[SUMMARY] pass={len(ok)}  fail={len(fail)}  timeout={len(timeout)}  skip={len(skip)}"
     )
+    if fail:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

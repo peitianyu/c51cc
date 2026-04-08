@@ -45,5 +45,8 @@ char div_mod_combo(char a, char b) {
 
 int main()
 {
-    return 0;
+    return add_const(42) + sub_const(42) + add_signed_unsigned(-42, 42U) +
+           unsigned_div(100U, 4U) + neg_op(-42) + inc_dec(42) +
+           mixed_arith(1, 2, 3) + shifts(1, 3) + big_mul(10, 20) +
+           div_mod_combo(10, 3);
 }

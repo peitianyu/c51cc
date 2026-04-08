@@ -623,6 +623,24 @@ static Instr *ssa_find_def_instr_current_func(SSABuild *b, ValueName v) {
     return NULL;
 }
 
+/* Returns the byte size of an SSA value, looking at its defining instruction's type.
+ * Falls back to 2 (int) if unknown. Used for type narrowing decisions. */
+static int ssa_value_byte_size(SSABuild *b, ValueName val) {
+    Instr *def = ssa_find_def_instr_current_func(b, val);
+    if (!def) return 2;
+    if (def->type && def->type->size > 0) return def->type->size;
+    if (def->op == IROP_PHI && def->args) {
+        for (int i = 0; i < def->args->len; i++) {
+            ValueName *pv = list_get(def->args, i);
+            if (!pv) continue;
+            Instr *arg_def = ssa_find_def_instr_current_func(b, *pv);
+            if (arg_def && arg_def->type && arg_def->type->size > 0)
+                return arg_def->type->size;
+        }
+    }
+    return 2;
+}
+
 static ValueName ssa_build_binop(SSABuild *b, IrOp op, ValueName lhs, ValueName rhs) {
     Instr *i = ssa_make_instr(b, op);
     i->dest = ssa_new_value(b);
@@ -1172,21 +1190,60 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         Ctype *rtype = ast->ctype;
         Ctype *lt = ast->left ? ast->left->ctype : NULL;
         Ctype *rt = ast->right ? ast->right->ctype : NULL;
-        if (lt && rt && lt->type == rt->type) {
-            rtype = lt;
-        } else if (lt && ast->right && ast->right->type == AST_LITERAL) {
-            rtype = lt;
-        } else if (rt && ast->left && ast->left->type == AST_LITERAL) {
-            rtype = rt;
+        /* Type narrowing: only apply for bitwise/shift/compare ops where operand types
+         * don't overflow. For arithmetic ops (+,-,*,/,%), keep ast->ctype (int promotion). */
+        bool is_arith = (ast->type == '+' || ast->type == '-' ||
+                         ast->type == '*' || ast->type == '/' || ast->type == '%');
+        if (!is_arith) {
+            if (lt && rt && lt->type == rt->type) {
+                rtype = lt;
+            } else if (lt && ast->right && ast->right->type == AST_LITERAL) {
+                rtype = lt;
+            } else if (rt && ast->left && ast->left->type == AST_LITERAL) {
+                rtype = rt;
+            }
+        }
+        /* For bitwise ops (&, |, ^): if rtype got promoted to int but both
+         * operand SSA values are 1-byte, keep char to avoid unnecessary 2-byte code. */
+        if ((ast->type == '&' || ast->type == '|' || ast->type == '^') &&
+            rtype && rtype->type == CTYPE_INT) {
+            int lhs_sz = ssa_value_byte_size(b, lhs);
+            int rhs_sz = ssa_value_byte_size(b, rhs);
+            if (lhs_sz == 1 && rhs_sz == 1) {
+                /* 通过 SSA 值的实际类型来确定符号性 */
+                Instr *lhs_def = ssa_find_def_instr_current_func(b, lhs);
+                Instr *rhs_def = ssa_find_def_instr_current_func(b, rhs);
+                Ctype *lhs_type = lhs_def ? lhs_def->type : lt;
+                Ctype *rhs_type = rhs_def ? rhs_def->type : rt;
+                bool lhs_unsigned = lhs_type && get_attr(lhs_type->attr).ctype_unsigned;
+                bool rhs_unsigned = rhs_type && get_attr(rhs_type->attr).ctype_unsigned;
+                if (lhs_unsigned && rhs_unsigned && lhs_type) {
+                    rtype = lhs_type; /* 保留 unsigned char 类型 */
+                } else {
+                    rtype = ctype_char;
+                }
+            }
+        }
+        /* If rtype is wider than operand types (e.g. char+char→int), insert
+         * implicit widening casts on the operands before the binary op. */
+        if (rtype && is_inttype(rtype) && is_arith) {
+            if (lt && is_inttype(lt) && lt->size < rtype->size) {
+                lhs = gen_type_cast(b, lhs, lt, rtype);
+            }
+            if (rt && is_inttype(rt) && rt->size < rtype->size) {
+                rhs = gen_type_cast(b, rhs, rt, rtype);
+            }
         }
         ValueName res = ssa_build_binop_t(b, ast_to_irop(ast->type), lhs, rhs, rtype);
         return res;
     }
-    
+
     case '~': case '!': {
         ValueName val = gen_expr(b, ast->operand);
         IrOp op = (ast->type == '~') ? IROP_NOT : IROP_LNOT;
-        return ssa_build_unop_t(b, op, val, ast->ctype);
+        /* LNOT result is always 0/1 → use char (1 byte) to avoid 2-byte register waste */
+        Ctype *lnot_type = (op == IROP_LNOT) ? ctype_char : ast->ctype;
+        return ssa_build_unop_t(b, op, val, lnot_type);
     }
 
     case PUNCT_INC:
@@ -1939,6 +1996,15 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
     
     case AST_RETURN: {
         ValueName val = ast->retval ? gen_expr(b, ast->retval) : 0;
+        /* 隐式类型转换：将返回值截断/扩展到函数返回类型 */
+        if (val && ast->retval && b->cur_func && b->cur_func->ret_type) {
+            Ctype *ret_ty = b->cur_func->ret_type;
+            Ctype *val_ty = ast->retval->ctype;
+            if (val_ty && is_inttype(val_ty) && is_inttype(ret_ty) &&
+                val_ty->type != ret_ty->type) {
+                val = gen_type_cast(b, val, val_ty, ret_ty);
+            }
+        }
         ssa_build_ret(b, val);
         break;
     }

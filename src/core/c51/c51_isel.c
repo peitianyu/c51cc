@@ -172,6 +172,8 @@ const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
         if (isel->ctx && isel->ctx->value_to_spill) {
             char* k = int_to_key(val);
             sym = (const char*)dict_get(isel->ctx->value_to_spill, k);
+            if (getenv("C51CC_REGDEBUG"))
+                fprintf(stderr, "[isel_get_hi_reg] val=%d sym_from_spill=%s\n", (int)val, sym ? sym : "NULL");
             free(k);
         }
         if (!sym) sym = lookup_value_addr_symbol(isel, val);
@@ -355,6 +357,22 @@ void c51_emit_asm_text(Section* sec, const char* asm_text) {
 
 void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* arg2, const char* ssa) {
     if (!isel || !isel->sec) return;
+    if (getenv("C51CC_REGDEBUG") && (
+        (arg1 && strstr(arg1, "spill_5")) ||
+        (arg2 && strstr(arg2, "spill_5"))))
+        fprintf(stderr, "[isel_emit] sec=%p kind=%d op=%s arg1=%s arg2=%s\n",
+                (void*)isel->sec, (int)isel->sec->kind, op,
+                arg1 ? arg1 : "(null)", arg2 ? arg2 : "(null)");
+    if (getenv("C51CC_REGDEBUG")) {
+        /* Track L12 / LJMP L12 / Lbr_skip_true_6 */
+        int track = 0;
+        if (op && (strstr(op, "L12") || strstr(op, "Lbr_skip_true_6"))) track = 1;
+        if (arg1 && (strstr(arg1, "L12") || strstr(arg1, "Lbr_skip_true_6"))) track = 1;
+        if (track)
+            fprintf(stderr, "[isel_emit_track] op=%s arg1=%s arg2=%s sec_len=%d\n",
+                    op ? op : "(null)", arg1 ? arg1 : "(null)", arg2 ? arg2 : "(null)",
+                    (int)(isel->sec && isel->sec->asminstrs ? isel->sec->asminstrs->len : -1));
+    }
     append_asm_instr(isel->sec, op, arg1, arg2, ssa, true);
 }
 
@@ -503,6 +521,15 @@ static Ctype* infer_dest_type(ISelContext* isel, Instr* ins) {
             case IROP_GT:
             case IROP_GE:
             case IROP_LNOT:
+                return (Ctype*)&g_inferred_int_type;
+            case IROP_ZEXT:
+            case IROP_SEXT:
+                /* ins->type is NULL (e.g. NE→ZEXT transform didn't set type).
+                 * Infer from src: ZEXT/SEXT result is at least as wide as src (min int). */
+                if (src0_type) {
+                    int sz = c51_abi_type_size(src0_type);
+                    return sz >= 2 ? src0_type : (Ctype*)&g_inferred_int_type;
+                }
                 return (Ctype*)&g_inferred_int_type;
             default:
                 break;
@@ -829,6 +856,10 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
 void isel_block(ISelContext* isel, Block* block) {
     if (!isel || !block || !block->instrs) return;
     isel->current_block_id = (int)block->id;
+
+    if (getenv("C51CC_REGDEBUG"))
+        fprintf(stderr, "[isel_block] entering block %d (instrs=%d)\n",
+                (int)block->id, block->instrs ? block->instrs->len : 0);
 
     if (block->id > 0) {
         char label[32];

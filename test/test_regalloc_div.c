@@ -15,5 +15,5 @@ int reg_div(int a, int b, int c) {
 
 int main() 
 {
-    return 0;
+    return reg_div(42, 17, 9);
 }

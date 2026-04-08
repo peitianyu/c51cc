@@ -14,9 +14,9 @@ setlocal enabledelayedexpansion
 set OUT=%~1
 if "%OUT%"=="" set OUT=c51cc.exe
 
-set SRCS=..\src\main.c
-for %%f in (..\src\core\*.c) do set SRCS=!SRCS! %%f
-for %%f in (..\src\core\c51\*.c) do set SRCS=!SRCS! %%f
+set SRCS=D:\ws\test\C51CC\src\main.c
+for %%f in (D:\ws\test\C51CC\src\core\*.c) do set SRCS=!SRCS! %%f
+for %%f in (D:\ws\test\C51CC\src\core\c51\*.c) do set SRCS=!SRCS! %%f
 
 echo Building %OUT% ...
 tcc %SRCS% -o %OUT%
@@ -25,4 +25,10 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo Build OK: %OUT%
+REM Also copy to scripts\c51cc.exe so that build_all.bat picks up the new compiler
+if not "%OUT%"=="scripts\c51cc.exe" (
+    if exist "%~dp0" (
+        copy /Y "%OUT%" "%~dp0c51cc.exe" >nul 2>&1
+    )
+)
 endlocal

@@ -107,6 +107,27 @@ int obj_add_section(ObjFile *obj, const char *name, SectionKind kind, int size, 
     return obj->sections->len - 1;
 }
 
+/* Find the first section with matching name and kind. Returns index or -1. */
+int obj_find_section(const ObjFile *obj, const char *name, SectionKind kind)
+{
+    if (!obj || !name) return -1;
+    int idx = 0;
+    for (Iter it = list_iter(obj->sections); !iter_end(it); idx++) {
+        Section *sec = iter_next(&it);
+        if (sec && sec->name && strcmp(sec->name, name) == 0 && sec->kind == kind)
+            return idx;
+    }
+    return -1;
+}
+
+/* Find existing section or create a new one. Returns index. */
+int obj_find_or_add_section(ObjFile *obj, const char *name, SectionKind kind, int align)
+{
+    int idx = obj_find_section(obj, name, kind);
+    if (idx >= 0) return idx;
+    return obj_add_section(obj, name, kind, 0, align);
+}
+
 Section *obj_get_section(const ObjFile *obj, int index)
 {
     return obj ? list_get(obj->sections, index) : NULL;
@@ -204,7 +225,13 @@ static Section *ensure_out_section(ObjFile *out, SectionKind kind)
      * (spill slots, __param_ slots, idata globals) start at 0x10 or later,
      * avoiding aliasing with the register file and the call stack. */
     if (kind == SEC_IDATA && sec && sec->bytes_len == 0) {
-        section_append_zeros(sec, 16);
+        /* 8051 IRAM layout:
+         *   0x00-0x07: register bank 0 (R0-R7)
+         *   0x08-0x0F: stack area (SP starts at 7, LCALL uses 0x08+)
+         *   0x10-0x1F: available
+         *   0x20-0x27: DIV/MUL runtime helpers scratch (direct-addressed)
+         * Reserve 40 bytes (0x28) so all IDATA symbols start after this area. */
+        section_append_zeros(sec, 40);
     }
     return sec;
 }

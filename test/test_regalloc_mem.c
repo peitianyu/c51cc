@@ -19,5 +19,5 @@ int reg_mem(int x, int y) {
 
 int main() 
 {
-    return 0;
+    return  reg_mem(1, 2);
 }

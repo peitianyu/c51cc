@@ -1,11 +1,27 @@
+call .\build_compiler.bat
+
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
 call :resolve_path "%~dp0.." REPO_ROOT
 if "%~1"=="" (
-    call :resolve_path "%REPO_ROOT%\code" SOURCE_DIR
+    call :resolve_path "%REPO_ROOT%\test" SOURCE_DIR
 ) else (
     call :resolve_path "%~1" SOURCE_DIR
+)
+
+:: [NEW] 检测单文件模式：如果第一个参数是 .c 文件，则记录并调整 SOURCE_DIR 为文件所在目录
+set "SINGLE_FILE_MODE=0"
+set "SINGLE_FILE_PATH="
+if not "%~1"=="" (
+    if exist "%~1" (
+        if /I "%~x1"==".c" (
+            set "SINGLE_FILE_MODE=1"
+            set "SINGLE_FILE_PATH=!SOURCE_DIR!"
+            for %%I in ("!SOURCE_DIR!") do set "SOURCE_DIR=%%~dpI"
+            if "!SOURCE_DIR:~-1!"=="\" set "SOURCE_DIR=!SOURCE_DIR:~0,-1!"
+        )
+    )
 )
 
 if "%~2"=="" (
@@ -61,7 +77,12 @@ echo [INFO] Source : %SOURCE_DIR%
 echo [INFO] Output : %OUTPUT_ROOT%
 echo.
 
-for /r "%SOURCE_DIR%" %%F in (*.c) do call :dispatch_project "%%~fF"
+:: [NEW] 根据模式选择处理方式：单文件直接调用，否则遍历目录
+if "%SINGLE_FILE_MODE%"=="1" (
+    call :dispatch_project "%SINGLE_FILE_PATH%"
+) else (
+    for /r "%SOURCE_DIR%" %%F in (*.c) do call :dispatch_project "%%~fF"
+)
 
 echo.
 echo [SUMMARY] Projects   : %PROJECT_COUNT%
@@ -239,9 +260,9 @@ if "%C51CC_EXTRA_SRC%"=="" (
 )
 
 if defined C51CC_EXTRA_SRC (
-    "%C51CC_EXE%" -asm -hex -o "%PROJECT_NAME%" %C51CC_IFLAGS% "%ENTRY_FILE_NAME%" "%C51CC_EXTRA_SRC%"
+    "%C51CC_EXE%" -asm -hex %C51CC_EXTRA_FLAGS% -o "%PROJECT_NAME%" %C51CC_IFLAGS% "%ENTRY_FILE_NAME%" "%C51CC_EXTRA_SRC%"
 ) else (
-    "%C51CC_EXE%" -asm -hex -o "%PROJECT_NAME%" %C51CC_IFLAGS% "%ENTRY_FILE_NAME%"
+    "%C51CC_EXE%" -asm -hex %C51CC_EXTRA_FLAGS% -o "%PROJECT_NAME%" %C51CC_IFLAGS% "%ENTRY_FILE_NAME%"
 )
 if errorlevel 1 goto :c51cc_fail_pop
 if not exist "%PROJECT_NAME%.hex" goto :c51cc_fail_pop

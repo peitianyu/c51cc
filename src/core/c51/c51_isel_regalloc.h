@@ -10,7 +10,8 @@ extern const int param_regs_int_l[];
 
 enum {
     C51_ALLOCATABLE_REG_MIN = 0,
-    C51_ALLOCATABLE_REG_MAX = 5,
+    C51_ALLOCATABLE_REG_MAX = 5,   /* Reserve R6/R7 for parameter / return traffic */
+    C51_TEMP_REG_MAX_NOCALL = 5,   /* when not crossing a call, prefer R0-R5 for temps */
 };
 
 /* ============================================================

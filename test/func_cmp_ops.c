@@ -9,5 +9,5 @@ char cmp_ops(char a, char b) {
 
 int main()
 {
-    return 0;
+    return cmp_ops(1, 2) + cmp_ops(-1, -1) + cmp_ops(127, 127) + cmp_ops(-128, 127);
 }

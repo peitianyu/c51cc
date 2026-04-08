@@ -38,5 +38,6 @@ int shifts_int(int a, int s) {
 
 int main()
 {
-    return 0;
+    return add_int(1, 2) + sub_int(1, 2) + mul_int(3, 4) + div_int(10, 2) + mod_int(10, 3) +
+           unsigned_add_int(1U, 2U) + neg_int(-42) + mixed_int(1, 2, 3);
 }

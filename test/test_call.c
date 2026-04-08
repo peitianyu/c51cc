@@ -9,5 +9,5 @@ int call_add() {
 
 int main()
 {
-    return 0;
+    return call_add();
 }

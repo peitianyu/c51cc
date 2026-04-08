@@ -7,5 +7,6 @@ unsigned int cmp_unsigned_ne(unsigned int a,unsigned int b){ return a != b; }
 
 int main()
 {
-    return 0;
+    return cmp_unsigned_lt(0, 1) + cmp_unsigned_le(0, 1) + cmp_unsigned_gt(1, 0) + cmp_unsigned_ge(1, 0) +
+           cmp_unsigned_eq(42, 42) + cmp_unsigned_ne(42, 43);
 }

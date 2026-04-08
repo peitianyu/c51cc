@@ -17,5 +17,5 @@ int reg_calls(void) {
 
 int main() 
 {
-    return 0;
+    return reg_calls();
 }

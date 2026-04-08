@@ -111,7 +111,7 @@ static const BuiltinDirect builtin_directs[] = {
 	{"PCON", 0x87}, {"TCON", 0x88}, {"TMOD", 0x89}, {"TL0", 0x8A},
 	{"TL1", 0x8B}, {"TH0", 0x8C}, {"TH1", 0x8D}, {"P1", 0x90},
 	{"SCON", 0x98}, {"SBUF", 0x99}, {"P2", 0xA0}, {"IE", 0xA8},
-	{"P3", 0xB0}, {"IP", 0xB8}, {"PSW", 0xD0}, {"ACC", 0xE0},
+	{"P3", 0xB0}, {"IP", 0xB8}, {"PSW", 0xD0}, {"ACC", 0xE0}, {"A", 0xE0},
 	{"B", 0xF0}, {NULL, 0}
 };
 
@@ -222,10 +222,68 @@ static int is_comment_instr(const AsmInstr *ins)
 }
 
 static int instruction_size(const AsmInstr *ins);
+static Symbol *find_symbol_for_asm(const ObjFile *obj, const char *name);
 
 static int is_function_local_label_name(const char *name)
 {
 	return name && name[0] == 'L';
+}
+
+static int lookup_scope_function_base(EncodeState *state, int target_scope, int *base)
+{
+	Iter it;
+	int scope = 0;
+	int offset = state ? state->start_offset : 0;
+
+	if (base) *base = 0;
+	if (!state || !state->sec || !state->sec->asminstrs || target_scope <= 0) return 0;
+
+	for (it = list_iter(state->sec->asminstrs); !iter_end(it);) {
+		AsmInstr *ins = iter_next(&it);
+		if (!ins || !ins->op) continue;
+		if (is_label_instr(ins)) {
+			size_t len = strlen(ins->op);
+			if (len > 1) {
+				char *label_name = malloc(len);
+				Symbol *sym = NULL;
+				if (!label_name) return 0;
+				memcpy(label_name, ins->op, len - 1);
+				label_name[len - 1] = '\0';
+				if (!is_function_local_label_name(label_name)) {
+					scope++;
+					if (scope == target_scope) {
+						sym = find_symbol_for_asm(state->obj, label_name);
+						if (sym && sym->kind == SYM_FUNC && sym->section >= 0) {
+							if (base) *base = sym->value;
+							free(label_name);
+							return 1;
+						}
+						if (base) *base = offset;
+						free(label_name);
+						return 1;
+					}
+				}
+				free(label_name);
+			}
+			continue;
+		}
+		if (!is_comment_instr(ins)) {
+			int size = instruction_size(ins);
+			if (size < 0) return 0;
+			offset += size;
+		}
+	}
+
+	return 0;
+}
+
+static int normalize_local_scope_value(EncodeState *state, int scope, int value)
+{
+	int base = 0;
+	if (lookup_scope_function_base(state, scope, &base) && value < base) {
+		return base + value;
+	}
+	return value;
 }
 
 static int reg_index(const char *name)
@@ -386,6 +444,7 @@ static int lookup_local_label(EncodeState *state, const char *name, int *value)
 {
 	List *found;
 	Iter it;
+	int current_pc;
 	int best_value = 0;
 	int best_distance = 0x7fffffff;
 	int best_value_any_scope = 0;
@@ -397,22 +456,25 @@ static int lookup_local_label(EncodeState *state, const char *name, int *value)
 	if (!key) return 0;
 	found = dict_get(state->labels, key);
 	require_scope = is_function_local_label_name(key);
+	current_pc = normalize_local_scope_value(state, state->current_scope, state->current_pc);
 	free(key);
 	if (!found) return 0;
 	for (it = list_iter(found); !iter_end(it);) {
 		LabelLocation *candidate = iter_next(&it);
+		int candidate_value;
 		int distance;
 		if (!candidate) continue;
-		distance = candidate->value - state->current_pc;
+		candidate_value = normalize_local_scope_value(state, candidate->scope, candidate->value);
+		distance = candidate_value - current_pc;
 		if (distance < 0) distance = -distance;
 		if (distance < best_distance_any_scope) {
 			best_distance_any_scope = distance;
-			best_value_any_scope = candidate->value;
+			best_value_any_scope = candidate_value;
 		}
 		if (require_scope && candidate->scope != state->current_scope) continue;
 		if (distance < best_distance) {
 			best_distance = distance;
-			best_value = candidate->value;
+			best_value = candidate_value;
 		}
 	}
 	if (best_distance == 0x7fffffff && require_scope && best_distance_any_scope != 0x7fffffff) {
@@ -434,15 +496,16 @@ static int lookup_local_label(EncodeState *state, const char *name, int *value)
 					candidate_name[len - 1] = '\0';
 					if (!is_function_local_label_name(candidate_name)) scope++;
 					if (strcmp(candidate_name, name) == 0) {
-						int distance = offset - state->current_pc;
+						int candidate_value = normalize_local_scope_value(state, scope, offset);
+						int distance = candidate_value - current_pc;
 						if (distance < 0) distance = -distance;
 						if ((!require_scope || scope == state->current_scope) && distance < best_distance) {
 							best_distance = distance;
-							best_value = offset;
+							best_value = candidate_value;
 						}
 						if (distance < best_distance_any_scope) {
 							best_distance_any_scope = distance;
-							best_value_any_scope = offset;
+							best_value_any_scope = candidate_value;
 						}
 					}
 					free(candidate_name);
@@ -958,10 +1021,22 @@ static int encode_long_jump(EncodeState *state, const InstrView *view, unsigned 
 {
 	const FixedEncoding *entry;
 	ExprValue expr;
+	char *target = NULL;
 	if (!view || !view->op) return 0;
 	entry = find_fixed_encoding(fixed_abs16_encodings, view);
 	if (!entry) return 0;
 	out[view->pc - state->start_offset] = entry->opcode;
+	target = dup_trim(view->arg1);
+	if (target && is_function_local_label_name(target)) {
+		memset(&expr, 0, sizeof(expr));
+		expr.is_symbolic = 1;
+		strncpy(expr.symbol, target, sizeof(expr.symbol) - 1);
+		expr.symbol[sizeof(expr.symbol) - 1] = '\0';
+		free(target);
+		if (!emit_abs16_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
+		return view->size;
+	}
+	free(target);
 	if (!eval_expr(state, view->arg1, &expr) || !emit_abs16_or_reloc(state, out, view->pc + 1, view->ins, &expr)) return -1;
 	return view->size;
 }
@@ -1445,8 +1520,11 @@ static void record_labels(EncodeState *state)
 			memcpy(name, ins->op, len - 1);
 			name[len - 1] = '\0';
 			if (!is_function_local_label_name(name)) scope++;
-			location->value = offset;
+			location->value = normalize_local_scope_value(state, scope, offset);
 			location->scope = scope;
+			if (is_function_local_label_name(name) && !find_symbol_exact(state->obj, name)) {
+				obj_add_symbol(state->obj, name, SYM_LABEL, state->sec_idx, offset, 0, SYM_FLAG_LOCAL);
+			}
 			positions = dict_get(state->labels, name);
 			if (!positions) {
 				positions = make_list();

@@ -28,5 +28,5 @@ int reg_more(int a) {
 
 int main() 
 {
-    return 0;
+    return reg_more(42);
 }

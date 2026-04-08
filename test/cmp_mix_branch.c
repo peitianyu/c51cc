@@ -31,5 +31,5 @@ u8 loop_lt(u8 start) {
 
 int main()
 {
-    return 0;
+    return b_lt(7) + b_le(8) + b_eq(3) + b_ne(4) + loop_lt(0);
 }

@@ -54,5 +54,7 @@ int test_param_reuse(int x, int y, int z) {
 
 int main() 
 {
-    return 0;
+    return test_multi_values(1, 2, 3) + test_overlapping_lifetimes(4, 5) + 
+           test_long_lifetime(6, 7, 8) + test_sequential_ops(9, 10) + 
+           test_param_reuse(11, 12, 13);
 }

@@ -42,12 +42,23 @@ static void usage(const char *prog) {
         "  -ssa         Print SSA IR\n"
         "  -asm         Emit 8051 assembly (default)\n"
         "  -hex         Emit Intel HEX\n"
+        "  -reg         Print register allocation debug info to stderr\n"
         "  -O0/-O1/-O2  Optimization level (default: O1)\n"
         "  -o <file>    Output file (default: stdout)\n"
         "               With -asm and -hex together, writes sibling .asm/.hex files\n"
         "  -I<path>     Add include search path\n",
         prog ? prog : "c51cc"
     );
+}
+
+static int set_process_env_var(const char *name, const char *value)
+{
+    if (!name || !value) return -1;
+#ifdef _WIN32
+    return _putenv_s(name, value);
+#else
+    return setenv(name, value, 1);
+#endif
 }
 
 static char *replace_extension(const char *path, const char *ext)
@@ -79,6 +90,7 @@ int main(int argc, char **argv) {
     int opt_ssa = 0;
     int opt_asm = 0;
     int opt_hex = 0;
+    int opt_reg = 0;
     int opt_level = OPT_O1;
     const char *input_file = NULL;
     const char *output_file = NULL;
@@ -93,6 +105,8 @@ int main(int argc, char **argv) {
             opt_asm = 1;
         } else if (strcmp(a, "-hex") == 0) {
             opt_hex = 1;
+        } else if (strcmp(a, "-reg") == 0) {
+            opt_reg = 1;
         } else if (strcmp(a, "-O0") == 0) {
             opt_level = OPT_O0;
         } else if (strcmp(a, "-O1") == 0) {
@@ -141,6 +155,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    if (opt_reg && set_process_env_var("C51CC_REGDEBUG", "1") != 0) {
+        fprintf(stderr, "error: failed to enable register debug output\n");
+        return 1;
+    }
+
     /* Collect all non-option arguments as input files (preserve order) */
     List *input_paths = make_list();
     for (int i = 1; i < argc; i++) {
@@ -163,7 +182,7 @@ int main(int argc, char **argv) {
 
     /* 若没有指定任何输出模式，默认 -asm */
     if (!opt_ast && !opt_ssa && !opt_asm && !opt_hex) {
-        opt_asm = 1;
+        opt_hex = 1;
     }
 
     FILE *out_fp = stdout;

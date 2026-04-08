@@ -4,5 +4,5 @@ char add_sub(char a, char b) {
 
 int main()
 {
-    return 0;
+    return add_sub(1, 2) + add_sub(-1, -2) + add_sub(127, 1) + add_sub(-128, -1);
 }

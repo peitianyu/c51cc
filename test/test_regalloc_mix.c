@@ -24,5 +24,5 @@ int reg_mix(int a) {
 
 int main() 
 {
-    return 0;
+    return reg_mix(42);
 }

@@ -1038,7 +1038,7 @@ void emit_addr(ISelContext* isel, Instr* ins) {
             } else if (mattr.ctype_data == CTYPE_DATA_XDATA) {
                 use_kind = SEC_XDATA; sec_prefix = "?XD?";
             }
-            int sec_idx = obj_add_section(isel->ctx->obj, sec_prefix, use_kind, 0, 1);
+            int sec_idx = obj_find_or_add_section(isel->ctx->obj, sec_prefix, use_kind, 1);
             Section* sec = obj_get_section(isel->ctx->obj, sec_idx);
             if (sec) {
                 int offset = sec->size;

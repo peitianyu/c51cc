@@ -28,5 +28,13 @@ int sub_min_max(){ return (-32768) - 1; }
 
 int main()
 {
-    return 0;
+    return add_overflow_signed(32767, 1) + add_overflow_unsigned(32767, 1) +
+           add_with_const(0) + addu_with_const(0) +
+           sub_borrow_signed(-32768, 1) + sub_borrow_unsigned(0, 1) +
+           mul_signed(32767, 2) + mul_unsigned(65535, 2) +
+           div_signed(-32768, -1) + mod_signed(-32768, -1) +
+           div_unsigned(32767, 2) + mod_unsigned(32767, 2) +
+           shl_int(1, 31) + shr_signed(-1, 31) + shr_unsigned(32767, 31) +
+           mixed_signed_unsigned(-32768, 32767) + mixed_unsigned_signed(32767, -32768) +
+           add_min_max() + sub_min_max();
 }

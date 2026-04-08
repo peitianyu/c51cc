@@ -12,5 +12,6 @@ u16 f_sel(u8 c, u8 a, u8 b) {
 
 int main()
 {
-    return 0;
+    return f_lt(7) + f_le(8) + f_eq(3) + f_ne(4) +
+           f_sel(1, 42, 24) + f_sel(0, 42, 24);
 }

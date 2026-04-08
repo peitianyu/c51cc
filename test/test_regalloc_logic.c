@@ -23,5 +23,5 @@ int reg_logic(int a, int b, int c, int d) {
 
 int main() 
 {
-    return 0;
+    return reg_logic(1, 2, 3, 4);
 }

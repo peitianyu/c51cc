@@ -3285,26 +3285,10 @@ static void optimize_section(Section* sec) {
             removed = peephole_self_mov(sec->asminstrs, i);
             if (removed) { changed = 1; continue; }
 
-            removed = peephole_fold_cond_jump(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
-            removed = peephole_invert_cond_over_jump(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
-            removed = peephole_thread_jump_chain(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
-            removed = peephole_thread_cond_jump(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
-            removed = peephole_hoist_common_code_over_branch(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
-            removed = peephole_jump_to_next_label(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
-
-            removed = peephole_jump_to_following_label_cluster(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            /* Control-flow peepholes here are currently too aggressive and can
+             * collapse live blocks (e.g. branch true-path arithmetic blocks in
+             * `test_isel_branch`). Keep them disabled until their CFG safety
+             * conditions are fixed. */
         }
 
         if (eliminate_dead_idata_spills(sec->asminstrs) > 0) changed = 1;
@@ -3318,6 +3302,8 @@ void c51_optimize(C51GenContext* ctx, ObjFile* obj)
     (void)ctx;
     (void)obj;
     if (!obj || !obj->sections) return;
+    if (getenv("C51CC_REGDEBUG"))
+        fprintf(stderr, "[c51_optimize] called (C51CC_NO_OPT=%s)\n", getenv("C51CC_NO_OPT") ? getenv("C51CC_NO_OPT") : "NULL");
 
     // 对每个节执行窥孔优化（仅对含有 asminstrs 的节）
     for (int i = 0; i < obj->sections->len; i++) {

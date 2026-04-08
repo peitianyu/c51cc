@@ -82,8 +82,13 @@ int reg_index_from_name(const char* s) {
 
 int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
     if (!isel) return ACC_REG;
-    for (int r = C51_ALLOCATABLE_REG_MIN; r <= C51_ALLOCATABLE_REG_MAX; r++) {
-        if (r + size - 1 > C51_ALLOCATABLE_REG_MAX) continue;
+    /* Keep temporaries out of R6/R7.
+     * Those two registers often hold live parameters / return values across
+     * loop bodies and branch edges; using them as scratch temporaries causes
+     * hard-to-see clobbers in control-flow-heavy code. */
+    const int temp_reg_max = 5;
+    for (int r = C51_ALLOCATABLE_REG_MIN; r <= temp_reg_max; r++) {
+        if (r + size - 1 > temp_reg_max) continue;
         bool ok = true;
         for (int j = 0; j < size; j++) {
             if (isel->reg_busy[r + j]) { ok = false; break; }
@@ -115,8 +120,13 @@ static void emit_store_spill_imm(ISelContext* isel, ValueName val, int size,
                                   const char* lo_imm, const char* hi_imm, Instr* ins) {
     if (!isel || !isel->ctx || val < 0 || !isel_value_is_spilled(isel, val)) return;
     char* key = int_to_key(val);
-    const char* var_name = isel->ctx->value_to_addr ?
-                           (const char*)dict_get(isel->ctx->value_to_addr, key) : NULL;
+    /* Check value_to_spill first (regalloc writes spill slots there),
+     * then fall back to value_to_addr (used for named variables). */
+    const char* var_name = NULL;
+    if (isel->ctx->value_to_spill)
+        var_name = (const char*)dict_get(isel->ctx->value_to_spill, key);
+    if (!var_name && isel->ctx->value_to_addr)
+        var_name = (const char*)dict_get(isel->ctx->value_to_addr, key);
     free(key);
     if (!var_name) return;
 
@@ -149,6 +159,25 @@ static void emit_store_spill_imm(ISelContext* isel, ValueName val, int size,
 }
 
 void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, bool one) {
+    const char* imm_val = one ? "#1" : "#0";
+    ValueName dest_val = ins ? ins->dest : -1;
+
+    /* Fast path: for IDATA/DATA spill, write directly to memory without going
+     * through a temporary register. This avoids clobbering live registers. */
+    if (dest_val >= 0 && isel_value_is_spilled(isel, dest_val)) {
+        char* key2 = int_to_key(dest_val);
+        const char* var_name2 = isel->ctx && isel->ctx->value_to_addr ?
+                                (const char*)dict_get(isel->ctx->value_to_addr, key2) : NULL;
+        if (!var_name2 && isel->ctx && isel->ctx->value_to_spill)
+            var_name2 = (const char*)dict_get(isel->ctx->value_to_spill, key2);
+        free(key2);
+        SectionKind sec2 = var_name2 ? get_symbol_section_kind(isel, var_name2) : SEC_XDATA;
+        if (sec2 == SEC_IDATA || sec2 == SEC_DATA) {
+            emit_store_spill_imm(isel, dest_val, size, imm_val, "#0", ins);
+            return;
+        }
+    }
+
     int phys_reg = dst_reg;
     if (phys_reg < 0 && ins) {
         phys_reg = alloc_temp_reg(isel, ins->dest, size);
@@ -159,7 +188,6 @@ void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, 
 
     const char* dst_lo = isel_reg_name(phys_reg + (size == 2 ? 1 : 0));
     const char* dst_hi = isel_reg_name(phys_reg);
-    const char* imm_val = one ? "#1" : "#0";
 
     /* 直接用立即数写寄存器，不通过 A（省去 MOV A,#imm + MOV Rn,A = 1条） */
     emit_mov(isel, dst_lo, imm_val, ins);
@@ -167,21 +195,7 @@ void emit_set_bool_result(ISelContext* isel, Instr* ins, int dst_reg, int size, 
         emit_mov(isel, dst_hi, "#0", ins);
     }
 
-    /* 对于 IDATA/DATA spill：直接用立即数写，不通过 A（省去 MOV A,Rn + MOV spill,A = 1条） */
-    ValueName dest_val = ins ? ins->dest : -1;
-    if (dest_val >= 0 && isel_value_is_spilled(isel, dest_val)) {
-        char* key2 = int_to_key(dest_val);
-        const char* var_name2 = isel->ctx && isel->ctx->value_to_addr ?
-                                (const char*)dict_get(isel->ctx->value_to_addr, key2) : NULL;
-        free(key2);
-        SectionKind sec2 = var_name2 ? get_symbol_section_kind(isel, var_name2) : SEC_XDATA;
-        if (sec2 == SEC_IDATA || sec2 == SEC_DATA) {
-            emit_store_spill_imm(isel, dest_val, size, imm_val, "#0", ins);
-            return;
-        }
-    }
     /* 非 IDATA/DATA spill（XDATA 等）：退回到通过 A 中转的老路 */
-    /* 先把 A 设为立即数，再走 isel_store_spill_from_reg */
     if (dest_val >= 0 && isel_value_is_spilled(isel, dest_val)) {
         isel_emit(isel, "MOV", "A", imm_val, NULL);
         emit_store_spilled_result(isel, dest_val, phys_reg, size, ins);
@@ -269,9 +283,15 @@ SectionKind get_symbol_section_kind(ISelContext* isel, const char* var_name) {
 }
 
 const char* lookup_value_addr_symbol(ISelContext* isel, ValueName val) {
-    if (!isel || !isel->ctx || !isel->ctx->value_to_addr || val <= 0) return NULL;
+    if (!isel || !isel->ctx || val <= 0) return NULL;
     char* key = int_to_key(val);
-    const char* sym = (const char*)dict_get(isel->ctx->value_to_addr, key);
+    /* Check value_to_spill first (regalloc writes spill slots there),
+     * then fall back to value_to_addr (used for named variables). */
+    const char* sym = NULL;
+    if (isel->ctx->value_to_spill)
+        sym = (const char*)dict_get(isel->ctx->value_to_spill, key);
+    if (!sym && isel->ctx->value_to_addr)
+        sym = (const char*)dict_get(isel->ctx->value_to_addr, key);
     free(key);
     return sym;
 }
@@ -289,6 +309,10 @@ void emit_load_symbol_byte(ISelContext* isel, const char* sym, int offset, const
     char ref[256];
     char* ssa = instr_to_ssa_str(ins);
     format_symbol_byte_ref(ref, sizeof(ref), sym, offset);
+
+    if (getenv("C51CC_REGDEBUG") && strstr(sym, "spill"))
+        fprintf(stderr, "[emit_load_sym] sym=%s off=%d dst=%s sec=%d ref=%s\n",
+                sym, offset, dst, (int)sym_sec, ref);
 
     if (sym_sec == SEC_XDATA) {
         char dptr_val[256];
@@ -324,6 +348,12 @@ void emit_load_symbol_byte(ISelContext* isel, const char* sym, int offset, const
         return;
     }
 
+    if (strcmp(dst, "A") == 0) {
+        isel_emit(isel, "MOV", "A", ref, ssa);
+        free(ssa);
+        return;
+    }
+
     emit_mov(isel, dst, ref, ins);
     free(ssa);
 }
@@ -355,6 +385,13 @@ void emit_store_symbol_byte(ISelContext* isel, const char* sym, int offset, cons
             free(ssa);
         }
         isel_emit(isel, "MOV", ref, "A", NULL);
+        return;
+    }
+
+    if (strcmp(src, "A") == 0) {
+        char* ssa = instr_to_ssa_str(ins);
+        isel_emit(isel, "MOV", ref, "A", ssa);
+        free(ssa);
         return;
     }
 
@@ -394,7 +431,42 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
         if (existing && *existing != SPILL_REG) return *existing;
     }
 
+    /* Before picking a temporary register for the reload, protect all
+     * registers that are currently bound to non-SPILL values.  This
+     * prevents clobbering a live variable whose register was not marked
+     * busy by prepare_reg_state_for_instr (because it didn't appear in
+     * the current instruction's operands). */
+    bool extra_busy[8] = {false};
+    if (isel->ctx && isel->ctx->value_to_reg) {
+        List* keys = dict_keys(isel->ctx->value_to_reg);
+        if (keys) {
+            for (Iter ki = list_iter(keys); !iter_end(ki);) {
+                const char* dk = (const char*)iter_next(&ki);
+                if (!dk) continue;
+                int* rp = (int*)dict_get(isel->ctx->value_to_reg, dk);
+                if (!rp) continue;
+                int r = *rp;
+                if (r < 0 || r == SPILL_REG) continue;  /* SPILL_REG = -3 */
+                for (int j = 0; j < size && r + j < 8; j++) {
+                    if (!isel->reg_busy[r + j]) {
+                        isel->reg_busy[r + j] = true;
+                        extra_busy[r + j] = true;
+                    }
+                }
+            }
+            free(keys);
+        }
+    }
+
     int reg = alloc_temp_reg(isel, val, size);
+
+    /* Restore the extra busy flags we set (but keep the one for the newly
+     * allocated register, which alloc_temp_reg already set). */
+    for (int j = 0; j < 8; j++) {
+        if (extra_busy[j] && isel->reg_val[j] != val)
+            isel->reg_busy[j] = false;
+    }
+
     const char* ssa = ins ? instr_to_ssa_str(ins) : NULL;
 
     if (reg >= 0) {
@@ -789,10 +861,79 @@ Instr* find_def_instr_in_func(Func* f, ValueName v) {
 
 bool try_get_value_const(ISelContext* isel, ValueName val, int64_t* out_val) {
     if (!isel || !isel->ctx || !isel->ctx->current_func || val <= 0) return false;
-    Instr* def = find_def_instr_in_func(isel->ctx->current_func, val);
-    if (!def || def->op != IROP_CONST) return false;
-    if (out_val) *out_val = def->imm.ival;
-    return true;
+
+    Func* func = isel->ctx->current_func;
+    int depth = 0;
+    ValueName current = val;
+
+    while (current > 0 && depth++ < 8) {
+        Instr* def = find_def_instr_in_func(func, current);
+        if (!def) return false;
+
+        if (def->op == IROP_CONST) {
+            if (out_val) *out_val = def->imm.ival;
+            return true;
+        }
+
+        if (!def->args || def->args->len < 1) return false;
+
+        ValueName src = get_src1_value(def);
+        int64_t src_val = 0;
+        int src_bits = get_value_size(isel, src) * 8;
+        if (src_bits <= 0) src_bits = 8;
+
+        switch (def->op) {
+        case IROP_TRUNC:
+            if (!try_get_value_const(isel, src, &src_val)) return false;
+            if (out_val) {
+                int dst_bits = get_value_size(isel, def->dest) * 8;
+                if (dst_bits <= 0) dst_bits = 8;
+                if (dst_bits >= 64) {
+                    *out_val = src_val;
+                } else {
+                    uint64_t mask = (1ULL << dst_bits) - 1ULL;
+                    *out_val = (int64_t)((uint64_t)src_val & mask);
+                }
+            }
+            return true;
+
+        case IROP_ZEXT:
+            if (!try_get_value_const(isel, src, &src_val)) return false;
+            if (out_val) {
+                if (src_bits >= 64) {
+                    *out_val = src_val;
+                } else {
+                    uint64_t mask = (1ULL << src_bits) - 1ULL;
+                    *out_val = (int64_t)((uint64_t)src_val & mask);
+                }
+            }
+            return true;
+
+        case IROP_SEXT:
+            if (!try_get_value_const(isel, src, &src_val)) return false;
+            if (out_val) {
+                if (src_bits >= 64) {
+                    *out_val = src_val;
+                } else {
+                    uint64_t mask = (1ULL << src_bits) - 1ULL;
+                    uint64_t bits = (uint64_t)src_val & mask;
+                    uint64_t sign = 1ULL << (src_bits - 1);
+                    if (bits & sign) bits |= ~mask;
+                    *out_val = (int64_t)bits;
+                }
+            }
+            return true;
+
+        case IROP_BITCAST:
+            current = src;
+            continue;
+
+        default:
+            return false;
+        }
+    }
+
+    return false;
 }
 
 bool is_const_zero_def(Func* f, ValueName v) {

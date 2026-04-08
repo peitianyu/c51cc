@@ -4,5 +4,5 @@ char add_ptr(char *p, char x) {
 
 int main()
 {
-    return 0;
+    return add_ptr((char *)0x1234, 42);
 }

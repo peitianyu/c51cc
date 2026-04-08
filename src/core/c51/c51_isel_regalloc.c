@@ -47,8 +47,9 @@ typedef struct {
     char* name;
 } SpillSlotInfo;
 
-/* Keil约定下，R6/R7主要承担返回值与参数传递，
- * 临时值优先使�?R0-R5，避免与ABI关键寄存器冲突�?*/
+/* Keil约定下，R6/R7主要承担返回值与参数传递。
+ * 不跨call的临时值优先用R0-R5，跨call或压力大时可以用R6/R7。
+ * 这些动态值在linscan_allocate中按需计算。 */
 static const int k_temp_reg_min = C51_ALLOCATABLE_REG_MIN;
 static const int k_temp_reg_max = C51_ALLOCATABLE_REG_MAX;
 
@@ -63,7 +64,10 @@ static int compare_intervals(const void* a, const void* b) {
     LiveInterval* ib = &g_linscan_ctx->intervals[idx_b];
     
     if (ia->start != ib->start) return ia->start - ib->start;
-    return ia->end - ib->end;
+    /* When start is equal, allocate longer-lived intervals first so they get
+     * physical registers before shorter-lived intervals that may be rematerialized
+     * or can share the same spill slot more easily. */
+    return ib->end - ia->end;  /* descending end: longer first */
 }
 
 /* 初始化线性扫描分配器 */
@@ -317,6 +321,91 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
         }
     }
 
+    /* ---------------------------------------------------------------
+     * Back-edge liveness fix for loop-carried values.
+     *
+     * For each phi node in a loop header block H, any value that is
+     * *used* inside the loop body (any block that reaches back to H)
+     * must remain live until the end of that back-edge predecessor.
+     *
+     * We detect back edges as: phi in block H has a predecessor B
+     * whose block_edge_idx > phi's position in H (i.e., B comes
+     * AFTER H in the linear order → it's a back edge).
+     *
+     * For every value used in the header's instructions that was
+     * DEFINED BEFORE the header (start < header_start), extend its
+     * interval to the back-edge predecessor's last instruction index.
+     * Values defined inside the header are redefined each iteration
+     * and do not need the extension.
+     * ---------------------------------------------------------------*/
+    {
+        /* First pass: record the linear start index of each block */
+        int* block_start_idx_arr = malloc(sizeof(int) * (max_block_id + 1));
+        for (int i = 0; i <= max_block_id; i++) block_start_idx_arr[i] = -1;
+        {
+            int running = 0;
+            for (Iter bit2 = list_iter(func->blocks); !iter_end(bit2);) {
+                Block* blk2 = iter_next(&bit2);
+                if (!blk2) continue;
+                if (blk2->id <= (uint32_t)max_block_id)
+                    block_start_idx_arr[blk2->id] = running;
+                /* count instructions */
+                for (int p = 0; p < 2; p++) {
+                    List* lst2 = (p == 0) ? blk2->phis : blk2->instrs;
+                    if (lst2) running += lst2->len;
+                }
+            }
+        }
+
+        for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
+            Block* hdr = iter_next(&bit);
+            if (!hdr || !hdr->phis) continue;
+
+            int hdr_start = (hdr->id <= (uint32_t)max_block_id)
+                            ? block_start_idx_arr[hdr->id] : -1;
+            if (hdr_start < 0) continue;
+
+            /* Collect back-edge predecessor last indices for this header */
+            int backedge_end = -1;
+            for (Iter pit = list_iter(hdr->phis); !iter_end(pit);) {
+                Instr* phi = iter_next(&pit);
+                if (!phi || phi->op != IROP_PHI || !phi->labels) continue;
+                for (int i = 0; i < phi->labels->len; i++) {
+                    const char* pred_label = list_get(phi->labels, i);
+                    if (!pred_label) continue;
+                    int pred_id = parse_block_id(pred_label);
+                    if (pred_id < 0 || pred_id > max_block_id) continue;
+                    int pred_end = block_edge_idx[pred_id];
+                    /* Back edge: the predecessor appears later in linear order */
+                    if (pred_end > hdr_start && pred_end > backedge_end)
+                        backedge_end = pred_end;
+                }
+            }
+            if (backedge_end < 0) continue; /* not a loop header */
+
+            /* Extend values used in the header that were defined BEFORE the header */
+            for (int pass = 0; pass < 2; pass++) {
+                List* lst = (pass == 0) ? hdr->phis : hdr->instrs;
+                if (!lst) continue;
+                for (Iter iit = list_iter(lst); !iter_end(iit);) {
+                    Instr* ins = iter_next(&iit);
+                    if (!ins || !ins->args) continue;
+                    for (int j = 0; j < ins->args->len; j++) {
+                        ValueName* pv = list_get(ins->args, j);
+                        if (!pv || *pv <= 0 || *pv >= kMaxValue) continue;
+                        int iv_idx = val_to_iv[*pv];
+                        if (iv_idx < 0) continue;
+                        LiveInterval* iv = &lsc->intervals[iv_idx];
+                        /* Only extend values defined before this loop header */
+                        if (iv->start < hdr_start && iv->end < backedge_end)
+                            iv->end = backedge_end;
+                    }
+                }
+            }
+        }
+        free(block_start_idx_arr);
+    }
+
     free(val_to_iv);
     free(block_edge_idx);
 }
@@ -354,6 +443,7 @@ static bool interval_fits_regs(LinearScanContext* lsc, int start_reg, int size, 
 
     for (int i = 0; i < size; i++) {
         int reg = start_reg + i;
+        if (reg >= 8) return false;
         if (lsc->active_regs[reg] >= 0 && lsc->active_reg_end[reg] >= current_start) {
             return false;
         }
@@ -364,7 +454,7 @@ static bool interval_fits_regs(LinearScanContext* lsc, int start_reg, int size, 
 static void occupy_interval_regs(LinearScanContext* lsc, LiveInterval* interval, int start_reg) {
     if (!lsc || !interval || start_reg < 0) return;
     interval->reg = start_reg;
-    for (int i = 0; i < interval->size && start_reg + i <= k_temp_reg_max; i++) {
+    for (int i = 0; i < interval->size && start_reg + i < 8; i++) {
         lsc->active_regs[start_reg + i] = interval->val;
         lsc->active_reg_end[start_reg + i] = interval->end;
     }
@@ -395,8 +485,20 @@ static bool interval_crosses_call(Func* func, int start, int end) {
                 Instr* ins = iter_next(&it);
                 if (!ins) continue;
 
-                if (instr_idx > start && instr_idx < end && ins->op == IROP_CALL) {
-                    return true;
+                if (instr_idx > start && instr_idx < end) {
+                    /* Direct function calls */
+                    if (ins->op == IROP_CALL) {
+                        return true;
+                    }
+                    /* DIV/MOD/MUL on integers wider than 1 byte
+                     * are lowered to LCALL runtime helpers (?C?SIDIV etc.)
+                     * which clobber R0-R7, so treat them like calls. */
+                    if (ins->op == IROP_DIV || ins->op == IROP_MOD || ins->op == IROP_MUL) {
+                        int op_size = ins->type ? c51_abi_type_size(ins->type) : 1;
+                        if (op_size > 1) {
+                            return true;
+                        }
+                    }
                 }
 
                 instr_idx++;
@@ -414,16 +516,15 @@ static const char* ensure_local_value_symbol(C51GenContext* genctx, const char* 
     if (use_kind == SEC_IDATA) sec_name = "?ID?";
     else if (use_kind == SEC_XDATA) sec_name = "?XD?";
 
-    int sec_idx = obj_add_section(genctx->obj, sec_name, use_kind, 0, 1);
+    /* Reuse existing section to avoid creating multiple IDATA sections per ObjFile.
+     * The linker's ensure_out_section reserves the first 40 bytes of the merged
+     * IDATA section (covering register bank 0x00-0x07, stack 0x08-0x0F,
+     * available 0x10-0x1F, DIV/MUL scratch 0x20-0x27).
+     * Per-ObjFile sections start at offset 0 within the ObjFile; the linker
+     * adds the output-section base (40) when mapping symbols to final addresses.
+     * Therefore we do NOT add any padding here -- it would double-count. */
+    int sec_idx = obj_find_or_add_section(genctx->obj, sec_name, use_kind, 1);
     Section* sec = obj_get_section(genctx->obj, sec_idx);
-    /* 8051 IRAM 0x00-0x07 are physical register bank 0 (R0-R7).
-     * 0x08-0x0F are used by the hardware stack (SP=0x07, first LCALL
-     * writes 0x08-0x09).  Reserve the first 16 bytes so that IDATA
-     * spill slots start at 0x10+, avoiding both the register file and
-     * the call stack. */
-    if (use_kind == SEC_IDATA && sec && sec->size < 16) {
-        section_append_zeros(sec, 16 - sec->size);
-    }
     int offset = sec->size;
     section_append_zeros(sec, size);
     obj_add_symbol(genctx->obj, name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_LOCAL);
@@ -433,6 +534,7 @@ static const char* ensure_local_value_symbol(C51GenContext* genctx, const char* 
 /* 执行线性扫描寄存器分配 */
 void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
     if (!lsc || !genctx) return;
+    int dbg = getenv("C51CC_REGDEBUG") != NULL;
     
     /* 创建排序数组 */
     lsc->sorted_intervals = malloc(sizeof(int) * lsc->interval_count);
@@ -512,15 +614,32 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
         /* 返回值寄存器保护：如果是函数返回值，生命周期内禁止分配R7/R6�?*/
         // TODO: 可根据函数返回类型进一步保护R7/R6/R5/R4�?
 
-        bool force_spill = false;
+        bool crosses_call = false;
         if (genctx && genctx->current_func && interval->size <= 2) {
-            force_spill = interval_crosses_call(genctx->current_func, interval->start, interval->end);
+            crosses_call = interval_crosses_call(genctx->current_func, interval->start, interval->end);
         }
+        /* Values that cross a call must be spilled: all R0-R7 are clobbered
+         * by LCALL/runtime helpers. There is no callee-save in C51 ABI. */
+        bool force_spill = crosses_call;
 
-        /* 尝试分配寄存器：按Keil约定优先使用R0-R5 */
+        /* Attempt register allocation.
+         * Priority: R0-R5 first (non-ABI temps), then R6-R7 when no call crossing.
+         * For 2-byte (int) values, R6:R7 are the canonical pair but we need them
+         * for the current function's return value - still allocate here and let
+         * the caller handle the move at RET if needed. */
         bool allocated = false;
         if (!force_spill) {
-            for (int r = k_temp_reg_min; r <= k_temp_reg_max; r++) {
+            /* First try R0-R5 (prefer lower regs to leave R6/R7 for return) */
+            int max_r = (crosses_call) ? C51_TEMP_REG_MAX_NOCALL : k_temp_reg_max;
+            if (dbg) {
+                fprintf(stderr, "  [linscan] v%d start=%d end=%d size=%d crosses_call=%d force_spill=%d\n",
+                        interval->val, interval->start, interval->end, interval->size, (int)crosses_call, (int)force_spill);
+                for (int rr = 0; rr < 8; rr++) {
+                    if (lsc->active_regs[rr] >= 0)
+                        fprintf(stderr, "    active_regs[R%d]=v%d end=%d\n", rr, lsc->active_regs[rr], lsc->active_reg_end[rr]);
+                }
+            }
+            for (int r = k_temp_reg_min; r <= max_r; r++) {
                 if (!interval_fits_regs(lsc, r, interval->size, interval->start)) continue;
                 occupy_interval_regs(lsc, interval, r);
                 allocated = true;
@@ -573,6 +692,10 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                      * emit_addr() during code generation and maps ptr values
                      * to sbit/SFR names.  Writing "__spill_N" there would
                      * corrupt sbit name lookups (e.g. get_sbit_var_name). */
+                    if (dbg) {
+                        fprintf(stderr, "  [spill] v%d -> %s (start=%d end=%d reuse=%d)\n",
+                                interval->val, slot_name, interval->start, interval->end, slot_index >= 0 ? slot_index : -1);
+                    }
                     char* key2 = int_to_key(interval->val);
                     dict_put(genctx->value_to_spill, key2, strdup(slot_name));
 
@@ -691,7 +814,10 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                     if (src_iv < 0) continue;
                     int src_reg = lsc->intervals[src_iv].reg;
                     if (src_reg == dst_reg) continue;              /* already same */
-                    if (src_reg < 0 || src_reg == SPILL_REG) continue; /* spilled */
+                    if (src_reg < 0 && src_reg != SPILL_REG) continue; /* no interval (but allow SPILL_REG = -3) */
+                    /* Allow coalescing even if src is spilled (src_reg == SPILL_REG):
+                     * if the phi dst has a register and src is spilled, we can
+                     * rebind src to dst_reg to eliminate the spill. */
                     if (lsc->intervals[src_iv].size != dst_size) continue; /* size mismatch */
 
                     /* Check: does rebinding src to dst_reg cause any conflict?
@@ -724,18 +850,84 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                     }
 
                     if (!conflict) {
-                        /* Safe to rebind: change src_val's register to dst_reg */
+                        /* Safe to rebind: change src_val's register to dst_reg.
+                         * If src was spilled, also remove its spill slot mapping. */
+                        bool was_spilled = (lsc->intervals[src_iv].reg == SPILL_REG);
                         lsc->intervals[src_iv].reg = dst_reg;
+                        lsc->intervals[src_iv].spill_slot = -1;
                         /* Also update value_to_reg dict */
                         char* k = int_to_key(src_val);
                         int* rp = malloc(sizeof(int));
                         *rp = dst_reg;
                         dict_put(genctx->value_to_reg, k, rp);
+                        /* If it was spilled, also remove it from value_to_spill */
+                        if (was_spilled && genctx->value_to_spill) {
+                            char* ks = int_to_key(src_val);
+                            dict_put(genctx->value_to_spill, ks, NULL);
+                        }
                     }
                 }
             }
         }
         free(val_iv_map);
+    }
+
+    /* ============================================================
+     * Second-pass allocation: after phi coalescing some intervals
+     * may have been merged, freeing up registers.  Try to allocate
+     * any remaining SPILL intervals using a conflict-graph check
+     * (check all other non-SPILL intervals for overlap).
+     * ============================================================ */
+    for (int i = 0; i < lsc->interval_count; i++) {
+        LiveInterval* iv = &lsc->intervals[i];
+        if (iv->reg != SPILL_REG) continue;
+        if (iv->is_param) continue;
+        /* Skip intervals that cross a function call: the call would clobber
+         * any register we assign (C51 has no callee-saved registers). */
+        if (genctx && genctx->current_func &&
+            interval_crosses_call(genctx->current_func, iv->start, iv->end)) continue;
+        if (iv->size <= 0 || iv->size > 8) continue;
+
+        /* Build a bitmask of registers that conflict with this interval */
+        bool reg_busy[8] = {false};
+        for (int j = 0; j < lsc->interval_count; j++) {
+            if (j == i) continue;
+            LiveInterval* other = &lsc->intervals[j];
+            if (other->reg < 0 || other->reg == SPILL_REG) continue;
+            /* Check interval overlap: use non-strict (<=) inequality so that
+             * an interval ending at X and one starting at X do NOT conflict
+             * (the first value is fully consumed before the second is produced
+             * in the same instruction position). */
+            if (other->end <= iv->start || other->start >= iv->end) continue;
+            /* Mark the registers occupied by 'other' as busy */
+            for (int ri = 0; ri < other->size && other->reg + ri < 8; ri++) {
+                reg_busy[other->reg + ri] = true;
+            }
+        }
+
+        /* Try to find a free register slot */
+        for (int r = k_temp_reg_min; r <= k_temp_reg_max; r++) {
+            if (r + iv->size - 1 > k_temp_reg_max) break;
+            bool ok = true;
+            for (int ri = 0; ri < iv->size; ri++) {
+                if (reg_busy[r + ri]) { ok = false; break; }
+            }
+            if (!ok) continue;
+            /* Assign this register */
+            iv->reg = r;
+            iv->spill_slot = -1;
+            /* Update value_to_reg */
+            char* k = int_to_key(iv->val);
+            int* rp = malloc(sizeof(int));
+            *rp = r;
+            dict_put(genctx->value_to_reg, k, rp);
+            /* Remove spill mapping */
+            if (genctx->value_to_spill) {
+                char* ks = int_to_key(iv->val);
+                dict_put(genctx->value_to_spill, ks, NULL);
+            }
+            break;
+        }
     }
 
     /* DEBUG: print interval allocations */
@@ -900,14 +1092,9 @@ static void spill_param_to_memory(C51GenContext* gen, Func* f,
         const char* sec_name = "?DT?";
         if (use_kind == SEC_IDATA) sec_name = "?ID?";
         else if (use_kind == SEC_XDATA) sec_name = "?XD?";
-        int sec_idx = obj_add_section(gen->obj, sec_name, use_kind, 0, 1);
+        /* Reuse existing section (linker handles the 40-byte IDATA reserve). */
+        int sec_idx = obj_find_or_add_section(gen->obj, sec_name, use_kind, 1);
         Section* sec = obj_get_section(gen->obj, sec_idx);
-        /* Reserve 16 bytes at the start of each IDATA segment so the
-         * __param_ symbol does not land in the register bank (0x00-0x07)
-         * or the call-stack area (0x08-0x0F). */
-        if (use_kind == SEC_IDATA && sec && sec->size < 16) {
-            section_append_zeros(sec, 16 - sec->size);
-        }
         int offset = sec->size;
         section_append_zeros(sec, size);
         obj_add_symbol(gen->obj, name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_LOCAL);

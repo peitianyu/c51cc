@@ -39,5 +39,6 @@ u16 gep_store_then_load(u8 idx, u8 x) {
 
 int main()
 {
-    return 0;
+    return ret_widen(42) + call_widen(42) + store_then_load_global(42) + store_then_load_global(127) +
+           ptr_store_then_load(42) + ptr_store_then_load(127) + gep_store_then_load(0, 42) + gep_store_then_load(1, 127);
 }

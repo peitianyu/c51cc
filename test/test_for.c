@@ -9,5 +9,5 @@ int sum_for(int n) {
 
 int main()
 {
-    return 0;
+    return sum_for(10);
 }

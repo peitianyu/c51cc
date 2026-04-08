@@ -999,7 +999,7 @@ static void init_arith_table(void)
     T(CTYPE_BOOL,   CTYPE_FLOAT,  ctype_float);
     T(CTYPE_BOOL,   CTYPE_DOUBLE, ctype_double);
 
-    T(CTYPE_CHAR,   CTYPE_CHAR,   ctype_char);
+    T(CTYPE_CHAR,   CTYPE_CHAR,   ctype_int);   /* C integer promotion: char+char→int */
     T(CTYPE_CHAR,   CTYPE_INT,    ctype_int);
     T(CTYPE_CHAR,   CTYPE_LONG,   ctype_long);
     T(CTYPE_CHAR,   CTYPE_FLOAT,  ctype_float);

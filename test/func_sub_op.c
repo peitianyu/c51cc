@@ -4,5 +4,5 @@ char sub_op(char a, char b) {
 
 int main()
 {
-    return 0;
+    return sub_op(1, 2) + sub_op(-1, -2) + sub_op(127, 1) + sub_op(-128, -1);
 }

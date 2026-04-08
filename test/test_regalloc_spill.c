@@ -24,5 +24,5 @@ int reg_spill(int a) {
 }
 int main() 
 {
-    return 0;
+    return reg_spill(42);
 }
