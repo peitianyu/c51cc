@@ -198,11 +198,13 @@ static Section *ensure_out_section(ObjFile *out, SectionKind kind)
     int idx = obj_add_section(out, section_default_name(kind), kind, 0, 1);
     Section *sec = obj_get_section(out, idx);
     /* 8051 IRAM 0x00-0x07 are occupied by register bank 0 (R0-R7).
-     * Reserve the first 8 bytes of the IDATA section so that all symbols
-     * placed in IDATA (spill slots, idata globals) start at 0x08 or later,
-     * avoiding aliasing with the physical register file. */
+     * 0x08-0x0F are used by the hardware stack (SP initialised to 0x07,
+     * each LCALL pushes 2 bytes, so the first call uses 0x08-0x09).
+     * Reserve the first 16 bytes so that all symbols placed in IDATA
+     * (spill slots, __param_ slots, idata globals) start at 0x10 or later,
+     * avoiding aliasing with the register file and the call stack. */
     if (kind == SEC_IDATA && sec && sec->bytes_len == 0) {
-        section_append_zeros(sec, 8);
+        section_append_zeros(sec, 16);
     }
     return sec;
 }

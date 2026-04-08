@@ -1601,63 +1601,55 @@ static void emit_signed_cmp16_result(ISelContext* isel, Instr* ins, int dst_reg,
 
 static void emit_signed_cmp8_branch(ISelContext* isel, Instr* ins, ValueName lhs, ValueName rhs,
                                     int cmp_type, int true_id, int false_id) {
-    char target_t[32], target_f[32];
-    block_label_name(target_t, sizeof(target_t), true_id);
-    block_label_name(target_f, sizeof(target_f), false_id);
-
-    char* l_same = isel_new_label(isel, "Lscmp_same_tmp");
-    char lb_same[64];
-    snprintf(lb_same, sizeof(lb_same), "%s:", l_same);
-
+    /* Use the same XOR sign-flip trick as emit_signed_cmp8_result to avoid
+     * emitting two separate code paths that each call emit_phi_copies_for_edge.
+     * Calling emit_phi_copies_for_edge twice for the same edge can produce
+     * inconsistent code when isel_reload_spill has a side-effect on the first
+     * call that changes the allocation state seen by the second call.
+     *
+     * Strategy (a = lhs, b = rhs):
+     *   LT (a <  b): CLR C;  A = (a^80)-(b^80);   JC  true  (borrow → a < b)
+     *   GE (a >= b): CLR C;  A = (a^80)-(b^80);   JNC true
+     *   LE (a <= b): SETB C; A = (a^80)-(b^80)-1; JC  true  (borrow → a <= b)
+     *   GT (a >  b): SETB C; A = (a^80)-(b^80)-1; JNC true
+     */
     const char* llo = isel_get_lo_reg(isel, lhs);
-    const char* rlo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, rhs));
+    const char* rlo_raw = isel_get_lo_reg(isel, rhs);
 
-    emit_mov(isel, "A", llo, ins);
-    isel_emit(isel, "XRL", "A", rlo, NULL);
-    isel_emit(isel, "ANL", "A", "#128", NULL);
-    isel_emit(isel, "JZ", l_same, NULL, NULL);
+    bool set_carry = (cmp_type == SIGNED_CMP_LE || cmp_type == SIGNED_CMP_GT);
+    isel_emit(isel, set_carry ? "SETB" : "CLR", "C", NULL, NULL);
 
-    emit_mov(isel, "A", llo, NULL);
-    isel_emit(isel, "ANL", "A", "#128", NULL);
-    switch (cmp_type) {
-        case SIGNED_CMP_LT:
-        case SIGNED_CMP_LE:
-            {
-                char* ssa = instr_to_ssa_str(ins);
-                emit_far_cond_jump1(isel, "JNZ", true_id, false_id, ins, ssa);
-                free(ssa);
-            }
-            break;
-        case SIGNED_CMP_GT:
-        case SIGNED_CMP_GE:
-            {
-                char* ssa = instr_to_ssa_str(ins);
-                emit_far_cond_jump1(isel, "JZ", true_id, false_id, ins, ssa);
-                free(ssa);
-            }
-            break;
+    if (rlo_raw && rlo_raw[0] == '#') {
+        /* Immediate rhs: fold XOR into the constant */
+        int v = (int)strtol(rlo_raw + 1, NULL, 0);
+        char rlo_xored[32];
+        snprintf(rlo_xored, sizeof(rlo_xored), "#%d", (v ^ 0x80) & 0xFF);
+        emit_mov(isel, "A", llo, ins);
+        isel_emit(isel, "XRL", "A", "#128", NULL);
+        isel_emit(isel, "SUBB", "A", rlo_xored, NULL);
+    } else {
+        /* Register/memory rhs: compute rhs^0x80 into B register as scratch.
+         * We must NOT use alloc_temp_reg here because it may assign a register
+         * that overlaps with a live phi-source variable (e.g. v22 in R1:R0),
+         * which would corrupt its value before emit_phi_copies_for_edge reads it. */
+        emit_mov(isel, "A", rlo_raw, NULL);
+        isel_emit(isel, "XRL", "A", "#128", NULL);
+        isel_emit(isel, "MOV", "B", "A", NULL);
+        emit_mov(isel, "A", llo, ins);
+        isel_emit(isel, "XRL", "A", "#128", NULL);
+        isel_emit(isel, "SUBB", "A", "B", NULL);
     }
 
-    isel_emit_label(isel, l_same);
-    isel_emit(isel, "CLR", "C", NULL, NULL);
-    emit_mov(isel, "A", llo, NULL);
-    isel_emit(isel, "SUBB", "A", rlo, NULL);
-    switch (cmp_type) {
-        case SIGNED_CMP_LT:
-            emit_far_cond_jump1(isel, "JC", true_id, false_id, ins, NULL);
-            break;
-        case SIGNED_CMP_GT:
-            emit_far_cond_jump2_same(isel, "JC", "JZ", false_id, true_id, ins, NULL);
-            break;
-        case SIGNED_CMP_LE:
-            emit_far_cond_jump2_same(isel, "JC", "JZ", true_id, false_id, ins, NULL);
-            break;
-        case SIGNED_CMP_GE:
-            emit_far_cond_jump1(isel, "JC", false_id, true_id, ins, NULL);
-            break;
+    /* carry set ↔ a < b (after sign-flip, unsigned).
+     * For SETB C case carry also absorbs the -1, making it ↔ a <= b. */
+    bool jump_c_taken = (cmp_type == SIGNED_CMP_LT || cmp_type == SIGNED_CMP_LE);
+    char* ssa = instr_to_ssa_str(ins);
+    if (jump_c_taken) {
+        emit_far_cond_jump1(isel, "JC", true_id, false_id, ins, ssa);
+    } else {
+        emit_far_cond_jump1(isel, "JNC", true_id, false_id, ins, ssa);
     }
-
-    free(l_same);
+    free(ssa);
 }
 
 /* Emit signed 16-bit comparison branch using sign-bit XOR trick (Keil style).
@@ -1676,7 +1668,10 @@ static void emit_signed_cmp16_branch(ISelContext* isel, Instr* ins, ValueName lh
     int64_t rhs_const = 0;
     const char* rhi_raw;
     const char* rlo_raw;
-    if (try_get_value_const(isel, rhs, &rhs_const)) {
+    bool rhs_is_imm = is_imm_operand(ins, &rhs_const);
+    bool rhs_is_const = try_get_value_const(isel, rhs, &rhs_const);
+
+    if (rhs_is_imm || rhs_is_const) {
         uint16_t rv = (uint16_t)((int16_t)rhs_const);
         snprintf(rlo_imm_buf, sizeof(rlo_imm_buf), "#%d", (int)(rv & 0xFF));
         snprintf(rhi_imm_buf, sizeof(rhi_imm_buf), "#%d", (int)((rv >> 8) & 0xFF));

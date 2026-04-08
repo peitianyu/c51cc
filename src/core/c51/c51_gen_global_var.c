@@ -143,9 +143,11 @@ void handle_normal_global_var(C51GenContext *ctx, GlobalVar *g)
     Section *sec = obj_get_section(ctx->obj, sec_idx);
 
     /* 8051 IRAM 0x00-0x07 are occupied by register bank 0 (R0-R7).
-     * Reserve the first 8 bytes so no IDATA variable aliases a register. */
-    if (kind == SEC_IDATA && sec && sec->size < 8) {
-        section_append_zeros(sec, 8 - sec->size);
+     * 0x08-0x0F are used by the call stack (SP starts at 0x07).
+     * Reserve the first 16 bytes so no IDATA variable aliases a register
+     * or a stack frame pushed by LCALL. */
+    if (kind == SEC_IDATA && sec && sec->size < 16) {
+        section_append_zeros(sec, 16 - sec->size);
     }
 
     unsigned int offset = sec->size;

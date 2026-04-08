@@ -282,10 +282,13 @@ static bool instr_reads_acc(AsmInstr* ins) {
     if (!ins || !ins->op) return false;
     /* Instructions that always read A: ALU ops with A as source */
     const char* op = ins->op;
-    /* MOV: reads A only if src is A (e.g. MOV Rx, A) */
+    /* MOV: reads A only if src is A (e.g. MOV Rx, A) or src is ACC.x bit (e.g. MOV C, ACC.7) */
     if (strcmp(op, "MOV") == 0) {
         const char* src = get_operand(ins, 1);
-        return src && operands_equal(src, "A");
+        if (src && operands_equal(src, "A")) return true;
+        /* MOV C, ACC.x — bit addressing reads A */
+        if (src && strncmp(src, "ACC.", 4) == 0) return true;
+        return false;
     }
     /* Arithmetic/logic with A as implicit source */
     if (strcmp(op, "ADD") == 0 || strcmp(op, "ADDC") == 0 ||

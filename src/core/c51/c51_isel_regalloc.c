@@ -417,10 +417,12 @@ static const char* ensure_local_value_symbol(C51GenContext* genctx, const char* 
     int sec_idx = obj_add_section(genctx->obj, sec_name, use_kind, 0, 1);
     Section* sec = obj_get_section(genctx->obj, sec_idx);
     /* 8051 IRAM 0x00-0x07 are physical register bank 0 (R0-R7).
-     * Reserve the first 8 bytes so that IDATA spill slots start at 0x08+,
-     * preventing aliasing with the register file. */
-    if (use_kind == SEC_IDATA && sec && sec->size < 8) {
-        section_append_zeros(sec, 8 - sec->size);
+     * 0x08-0x0F are used by the hardware stack (SP=0x07, first LCALL
+     * writes 0x08-0x09).  Reserve the first 16 bytes so that IDATA
+     * spill slots start at 0x10+, avoiding both the register file and
+     * the call stack. */
+    if (use_kind == SEC_IDATA && sec && sec->size < 16) {
+        section_append_zeros(sec, 16 - sec->size);
     }
     int offset = sec->size;
     section_append_zeros(sec, size);
@@ -682,6 +684,9 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                     if (!psrc || *psrc <= 0 || *psrc >= kMaxVal) continue;
                     int src_val = *psrc;
 
+                    Instr* src_def = find_def_instr_in_func(coalesce_func, src_val);
+                    if (src_def && src_def->op == IROP_PARAM) continue;
+
                     int src_iv = val_iv_map[src_val];
                     if (src_iv < 0) continue;
                     int src_reg = lsc->intervals[src_iv].reg;
@@ -897,6 +902,12 @@ static void spill_param_to_memory(C51GenContext* gen, Func* f,
         else if (use_kind == SEC_XDATA) sec_name = "?XD?";
         int sec_idx = obj_add_section(gen->obj, sec_name, use_kind, 0, 1);
         Section* sec = obj_get_section(gen->obj, sec_idx);
+        /* Reserve 16 bytes at the start of each IDATA segment so the
+         * __param_ symbol does not land in the register bank (0x00-0x07)
+         * or the call-stack area (0x08-0x0F). */
+        if (use_kind == SEC_IDATA && sec && sec->size < 16) {
+            section_append_zeros(sec, 16 - sec->size);
+        }
         int offset = sec->size;
         section_append_zeros(sec, size);
         obj_add_symbol(gen->obj, name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_LOCAL);

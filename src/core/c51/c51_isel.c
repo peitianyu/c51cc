@@ -146,6 +146,18 @@ const char* isel_get_lo_reg(ISelContext* isel, ValueName val) {
 }
 
 const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
+    {
+        int64_t imm_val = 0;
+        if (try_get_value_const(isel, val, &imm_val)) {
+            static char imm_bufs[4][20];
+            static int  imm_buf_idx = 0;
+            char* buf = imm_bufs[imm_buf_idx & 3];
+            imm_buf_idx++;
+            snprintf(buf, 20, "#%d", (int)((imm_val >> 8) & 0xFF));
+            return buf;
+        }
+    }
+
     int base_reg = isel_get_value_reg(isel, val);
     int size = get_value_size(isel, val);
     if (base_reg == SPILL_REG) {

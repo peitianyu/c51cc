@@ -103,6 +103,7 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
     Block* succ = find_block_by_id(f, succ_id);
     if (!succ || !succ->phis) return;
 
+
     RegMove moves[64];
     int move_count = 0;
     char pred_label[32];
@@ -144,9 +145,15 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
         if (dst_size > size) size = dst_size;
         if (size < 1) size = 1;
 
+        int copy_size = size;
+        if (dst_size > 0 && dst_size < copy_size) copy_size = dst_size;
+        if (src_size > copy_size) copy_size = src_size;
+        if (copy_size < 1) copy_size = 1;
+
         int dst_base = isel_get_value_reg(isel, dst);
-        if (dst_base >= 0 && dst_base + size - 1 > 7) {
-            dst_base = rebind_phi_dest_reg(isel, dst, size, moves, move_count);
+
+        if (dst_base >= 0 && dst_base + copy_size - 1 > 7) {
+            dst_base = rebind_phi_dest_reg(isel, dst, copy_size, moves, move_count);
         }
 
         if (dst_base < 0) {
@@ -157,21 +164,28 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
                 dst_sym = (const char*)dict_get(isel->ctx->value_to_spill, spill_key);
                 free(spill_key);
             }
-            if (!dst_sym) continue;
+            if (!dst_sym) {
+                int alloc_size = dst_size > 0 ? dst_size : copy_size;
+                dst_base = alloc_reg_for_value(isel, dst, alloc_size);
+            }
 
-            Instr* src_def = find_def_instr_in_func(f, src);
-            if (src_def && src_def->op == IROP_CONST) {
-                int imm = (int)(src_def->imm.ival & 0xFFFF);
-                emit_store_symbol_imm_byte(isel, dst_sym, 0, imm & 0xFF, ins);
-                if (size >= 2) emit_store_symbol_imm_byte(isel, dst_sym, 1, (imm >> 8) & 0xFF, NULL);
+            if (dst_base < 0) {
+                if (!dst_sym) continue;
+
+                Instr* src_def = find_def_instr_in_func(f, src);
+                if (src_def && src_def->op == IROP_CONST) {
+                    int imm = (int)(src_def->imm.ival & 0xFFFF);
+                    emit_store_symbol_imm_byte(isel, dst_sym, 0, imm & 0xFF, ins);
+                    if (copy_size >= 2) emit_store_symbol_imm_byte(isel, dst_sym, 1, (imm >> 8) & 0xFF, NULL);
+                    continue;
+                }
+
+                emit_store_symbol_byte(isel, dst_sym, 0, isel_get_lo_reg(isel, src), ins);
+                if (copy_size >= 2) {
+                    emit_store_symbol_byte(isel, dst_sym, 1, phi_zero_extended_hi(isel, src), NULL);
+                }
                 continue;
             }
-
-            emit_store_symbol_byte(isel, dst_sym, 0, isel_get_lo_reg(isel, src), ins);
-            if (size >= 2) {
-                emit_store_symbol_byte(isel, dst_sym, 1, phi_zero_extended_hi(isel, src), NULL);
-            }
-            continue;
         }
 
         Instr* src_def = find_def_instr_in_func(f, src);
@@ -179,8 +193,8 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
             int imm = (int)(src_def->imm.ival & 0xFFFF);
             char imm_lo[32];
             snprintf(imm_lo, sizeof(imm_lo), "#%d", imm & 0xFF);
-            emit_mov(isel, isel_reg_name(dst_base + (size == 2 ? 1 : 0)), imm_lo, ins);
-            if (size == 2) {
+            emit_mov(isel, isel_reg_name(dst_base + (copy_size == 2 ? 1 : 0)), imm_lo, ins);
+            if (copy_size == 2) {
                 char imm_hi[32];
                 snprintf(imm_hi, sizeof(imm_hi), "#%d", (imm >> 8) & 0xFF);
                 emit_mov(isel, isel_reg_name(dst_base), imm_hi, NULL);
@@ -188,8 +202,9 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
             continue;
         }
 
-        const char* dst_lo = isel_reg_name(dst_base + (size == 2 ? 1 : 0));
+        const char* dst_lo = isel_reg_name(dst_base + (copy_size == 2 ? 1 : 0));
         const char* src_lo = isel_get_lo_reg(isel, src);
+
         int src_lo_reg = reg_index_from_name(src_lo);
         int dst_lo_reg = reg_index_from_name(dst_lo);
 
@@ -212,7 +227,7 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
             }
         }
 
-        if (size == 2) {
+        if (copy_size == 2) {
             const char* dst_hi = isel_reg_name(dst_base);
             const char* src_hi = isel_get_hi_reg(isel, src);
             int src_hi_reg = reg_index_from_name(src_hi);
@@ -1148,6 +1163,71 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
         ? *(ValueName*)list_get(ins->args, 0)
         : -1;
     Func* callee_func = indirect ? NULL : find_direct_callee(isel, fname);
+
+    /* ── Pre-pass: simulate callee's alloc_param_regs to detect which params
+       will be spilled to memory (__param_<fname>_<pos>) due to register
+       conflicts.  The caller must mirror that decision so it passes those
+       arguments via memory rather than the (conflicting) register pair. ── */
+    int total_args = ins->args ? (ins->args->len - arg_start) : 0;
+#define MAX_CALL_PARAMS 32
+    bool param_should_spill[MAX_CALL_PARAMS];
+    int  param_size_arr[MAX_CALL_PARAMS];
+    for (int i = 0; i < MAX_CALL_PARAMS; i++) { param_should_spill[i] = false; param_size_arr[i] = 1; }
+
+    if (callee_func && callee_func->param_types && total_args > 0) {
+        bool sim_used[8] = {false};
+        int sim_s1 = 0, sim_s2 = 0, sim_s3 = 0, sim_s4 = 0;
+        int n_params = callee_func->param_types->len;
+        for (int pi = 0; pi < n_params && pi < MAX_CALL_PARAMS; pi++) {
+            Ctype* pt = list_get(callee_func->param_types, pi);
+            if (!pt) continue;
+            int sz = c51_abi_type_size(pt);
+            param_size_arr[pi] = sz;
+            int ci = 0;
+            if      (sz == 1) ci = sim_s1;
+            else if (sz == 2) ci = sim_s2;
+            else if (sz == 3) ci = sim_s3;
+            else if (sz == 4) ci = sim_s4;
+
+            /* Get the register set this param would occupy */
+            int regs[4]; int rcnt = 0;
+            bool has = (sz == 1 && ci < 3) || (sz == 2 && ci < 3) || (sz == 3 && ci == 0) || (sz == 4 && ci == 0);
+            if (has) {
+                if (sz == 1) {
+                    /* regs_size1 = {7,5,3} */
+                    static const int rs1[] = {7,5,3};
+                    regs[0] = rs1[ci]; rcnt = 1;
+                } else if (sz == 2) {
+                    /* regs_size2_high={6,4,2}, regs_size2_low={7,5,3} */
+                    static const int rsh[] = {6,4,2};
+                    static const int rsl[] = {7,5,3};
+                    regs[0] = rsh[ci]; regs[1] = rsl[ci]; rcnt = 2;
+                } else if (sz == 3) {
+                    /* regs_size3 = {4,5,6,7} first 3 */
+                    regs[0]=4; regs[1]=5; regs[2]=6; rcnt=3;
+                } else if (sz == 4) {
+                    regs[0]=4; regs[1]=5; regs[2]=6; regs[3]=7; rcnt=4;
+                }
+            }
+
+            bool conflict = !has;
+            for (int ri = 0; ri < rcnt && !conflict; ri++) {
+                if (sim_used[regs[ri]]) conflict = true;
+            }
+
+            if (conflict) {
+                param_should_spill[pi] = true;
+            } else {
+                for (int ri = 0; ri < rcnt; ri++) sim_used[regs[ri]] = true;
+            }
+
+            if      (sz == 1) sim_s1++;
+            else if (sz == 2) sim_s2++;
+            else if (sz == 3) sim_s3++;
+            else if (sz == 4) sim_s4++;
+        }
+    }
+
     int size1_index = 0;
     int size2_index = 0;
     int size3_index = 0;
@@ -1173,6 +1253,38 @@ void emit_call_instr(ISelContext* isel, Instr* ins, Instr* next) {
         if (size <= 0) {
             size = t ? c51_abi_type_size(t) : 1;
         }
+
+        /* If the callee will receive this param via memory, the caller must
+           store it to __param_<fname>_<param_pos> directly, bypassing the
+           normal register-class assignment. */
+        if (param_pos < MAX_CALL_PARAMS && param_should_spill[param_pos]) {
+            /* Store directly to the callee's memory slot */
+            char sym[128];
+            snprintf(sym, sizeof(sym), "__param_%s_%d", fname, param_pos);
+            int64_t imm_val = 0;
+            if (size == 1) {
+                if (try_get_value_const(isel, v, &imm_val)) {
+                    emit_store_symbol_imm_byte(isel, sym, 0, (int)(imm_val & 0xFF), ins);
+                } else {
+                    const char* src_lo = isel_get_lo_reg(isel, v);
+                    if (src_lo) emit_store_symbol_byte(isel, sym, 0, src_lo, ins);
+                }
+            } else if (size == 2) {
+                if (try_get_value_const(isel, v, &imm_val)) {
+                    emit_store_symbol_imm_byte(isel, sym, 0, (int)(imm_val & 0xFF), ins);
+                    emit_store_symbol_imm_byte(isel, sym, 1, (int)((imm_val >> 8) & 0xFF), NULL);
+                } else {
+                    const char* src_lo = isel_get_extended_lo_reg(isel, v, 2);
+                    const char* src_hi = isel_get_extended_hi_reg(isel, v, 2);
+                    if (src_lo) emit_store_symbol_byte(isel, sym, 0, src_lo, ins);
+                    if (src_hi) emit_store_symbol_byte(isel, sym, 1, src_hi, NULL);
+                }
+            }
+            /* Intentionally skip incrementing size*_index since this slot
+               was not assigned a register in the callee. */
+            continue;
+        }
+
         int class_index = 0;
         if (size == 1) {
             class_index = size1_index++;
@@ -1273,9 +1385,25 @@ void emit_ret(ISelContext* isel, Instr* ins) {
         }
 
         if (ret_size == 2) {
-            const char* ret_hi = isel_get_extended_hi_reg(isel, ret_val, ret_size);
-            if (ret_hi && strcmp(ret_hi, "R6") != 0) {
-                emit_mov(isel, "R6", ret_hi, ins);
+            int actual_size = get_value_size(isel, ret_val);
+            Ctype* ret_ty = get_value_type(isel, ret_val);
+            bool need_sign_ext = false;
+            if (actual_size == 1 && ret_ty) {
+                CtypeAttr attr = get_attr(ret_ty->attr);
+                need_sign_ext = (!attr.ctype_unsigned && ret_ty->type != CTYPE_BOOL);
+            }
+
+            if (need_sign_ext) {
+                isel_emit(isel, "MOV", "A", "R7", NULL);
+                isel_emit(isel, "MOV", "C", "ACC.7", NULL);
+                isel_emit(isel, "CLR", "A", NULL, NULL);
+                isel_emit(isel, "SUBB", "A", "A", NULL);
+                emit_mov(isel, "R6", "A", NULL);
+            } else {
+                const char* ret_hi = isel_get_extended_hi_reg(isel, ret_val, ret_size);
+                if (ret_hi && strcmp(ret_hi, "R6") != 0) {
+                    emit_mov(isel, "R6", ret_hi, ins);
+                }
             }
         }
     }
