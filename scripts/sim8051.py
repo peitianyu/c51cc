@@ -68,7 +68,7 @@ class CPU8051:
 
     @acc.setter
     def acc(self, v):
-        self.sfr[self.ACC_ADDR] = v & 0xFF
+        self._write_sfr(0xE0, v)
 
     @property
     def b_reg(self):
@@ -88,7 +88,11 @@ class CPU8051:
 
     @property
     def psw(self):
-        return self.sfr[self.PSW_ADDR]
+        return self._read_sfr(0xD0)
+
+    @psw.setter
+    def psw(self, v):
+        self._write_sfr(0xD0, v)
 
     def _set_cy(self, v):
         if v:
@@ -120,10 +124,16 @@ class CPU8051:
 
     # ---------- memory access ----------
     def _read_sfr(self, addr):
+        # Update P flag before returning PSW
+        if addr == 0xD0:
+            self._set_p()
         return self.sfr[addr - 0x80]
 
     def _write_sfr(self, addr, v):
         self.sfr[addr - 0x80] = v & 0xFF
+        # Update P flag after writing ACC or PSW
+        if addr == 0xE0 or addr == 0xD0:
+            self._set_p()
 
     def _read_direct(self, addr):
         if addr < 0x80:
@@ -139,7 +149,7 @@ class CPU8051:
 
     def _read_bit(self, bit_addr):
         if bit_addr < 0x80:
-            byte_addr = bit_addr >> 3
+            byte_addr = 0x20 + (bit_addr >> 3)
             bit_n = bit_addr & 7
             return (self.iram[byte_addr] >> bit_n) & 1
         else:
@@ -149,7 +159,7 @@ class CPU8051:
 
     def _write_bit(self, bit_addr, v):
         if bit_addr < 0x80:
-            byte_addr = bit_addr >> 3
+            byte_addr = 0x20 + (bit_addr >> 3)
             bit_n = bit_addr & 7
             if v:
                 self.iram[byte_addr] |= 1 << bit_n
@@ -528,7 +538,7 @@ class CPU8051:
                 self._set_cy(1)
 
         elif op == 0x73:  # JMP @A+DPTR
-            dptr = (self.sfr[0x82 - 0x80] << 8) | self.sfr[0x83 - 0x80]
+            dptr = (self.sfr[0x83 - 0x80] << 8) | self.sfr[0x82 - 0x80]
             self.pc = (self.acc + dptr) & 0xFFFF
 
         elif op == 0x74:  # MOV A, #imm
@@ -843,7 +853,9 @@ class CPU8051:
 
         elif 0xE2 <= op <= 0xE3:  # MOVX A, @Ri
             ri = self._getr(op - 0xE2)
-            self.acc = self.xram[ri]
+            p2 = self._read_sfr(0xA0)
+            addr = (p2 << 8) | ri
+            self.acc = self.xram[addr]
             self._set_p()
 
         elif op == 0xE4:  # CLR A
@@ -876,7 +888,9 @@ class CPU8051:
 
         elif 0xF2 <= op <= 0xF3:  # MOVX @Ri, A
             ri = self._getr(op - 0xF2)
-            self.xram[ri] = self.acc
+            p2 = self._read_sfr(0xA0)
+            addr = (p2 << 8) | ri
+            self.xram[addr] = self.acc
 
         elif op == 0xF4:  # CPL A
             self.acc = (~self.acc) & 0xFF

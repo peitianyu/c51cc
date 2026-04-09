@@ -48,7 +48,7 @@ typedef struct {
 } SpillSlotInfo;
 
 /* Keil约定下，R6/R7主要承担返回值与参数传递。
- * 不跨call的临时值优先用R0-R5，跨call或压力大时可以用R6/R7。
+ * 不跨call的临时值优先用R0-R7。
  * 这些动态值在linscan_allocate中按需计算。 */
 static const int k_temp_reg_min = C51_ALLOCATABLE_REG_MIN;
 static const int k_temp_reg_max = C51_ALLOCATABLE_REG_MAX;
@@ -575,10 +575,23 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
 
         /* 参数值：它们已经被预先分配到参数约定的寄存器 */
         if (interval->is_param) {
+            bool crosses_call = false;
+            if (genctx && genctx->current_func && interval->size <= 2) {
+                crosses_call = interval_crosses_call(genctx->current_func, interval->start, interval->end);
+            }
+
             char* key = int_to_key(interval->val);
             int* param_reg_ptr = (int*)dict_get(genctx->value_to_reg, key);
             free(key);
-            if (param_reg_ptr) {
+            if (crosses_call) {
+                interval->reg = SPILL_REG;
+                if (genctx && genctx->value_to_reg) {
+                    int* rptr = malloc(sizeof(int));
+                    *rptr = SPILL_REG;
+                    char* spill_key = int_to_key(interval->val);
+                    dict_put(genctx->value_to_reg, spill_key, rptr);
+                }
+            } else if (param_reg_ptr) {
                 int abi_size = interval->size;
                 if (genctx && genctx->value_type) {
                     char* type_key = int_to_key(interval->val);
@@ -821,12 +834,28 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                     if (lsc->intervals[src_iv].size != dst_size) continue; /* size mismatch */
 
                     /* Check: does rebinding src to dst_reg cause any conflict?
-                     * A conflict exists if there is another value (≠ dst_val, ≠ src_val)
-                     * that is assigned to dst_reg and whose live interval overlaps
-                     * src's live interval [src_start, src_end]. */
+                     * A conflict exists if there is another value (≠ src_val)
+                     * whose live interval overlaps src's interval AND uses dst_reg.
+                     *
+                     * NOTE: we must also check dst_val itself: if phi-dst and
+                     * phi-src have overlapping live ranges (common in loops where
+                     * the source is the loop-carried update and the dest is the
+                     * loop variable), coalescing would make them alias the same
+                     * register while both are alive — a correctness bug. */
                     int src_start = lsc->intervals[src_iv].start;
                     int src_end   = lsc->intervals[src_iv].end;
                     bool conflict = false;
+
+                    /* Check dst_val itself: if src and dst live ranges overlap,
+                     * we cannot place src in dst_reg (dst already occupies it). */
+                    {
+                        int dst_start = lsc->intervals[dst_iv].start;
+                        int dst_end   = lsc->intervals[dst_iv].end;
+                        if (dst_end >= src_start && dst_start <= src_end) {
+                            conflict = true;
+                        }
+                    }
+
                     for (int ci = 0; ci < lsc->interval_count && !conflict; ci++) {
                         if (ci == src_iv || ci == dst_iv) continue;
                         LiveInterval* other = &lsc->intervals[ci];
@@ -948,6 +977,7 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
 }
 int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
     if (!isel || !isel->ctx) return -1;
+    const int pressure_reg_max = 7;
 
     /* 首先检查是否已经被线性扫描分配过 */
     int existing = isel_get_value_reg(isel, val);
@@ -974,12 +1004,65 @@ int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {
         return existing;
     }
 
+    /* Secondary check: if linscan assigned this value to a specific register
+     * (stored in value_to_reg dict) but reg_val[] was reset by
+     * prepare_reg_state_for_instr, trust the linscan assignment as long as
+     * that register block is not currently busy with a DIFFERENT value.
+     * This prevents dynamic allocation from picking a lower register (e.g.
+     * R0) that happens to be free at this point but is occupied by a live
+     * value in a different basic block (e.g. the loop variable in R0). */
+    if (isel->ctx->value_to_reg) {
+        char* key2 = int_to_key(val);
+        int* lscan_ptr = (int*)dict_get(isel->ctx->value_to_reg, key2);
+        free(key2);
+        if (lscan_ptr && *lscan_ptr >= 0 && *lscan_ptr + size - 1 <= pressure_reg_max) {
+            int lscan_reg = *lscan_ptr;
+            bool conflicts = false;
+            for (int j = 0; j < size; j++) {
+                int r = lscan_reg + j;
+                if (isel->reg_busy[r] && isel->reg_val[r] != val && isel->reg_val[r] >= 0) {
+                    conflicts = true;
+                    break;
+                }
+            }
+            if (!conflicts) {
+                for (int j = 0; j < size; j++) {
+                    isel->reg_busy[lscan_reg + j] = true;
+                    isel->reg_val[lscan_reg + j] = val;
+                }
+                return lscan_reg;
+            }
+        }
+    }
+
     /* 
      * 如果值还没被分配（existing < 0 且不等于 -2），
      * 尝试在残留的未被占用的寄存器中分�?
      */
     for (int reg = k_temp_reg_min; reg <= k_temp_reg_max; reg++) {
         if (reg + size - 1 > k_temp_reg_max) continue;
+
+        bool available = true;
+        for (int j = 0; j < size; j++) {
+            if (isel->reg_busy[reg + j]) { available = false; break; }
+        }
+
+        if (available) {
+            for (int j = 0; j < size; j++) {
+                isel->reg_busy[reg + j] = true;
+                isel->reg_val[reg + j] = val;
+            }
+
+            int* reg_num = malloc(sizeof(int));
+            *reg_num = reg;
+            char* key = int_to_key(val);
+            dict_put(isel->ctx->value_to_reg, key, reg_num);
+            return reg;
+        }
+    }
+
+    for (int reg = k_temp_reg_max + 1; reg <= pressure_reg_max; reg++) {
+        if (reg + size - 1 > pressure_reg_max) continue;
 
         bool available = true;
         for (int j = 0; j < size; j++) {
@@ -1101,6 +1184,26 @@ static void spill_param_to_memory(C51GenContext* gen, Func* f,
     }
 }
 
+static void ensure_param_shadow_slot(C51GenContext* gen, Func* f,
+                                     Instr* param_ins, int param_pos, int size,
+                                     bool addressable) {
+    if (!gen || !f || !param_ins || size <= 0) return;
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "__arg_%s_%d", f->name, param_pos);
+
+    SectionKind use_kind = gen->spill_section;
+    if (gen->spill_use_xdata_for_large && size > 1) use_kind = SEC_XDATA;
+    ensure_local_value_symbol(gen, buf, size, use_kind);
+
+    char* key = int_to_key(param_ins->dest);
+    if (addressable) {
+        dict_put(gen->value_to_addr, key, strdup(buf));
+    } else {
+        dict_put(gen->value_to_spill, key, strdup(buf));
+    }
+}
+
 /**
  * 为函数参数分配寄存器（遵循Keil C51约定）
  */
@@ -1212,15 +1315,7 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
                     C51GenContext* gen = isel->ctx;
                     char buf[128];
                     snprintf(buf, sizeof(buf), "__arg_%s_%d", f->name, param_pos);
-
-                    SectionKind use_kind = gen->spill_section;
-                    if (gen->spill_use_xdata_for_large && size > 1) {
-                        use_kind = SEC_XDATA;
-                    }
-                    ensure_local_value_symbol(gen, buf, size, use_kind);
-
-                    char* addr_key = int_to_key(param_ins->dest);
-                    dict_put(gen->value_to_addr, addr_key, strdup(buf));
+                    ensure_param_shadow_slot(gen, f, param_ins, param_pos, size, true);
 
                     int* reg_num = malloc(sizeof(int));
                     *reg_num = SPILL_REG;
@@ -1234,6 +1329,17 @@ void alloc_param_regs(ISelContext* isel, Func* f) {
                         emit_store_symbol_byte(isel, buf, 1, isel_reg_name(expected_regs[0]), NULL);
                     }
                 } else {
+                    C51GenContext* gen = isel->ctx;
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "__arg_%s_%d", f->name, param_pos);
+                    ensure_param_shadow_slot(gen, f, param_ins, param_pos, size, false);
+                    if (size == 1) {
+                        emit_store_symbol_byte(isel, buf, 0, isel_reg_name(expected_regs[0]), NULL);
+                    } else {
+                        emit_store_symbol_byte(isel, buf, 0, isel_reg_name(expected_regs[1]), NULL);
+                        emit_store_symbol_byte(isel, buf, 1, isel_reg_name(expected_regs[0]), NULL);
+                    }
+
                     /* No address taken: keep parameter in registers */
                     for (int j = 0; j < reg_count; j++) {
                         int r = expected_regs[j];

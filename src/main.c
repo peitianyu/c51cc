@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
  *   -O0/-O1/-O2 优化级别（默认 O1）
  *   -o <file>   输出到文件（默认 stdout）
  *
- * 若不带任何 flag，则默认等价于 -asm 输出。
+ * 若不带任何 flag，则默认等价于 -hex 输出。
  * --------------------------------------------------------------- */
 
 static void usage(const char *prog) {

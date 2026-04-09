@@ -38,6 +38,16 @@ typedef struct ISelContext {
     /* 标签计数器 */
     int label_counter;
 
+    /* 当前块的线性指令视图，用于前瞻保护短生命周期寄存器值 */
+    Instr** block_instrs;
+    int block_instr_count;
+    int block_instr_pos;
+
+    /* 额外前瞻，用于保护短生命周期但跨过少量指令仍然活跃的寄存器值 */
+    Instr* lookahead_next2;
+    Instr* lookahead_next3;
+    Instr* lookahead_next4;
+
     /* 记录可用的 sbit 分支信息（用于优化 JB/JNB） */
     Dict* br_bitinfo; /* key: Instr* ptr string, value: BrBitInfo* */
 

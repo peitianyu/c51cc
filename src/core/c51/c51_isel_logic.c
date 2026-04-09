@@ -4,12 +4,23 @@
 #include <string.h>
 #include "c51_isel_regalloc.h"
 
+/* Save an operand into the B register so that it can be used as a 'direct'
+ * address operand in CJNE.  The 8051 CJNE instruction only supports:
+ *   CJNE A, #imm, rel
+ *   CJNE A, direct, rel   (B register = SFR 0xF0 is a valid 'direct' address)
+ *   CJNE Rn, #imm, rel
+ *   CJNE @Ri, #imm, rel
+ * There is NO "CJNE A, Rn, rel" form.  Any Rn, spill-symbol, or A operand
+ * that will appear as the second operand of CJNE must be moved into B first. */
 static const char* save_acc_operand_in_b(ISelContext* isel, const char* operand) {
-    if (operand && strcmp(operand, "A") == 0) {
-        isel_emit(isel, "MOV", "B", "A", NULL);
-        return "B";
-    }
-    return operand;
+    if (!operand) return "B";
+    /* Already in B – nothing to do */
+    if (strcmp(operand, "B") == 0) return "B";
+    /* Immediate constants are legal as CJNE A,#imm,rel – no save needed */
+    if (operand[0] == '#') return operand;
+    /* For all other operands (A, R0-R7, IDATA symbols, etc.) load into B */
+    isel_emit(isel, "MOV", "B", operand, NULL);
+    return "B";
 }
 
 static const char* save_acc_operand_for_cmp(ISelContext* isel, const char* operand, int* temp_reg) {
@@ -26,6 +37,18 @@ static const char* save_acc_operand_for_cmp(ISelContext* isel, const char* opera
         return name;
     }
 
+    if (isel) {
+        for (int candidate = 0; candidate < 8; candidate++) {
+            if (isel->reg_busy[candidate]) continue;
+            isel->reg_busy[candidate] = true;
+            isel->reg_val[candidate] = -1;
+            const char* name = isel_reg_name(candidate);
+            emit_mov(isel, name, "A", NULL);
+            if (temp_reg) *temp_reg = candidate;
+            return name;
+        }
+    }
+
     isel_emit(isel, "MOV", "B", "A", NULL);
     return "B";
 }
@@ -38,6 +61,64 @@ static void free_saved_cmp_operand(ISelContext* isel, int temp_reg) {
 
 #define get_cmp_lo_reg isel_get_extended_lo_reg
 #define get_cmp_hi_reg isel_get_extended_hi_reg
+
+/* Get a safe 16-bit comparison operand (lo byte) that is NOT "A" or "B".
+ * For spilled values, returns the IDATA symbol directly (e.g. "__spill_3")
+ * which is a valid 'direct' address for SUBB A, direct.
+ * For register-allocated values, returns the register name.
+ * For constants, returns "#imm".
+ * Never emits any instructions (no side effects). */
+static const char* get_s16cmp_lo_operand(ISelContext* isel, ValueName val) {
+    int64_t imm_val = 0;
+    if (try_get_value_const(isel, val, &imm_val)) {
+        static char imm_bufs[4][20];
+        static int imm_buf_idx = 0;
+        char* buf = imm_bufs[imm_buf_idx & 3];
+        imm_buf_idx++;
+        snprintf(buf, 20, "#%d", (int)(imm_val & 0xFF));
+        return buf;
+    }
+    int base_reg = isel_get_value_reg(isel, val);
+    if (base_reg == SPILL_REG) {
+        const char* sym = lookup_value_addr_symbol(isel, val);
+        if (sym) return sym;   /* direct IDATA address = lo byte */
+    }
+    if (base_reg >= 0 && base_reg < 8) return isel_reg_name(base_reg + 1); /* lo */
+    if (base_reg == ACC_REG) return "A";
+    return "R7"; /* fallback */
+}
+
+/* Get a safe 16-bit comparison operand (hi byte) that is NOT "A" or "B".
+ * For spilled 16-bit values, returns "(symbol + 1)" string. */
+static const char* get_s16cmp_hi_operand(ISelContext* isel, ValueName val) {
+    int64_t imm_val = 0;
+    if (try_get_value_const(isel, val, &imm_val)) {
+        static char imm_bufs[4][20];
+        static int imm_buf_idx = 0;
+        char* buf = imm_bufs[imm_buf_idx & 3];
+        imm_buf_idx++;
+        snprintf(buf, 20, "#%d", (int)((imm_val >> 8) & 0xFF));
+        return buf;
+    }
+    int actual_size = get_value_size(isel, val);
+    if (actual_size <= 1) return "#0"; /* zero-extend */
+    int base_reg = isel_get_value_reg(isel, val);
+    if (base_reg == SPILL_REG) {
+        const char* sym = lookup_value_addr_symbol(isel, val);
+        if (sym) {
+            /* Return "(sym + 1)" – use a static rotating buffer */
+            static char hi_bufs[4][128];
+            static int hi_buf_idx = 0;
+            char* buf = hi_bufs[hi_buf_idx & 3];
+            hi_buf_idx++;
+            snprintf(buf, 128, "(%s + 1)", sym);
+            return buf;
+        }
+    }
+    if (base_reg >= 0 && base_reg < 8) return isel_reg_name(base_reg); /* hi */
+    if (base_reg == ACC_REG) return "A";
+    return "R6"; /* fallback */
+}
 
 static void emit_far_cond_jump1(ISelContext* isel, const char* op, int taken_id, int other_id,
                                 Instr* ins, const char* ssa) {
@@ -281,7 +362,19 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
         src2_idata_direct = (src2_bitw_sec == SEC_IDATA);
     }
 
-    int reg = alloc_dest_reg(isel, ins, next, size, true);
+    int reg = -1;
+    if (!src2_is_imm && !src2_spilled_mem && isel && isel->ctx && isel->ctx->value_to_reg && ins && ins->dest > 0) {
+        char* key = int_to_key(ins->dest);
+        int* reg_ptr = (int*)dict_get(isel->ctx->value_to_reg, key);
+        free(key);
+        if (reg_ptr && *reg_ptr >= 0 && *reg_ptr + size - 1 < 8) {
+            reg = *reg_ptr;
+            for (int j = 0; j < size; j++) {
+                isel->reg_busy[reg + j] = true;
+            }
+        }
+    }
+    if (reg < 0) reg = alloc_dest_reg(isel, ins, next, size, true);
     int phys_reg = reg;
     bool temp_result = false;
 
@@ -416,6 +509,54 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
     int src1_size = get_value_size(isel, src1);
     int src2_size = src2_is_imm ? size : get_value_size(isel, src2);
 
+    if (src2_is_imm && size == 2 && isel_get_value_reg(isel, src1) == SPILL_REG) {
+        const char* src1_sym = NULL;
+        bool is_and = (strcmp(op_mnem, "ANL") == 0);
+        bool is_or  = (strcmp(op_mnem, "ORL") == 0);
+        bool is_xor = (strcmp(op_mnem, "XRL") == 0);
+        uint8_t lo_byte = (uint8_t)(imm_val & 0xFF);
+        uint8_t hi_byte = (uint8_t)((imm_val >> 8) & 0xFF);
+
+        if (isel && isel->ctx && isel->ctx->value_to_spill) {
+            char* sk = int_to_key(src1);
+            src1_sym = (const char*)dict_get(isel->ctx->value_to_spill, sk);
+            free(sk);
+        }
+        if (!src1_sym) src1_sym = lookup_value_addr_symbol(isel, src1);
+
+        if (src1_sym) {
+            emit_load_symbol_byte(isel, src1_sym, 0, "A", ins);
+            if (!((is_and && lo_byte == 0xFF) || ((is_or || is_xor) && lo_byte == 0x00))) {
+                char imm_str[16];
+                snprintf(imm_str, sizeof(imm_str), "#%d", (int)lo_byte);
+                if (is_and && lo_byte == 0x00) {
+                    isel_emit(isel, "MOV", "A", "#0", NULL);
+                } else {
+                    isel_emit(isel, op_mnem, "A", imm_str, NULL);
+                }
+            }
+            emit_mov(isel, dst_lo, "A", ins);
+
+            emit_load_symbol_byte(isel, src1_sym, 1, "A", NULL);
+            if (!((is_and && hi_byte == 0xFF) || ((is_or || is_xor) && hi_byte == 0x00))) {
+                char imm_str[16];
+                snprintf(imm_str, sizeof(imm_str), "#%d", (int)hi_byte);
+                if (is_and && hi_byte == 0x00) {
+                    isel_emit(isel, "MOV", "A", "#0", NULL);
+                } else {
+                    isel_emit(isel, op_mnem, "A", imm_str, NULL);
+                }
+            }
+            emit_mov(isel, dst_hi, "A", NULL);
+
+            emit_store_spilled_result(isel, ins->dest, phys_reg, size, ins);
+            if (temp_result) {
+                free_temp_reg(isel, phys_reg, size);
+            }
+            return;
+        }
+    }
+
     int src1_lo_tmp = -1;
     int src1_hi_tmp = -1;
     const char* src1_lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, src1), &src1_lo_tmp);
@@ -503,6 +644,12 @@ void emit_bitwise(ISelContext* isel, Instr* ins, Instr* next, const char* op_mne
                 emit_mov(isel, dst_hi, "A", ins);
             }
             free_saved_cmp_operand(isel, src2_hi_tmp);
+        }
+    }
+
+    if (phys_reg >= 0 && phys_reg + size - 1 < 8) {
+        for (int j = 0; j < size; j++) {
+            isel->reg_val[phys_reg + j] = ins->dest;
         }
     }
 
@@ -970,67 +1117,69 @@ void emit_ne(ISelContext* isel, Instr* ins, Instr* next) {
     snprintf(lbuf_end, sizeof(lbuf_end), "%s:", l_end);
 
     if (size == 2) {
-        int src1_lo_tmp = -1;
-        int src1_hi_tmp = -1;
-        int src2_lo_tmp = -1;
-        int src2_hi_tmp = -1;
-        const char* src1_lo = save_acc_operand_for_cmp(isel, isel_get_extended_lo_reg(isel, src1, 2), &src1_lo_tmp);
-        const char* src1_hi = save_acc_operand_for_cmp(isel, isel_get_extended_hi_reg(isel, src1, 2), &src1_hi_tmp);
-        const char* src2_lo = NULL;
-        const char* src2_hi = NULL;
+        /* Use safe operand accessors: for spilled values these return the IDATA
+         * symbol directly (e.g. "__spill_3") which can be used as a direct
+         * address in "MOV A, direct" and "CJNE A, direct, rel" without
+         * triggering the IDATA indirect load sequence in emit_mov. */
+        const char* src1_lo = get_s16cmp_lo_operand(isel, src1);
+        const char* src1_hi = get_s16cmp_hi_operand(isel, src1);
 
-        if (!src2_is_imm) {
-            src2_lo = save_acc_operand_for_cmp(isel, isel_get_extended_lo_reg(isel, src2, 2), &src2_lo_tmp);
-        }
-
-        emit_mov(isel, "A", src1_lo, ins);
+        /* Load src1_lo to A, compare with src2_lo */
+        isel_emit(isel, "MOV", "A", src1_lo, NULL);
         if (src2_is_imm) {
             char imm_str[32];
             snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)(imm_val & 0xFF), l_true);
             isel_emit(isel, "CJNE", "A", imm_str, NULL);
         } else {
+            /* For CJNE A, direct, rel: src2 direct address is also valid.
+             * We save src2_lo into B only if it's "A" (would be overwritten). */
+            const char* s2_lo_raw = get_s16cmp_lo_operand(isel, src2);
+            const char* s2_lo;
+            if (s2_lo_raw && strcmp(s2_lo_raw, "A") == 0) {
+                isel_emit(isel, "MOV", "B", "A", NULL);
+                s2_lo = "B";
+            } else {
+                s2_lo = s2_lo_raw;
+            }
             char arg2[64];
-            snprintf(arg2, sizeof(arg2), "%s, %s", src2_lo, l_true);
+            snprintf(arg2, sizeof(arg2), "%s, %s", s2_lo, l_true);
             isel_emit(isel, "CJNE", "A", arg2, NULL);
         }
 
-        if (!src2_is_imm) {
-            src2_hi = save_acc_operand_for_cmp(isel, isel_get_extended_hi_reg(isel, src2, 2), &src2_hi_tmp);
-        }
-        emit_mov(isel, "A", src1_hi, NULL);
+        /* Load src1_hi to A, compare with src2_hi */
+        isel_emit(isel, "MOV", "A", src1_hi, NULL);
         if (src2_is_imm) {
             char imm_str[32];
             snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)((imm_val >> 8) & 0xFF), l_true);
             isel_emit(isel, "CJNE", "A", imm_str, NULL);
         } else {
+            const char* s2_hi_raw = get_s16cmp_hi_operand(isel, src2);
+            const char* s2_hi;
+            if (s2_hi_raw && strcmp(s2_hi_raw, "A") == 0) {
+                isel_emit(isel, "MOV", "B", "A", NULL);
+                s2_hi = "B";
+            } else {
+                s2_hi = s2_hi_raw;
+            }
             char arg2[64];
-            snprintf(arg2, sizeof(arg2), "%s, %s", src2_hi, l_true);
+            snprintf(arg2, sizeof(arg2), "%s, %s", s2_hi, l_true);
             isel_emit(isel, "CJNE", "A", arg2, NULL);
         }
-        free_saved_cmp_operand(isel, src1_lo_tmp);
-        free_saved_cmp_operand(isel, src1_hi_tmp);
-        free_saved_cmp_operand(isel, src2_lo_tmp);
-        free_saved_cmp_operand(isel, src2_hi_tmp);
     } else {
         int src1_lo_tmp = -1;
-        int src2_lo_tmp = -1;
         const char* src1_lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, src1), &src1_lo_tmp);
-        const char* src2_lo = NULL;
-        if (!src2_is_imm) {
-            src2_lo = save_acc_operand_for_cmp(isel, isel_get_lo_reg(isel, src2), &src2_lo_tmp);
-        }
         emit_mov(isel, "A", src1_lo, ins);
         if (src2_is_imm) {
             char imm_str[32];
             snprintf(imm_str, sizeof(imm_str), "#%d, %s", (int)(imm_val & 0xFF), l_true);
             isel_emit(isel, "CJNE", "A", imm_str, NULL);
         } else {
+            const char* s2_lo = save_acc_operand_in_b(isel, isel_get_lo_reg(isel, src2));
             char arg2[64];
-            snprintf(arg2, sizeof(arg2), "%s, %s", src2_lo, l_true);
+            snprintf(arg2, sizeof(arg2), "%s, %s", s2_lo, l_true);
             isel_emit(isel, "CJNE", "A", arg2, NULL);
         }
         free_saved_cmp_operand(isel, src1_lo_tmp);
-        free_saved_cmp_operand(isel, src2_lo_tmp);
     }
 
     emit_set_bool_result(isel, ins, reg, size, false);
@@ -1565,7 +1714,12 @@ static int emit_s16cmp_core(ISelContext* isel, Instr* ins,
                              int cmp_type) {
     bool set_carry = (cmp_type == SIGNED_CMP_GT || cmp_type == SIGNED_CMP_LE);
     isel_emit(isel, set_carry ? "SETB" : "CLR", "C", NULL, NULL);
-    emit_mov(isel, "A", llo, ins);
+    /* Use isel_emit directly (not emit_mov) so that IDATA symbol names are
+     * emitted as-is for "MOV A, direct" without triggering the IDATA indirect
+     * load sequence in emit_mov (which would wrongly use @R0 indirection). */
+    char* ssa = instr_to_ssa_str(ins);
+    isel_emit(isel, "MOV", "A", llo, ssa);
+    free(ssa);
     isel_emit(isel, "SUBB", "A", rlo_op, NULL);
 
     /* Now prepare rhi ^ 0x80 */
@@ -1575,45 +1729,38 @@ static int emit_s16cmp_core(ISelContext* isel, Instr* ins,
         char rhi_xored[32];
         int v = (int)strtol(rhi_raw + 1, NULL, 0);
         snprintf(rhi_xored, sizeof(rhi_xored), "#%d", (v ^ 0x80) & 0xFF);
-        emit_mov(isel, "A", lhi, NULL);
+        isel_emit(isel, "MOV", "A", lhi, NULL);
         isel_emit(isel, "XRL", "A", "#128", NULL);
         isel_emit(isel, "SUBB", "A", rhi_xored, NULL);
         return -1;
     } else {
-        /* Register rhi: compute rhi^0x80 into a temp reg, then SUBB from A (lhi^0x80).
-         * Keil pattern (4 instructions):
-         *   MOV tmp, rhi       -- save rhi
-         *   MOV A, rhi         -- A = rhi
-         *   XRL A, #128        -- A = rhi^0x80
-         *   MOV tmp, A         -- tmp = rhi^0x80
-         *   (A still = lhi^0x80 ... no, A was overwritten)
-         * Better: MOV A, rhi; XRL A,#128; MOV tmp,A; MOV A,lhi; XRL A,#128; SUBB A,tmp = 6 ops
-         * Even better (Keil style): save lhi^0x80 to tmp first:
-         *   tmp = lhi (already XRL'd into A, so MOV tmp, A)
-         *   MOV A, rhi; XRL A,#128; SUBB A, tmp  �?but SUBB A,tmp = (rhi^0x80)-(lhi^0x80), wrong sign
-         * Keil actually stores rhi^0x80 in R0 then restores lhi^0x80:
-         *   MOV A, rhi_raw; XRL A,#128; MOV tmp, A; MOV A, lhi; XRL A,#128; SUBB A,tmp (6 ops!)
-         * Keil style (4 instructions after lo-byte SUBB):
-         *   MOV A, rhi; XRL A,#128; MOV tmp, A; MOV A, lhi; XRL A,#128; SUBB A, tmp = 6 ops
-         * OR with tmp pre-computed:
-         *   MOV A, rhi_raw; XRL A,#128; MOV tmp, A  (3 ops, then:)
-         *   MOV A, lhi; XRL A,#128; SUBB A, tmp     (3 ops)
-         * Total: 6 ops. Same count but avoids B register.
-         * Even better with no tmp: use B as scratch:
-         *   MOV A, rhi; XRL A,#128; MOV B, A; MOV A, lhi; XRL A,#128; SUBB A, B  = 6 ops
-         */
-        /* Always use B register as scratch: avoids clobbering live R0-R7 registers.
-         * Keil uses R0 as scratch but tracks its liveness; we cannot safely call
-         * alloc_temp_reg here because the reg_busy table may not reflect all
-         * live values (e.g. a value cached in R2 from __spill that is still
-         * needed after the comparison code merges).  The B register (SFR 0xF0)
-         * is never part of R0-R7 register allocation, so it is always safe. */
-        emit_mov(isel, "A", rhi_raw, NULL);                /* A = rhi */
-        isel_emit(isel, "XRL", "A", "#128", NULL);         /* A = rhi^0x80 */
-        isel_emit(isel, "MOV", "B", "A", NULL);            /* B = rhi^0x80 */
-        emit_mov(isel, "A", lhi, NULL);                    /* A = lhi */
-        isel_emit(isel, "XRL", "A", "#128", NULL);         /* A = lhi^0x80 */
-        isel_emit(isel, "SUBB", "A", "B", NULL);           /* A = lhi^0x80 - rhi^0x80 - C */
+        /* Register rhi: compute rhi^0x80 into a temp register, then SUBB from A (lhi^0x80).
+         * Try to allocate a scratch Rn for rhi^0x80 to avoid needing B register.
+         * This is important because lhi or llo may already be saved in B by
+         * save_acc_operand_for_cmp when no Rn was available. */
+        int rhi_tmp = alloc_temp_reg(isel, -1, 1);
+        if (rhi_tmp >= 0) {
+            /* Preferred path: use Rn for scratch, works even if lhi == "B" */
+            const char* tmp_name = isel_reg_name(rhi_tmp);
+            isel_emit(isel, "MOV", "A", rhi_raw, NULL);   /* A = rhi */
+            isel_emit(isel, "XRL", "A", "#128", NULL);     /* A = rhi^0x80 */
+            isel_emit(isel, "MOV", tmp_name, "A", NULL);   /* tmp = rhi^0x80 */
+            isel_emit(isel, "MOV", "A", lhi, NULL);        /* A = lhi */
+            isel_emit(isel, "XRL", "A", "#128", NULL);     /* A = lhi^0x80 */
+            isel_emit(isel, "SUBB", "A", tmp_name, NULL);  /* A = lhi^0x80 - rhi^0x80 - C */
+            free_temp_reg(isel, rhi_tmp, 1);
+        } else {
+            /* Fallback: use B as scratch. lhi must not be "B" in this path.
+             * If lhi == "B", we cannot safely read B after clobbering it with rhi^0x80.
+             * In practice lhi should not be "B" if Rn regs are all busy (contradictory),
+             * but guard it anyway. */
+            isel_emit(isel, "MOV", "A", rhi_raw, NULL);   /* A = rhi */
+            isel_emit(isel, "XRL", "A", "#128", NULL);     /* A = rhi^0x80 */
+            isel_emit(isel, "MOV", "B", "A", NULL);        /* B = rhi^0x80 */
+            isel_emit(isel, "MOV", "A", lhi, NULL);        /* A = lhi (must not be B!) */
+            isel_emit(isel, "XRL", "A", "#128", NULL);     /* A = lhi^0x80 */
+            isel_emit(isel, "SUBB", "A", "B", NULL);       /* A = lhi^0x80 - rhi^0x80 - C */
+        }
         return -1;
     }
 }
@@ -1633,11 +1780,13 @@ static void emit_signed_cmp16_result(ISelContext* isel, Instr* ins, int dst_reg,
     }
     if (dst_reg < 0) dst_reg = 0;
 
-    /* carry=0 �?GT/GE true; carry=1 �?LT/LE true */
+    /* carry=0 → GT/GE true; carry=1 → LT/LE true */
     const char* jump_true = (cmp_type == SIGNED_CMP_LT || cmp_type == SIGNED_CMP_LE) ? "JC" : "JNC";
 
-    const char* lhi = get_cmp_hi_reg(isel, lhs, 2);
-    const char* llo = get_cmp_lo_reg(isel, lhs, 2);
+    /* Use safe operand accessors that return direct IDATA addresses for spilled
+     * values, avoiding A-register clobbering when fetching lhs then rhs. */
+    const char* llo = get_s16cmp_lo_operand(isel, lhs);
+    const char* lhi = get_s16cmp_hi_operand(isel, lhs);
     char rhi_imm_buf[16], rlo_imm_buf[16];
     int64_t rhs_const = 0;
     const char* rhi_raw;
@@ -1652,15 +1801,13 @@ static void emit_signed_cmp16_result(ISelContext* isel, Instr* ins, int dst_reg,
         rlo_raw = rlo_imm_buf;
         rhi_raw = rhi_imm_buf;
     } else {
-        rhi_raw = get_cmp_hi_reg(isel, rhs, 2);
-        rlo_raw = get_cmp_lo_reg(isel, rhs, 2);
+        rhi_raw = get_s16cmp_hi_operand(isel, rhs);
+        rlo_raw = get_s16cmp_lo_operand(isel, rhs);
     }
 
-    /* Save rlo if it might be clobbered (it's A) */
-    int rlo_tmp = -1;
-    const char* rlo_op = (rlo_raw && rlo_raw[0] != '#')
-                         ? save_acc_operand_for_cmp(isel, rlo_raw, &rlo_tmp)
-                         : rlo_raw;
+    /* rlo_op is used directly as SUBB operand; for non-immediate non-A operands
+     * it is already a safe direct address (Rn or IDATA sym), so no need to save. */
+    const char* rlo_op = rlo_raw;
 
     char* l_true = isel_new_label(isel, "Lscmp16_true");
     char* l_false = isel_new_label(isel, "Lscmp16_false");
@@ -1683,7 +1830,6 @@ static void emit_signed_cmp16_result(ISelContext* isel, Instr* ins, int dst_reg,
     free(l_true);
     free(l_false);
     free(l_end);
-    free_saved_cmp_operand(isel, rlo_tmp);
     if (temp_result) {
         free_temp_reg(isel, dst_reg, size);
     }
@@ -1750,10 +1896,12 @@ static void emit_signed_cmp16_branch(ISelContext* isel, Instr* ins, ValueName lh
                                      int cmp_type, int true_id, int false_id) {
     bool jump_c_taken = (cmp_type == SIGNED_CMP_LT || cmp_type == SIGNED_CMP_LE);
 
-    const char* lhi = get_cmp_hi_reg(isel, lhs, 2);
-    const char* llo = get_cmp_lo_reg(isel, lhs, 2);
+    /* Use safe operand accessors that return direct IDATA addresses for spilled
+     * values, avoiding A-register clobbering when fetching lhs then rhs. */
+    const char* llo = get_s16cmp_lo_operand(isel, lhs);
+    const char* lhi = get_s16cmp_hi_operand(isel, lhs);
 
-    /* �?rhs 是已知常量，直接生成立即数字符串，避免加载到寄存�?*/
+    /* If rhs is a known constant, use immediate strings directly */
     char rhi_imm_buf[16], rlo_imm_buf[16];
     int64_t rhs_const = 0;
     const char* rhi_raw;
@@ -1768,15 +1916,11 @@ static void emit_signed_cmp16_branch(ISelContext* isel, Instr* ins, ValueName lh
         rlo_raw = rlo_imm_buf;
         rhi_raw = rhi_imm_buf;
     } else {
-        rhi_raw = get_cmp_hi_reg(isel, rhs, 2);
-        rlo_raw = get_cmp_lo_reg(isel, rhs, 2);
+        rhi_raw = get_s16cmp_hi_operand(isel, rhs);
+        rlo_raw = get_s16cmp_lo_operand(isel, rhs);
     }
 
-    /* Save rlo if it might be A */
-    int rlo_tmp = -1;
-    const char* rlo_op = (rlo_raw && rlo_raw[0] != '#')
-                         ? save_acc_operand_for_cmp(isel, rlo_raw, &rlo_tmp)
-                         : rlo_raw;
+    const char* rlo_op = rlo_raw;
 
     char* ssa = instr_to_ssa_str(ins);
     emit_s16cmp_core(isel, ins, lhi, llo, rhi_raw, rlo_op, cmp_type);
@@ -1788,7 +1932,6 @@ static void emit_signed_cmp16_branch(ISelContext* isel, Instr* ins, ValueName lh
     }
 
     free(ssa);
-    free_saved_cmp_operand(isel, rlo_tmp);
 }
 
 static Ctype* get_compare_operand_type(ISelContext* isel, ValueName value) {

@@ -90,6 +90,18 @@ int try_bind_result_to_phi_target(ISelContext* isel, Instr* ins, Instr* next, in
                     char* k = int_to_key(ins->dest);
                     dict_put(isel->ctx->value_to_reg, k, reg_num);
                 }
+                /* Also update reg_val[] so that isel_get_value_reg() can
+                 * find ins->dest in the physical register.  Without this,
+                 * emit_phi_copies_for_edge looks up ins->dest via
+                 * isel_get_lo_reg which falls back to "R7" when reg_val
+                 * doesn't map the register, causing wrong phi copies and
+                 * the peephole optimizer to delete the real store. */
+                for (int j = 0; j < size; j++) {
+                    if (phi_dst_reg + j < 8) {
+                        isel->reg_val[phi_dst_reg + j] = ins->dest;
+                        isel->reg_busy[phi_dst_reg + j] = true;
+                    }
+                }
                 return phi_dst_reg;
             }
         }
@@ -114,6 +126,10 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
     const char* mem_dsts[64][8];
     int mem_dst_cnt[64];
 
+    /* Track phi destinations whose reg_val must be updated after copies. */
+    typedef struct { int base; ValueName val; int size; } PhiDst;
+    PhiDst phi_dsts[64];
+    int phi_dst_count = 0;
     for (Iter it = list_iter(succ->phis); !iter_end(it);) {
         Instr* phi = iter_next(&it);
         if (!phi || phi->op != IROP_PHI || !phi->args || !phi->labels) continue;
@@ -138,6 +154,32 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
 
         ValueName src = *(ValueName*)list_get(phi->args, idx);
         ValueName dst = phi->dest;
+
+        /* try_bind_result_to_phi_target may have placed src and dst into
+         * the same physical register.  In that case isel_get_value_reg
+         * will NOT find src (reg_val[] holds dst), but the dict mapping
+         * is still correct.  Check the dict directly: if both values
+         * resolve to the same base register, no copy is needed. */
+        if (isel->ctx && isel->ctx->value_to_reg) {
+            char* src_k = int_to_key(src);
+            char* dst_k = int_to_key(dst);
+            int* src_rp = (int*)dict_get(isel->ctx->value_to_reg, src_k);
+            int* dst_rp = (int*)dict_get(isel->ctx->value_to_reg, dst_k);
+            free(src_k);
+            free(dst_k);
+            if (src_rp && dst_rp && *src_rp >= 0 && *dst_rp >= 0 && *src_rp == *dst_rp) {
+                /* Already coalesced — skip copy, but still update reg_val
+                 * so that subsequent lookups of dst find it in the register. */
+                int coal_base = *dst_rp;
+                int coal_size = phi->type ? c51_abi_type_size(phi->type) : get_value_size(isel, dst);
+                if (coal_size < 1) coal_size = 1;
+                for (int j = 0; j < coal_size && coal_base + j < 8; j++) {
+                    isel->reg_val[coal_base + j] = dst;
+                }
+                continue;
+            }
+        }
+
         int size = phi->type ? c51_abi_type_size(phi->type) : get_value_size(isel, dst);
         int src_size = get_value_size(isel, src);
         int dst_size = get_value_size(isel, dst);
@@ -186,6 +228,11 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
                 }
                 continue;
             }
+        }
+
+        /* Record phi destination for reg_val update after all copies. */
+        if (phi_dst_count < 64 && dst_base >= 0) {
+            phi_dsts[phi_dst_count++] = (PhiDst){ dst_base, dst, copy_size };
         }
 
         Instr* src_def = find_def_instr_in_func(f, src);
@@ -268,6 +315,19 @@ void emit_phi_copies_for_edge(ISelContext* isel, int pred_id, int succ_id, Instr
             if (dst && strcmp(dst, "A") != 0) emit_mov(isel, dst, "A", ins);
         }
         free(mem_srcs[m]);
+    }
+
+    /* After all phi copies are emitted, update reg_val[] so that
+     * subsequent instructions in the successor block (and other phi
+     * copy look-ups on the same edge) can locate the phi destination
+     * values via isel_get_value_reg(). */
+    for (int i = 0; i < phi_dst_count; i++) {
+        int base = phi_dsts[i].base;
+        ValueName val = phi_dsts[i].val;
+        int sz = phi_dsts[i].size;
+        for (int j = 0; j < sz && base + j < 8; j++) {
+            isel->reg_val[base + j] = val;
+        }
     }
 }
 
@@ -953,9 +1013,9 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
         emit_mov(isel, dst, imm_str, ins);
         return;
     }
-    const char* src_sym = lookup_value_addr_symbol(isel, v);
-    if (src_sym && isel_get_value_reg(isel, v) == SPILL_REG) {
-        emit_load_symbol_byte(isel, src_sym, 0, dst, ins);
+    const char* src_sym_u8 = lookup_value_addr_symbol(isel, v);
+    if (src_sym_u8 && isel_get_value_reg(isel, v) == SPILL_REG) {
+        emit_load_symbol_byte(isel, src_sym_u8, 0, dst, ins);
         return;
     }
     const char* src_lo = isel_get_lo_reg(isel, v);
@@ -963,15 +1023,22 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
     if (isel_get_value_reg(isel, v) == SPILL_REG) {
         int r = isel_reload_spill(isel, v, 1, ins);
         if (r >= 0) src_lo = isel_reg_name(r);
-        else src_lo = "A";
+        else {
+            /* No temp reg – load via A directly */
+            if (src_sym_u8) { emit_load_symbol_byte(isel, src_sym_u8, 0, dst, ins); }
+            return;
+        }
     } else if (isel->ctx && isel->ctx->value_to_addr) {
         char* ktmp = int_to_key(v);
-        const char* sym = (const char*)dict_get(isel->ctx->value_to_addr, ktmp);
+        const char* sym2 = (const char*)dict_get(isel->ctx->value_to_addr, ktmp);
         free(ktmp);
-        if (sym) {
+        if (sym2) {
             int r = isel_reload_spill(isel, v, 1, ins);
             if (r >= 0) src_lo = isel_reg_name(r);
-            else src_lo = "A";
+            else {
+                emit_load_symbol_byte(isel, sym2, 0, dst, ins);
+                return;
+            }
         }
     }
 
@@ -982,8 +1049,9 @@ static void setup_call_param_u8(ISelContext* isel, Instr* ins, const char* calle
             src_lo = isel_reg_name(r);
             src_reg = r;
         } else {
-            src_lo = "A";
-            src_reg = ACC_REG;
+            /* No temp reg available – emit MOV dst, mem directly */
+            emit_mov(isel, dst, src_lo, ins);
+            return;
         }
     }
 
@@ -1028,6 +1096,42 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
         emit_mov(isel, dst_lo, imm_lo, NULL);
         return;
     }
+    /* For spilled values, isel_get_extended_hi_reg and isel_get_extended_lo_reg
+     * both emit load-to-A and return "A", clobbering each other.  Instead, detect
+     * a spill up-front and use the IDATA symbol address directly so we can emit
+     *   MOV dst_hi, (__spill_N + 1)
+     *   MOV dst_lo, __spill_N
+     * which are valid 8051 direct-addressing MOV instructions.
+     * Note: the memory layout for a 16-bit spill is:
+     *   sym+0 = lo byte, sym+1 = hi byte  (matches Keil ABI lo/hi convention) */
+    {
+        int base_reg = isel_get_value_reg(isel, v);
+        if (base_reg == SPILL_REG) {
+            const char* sym = lookup_value_addr_symbol(isel, v);
+            if (sym) {
+                static char hi_sym_buf[256];
+                char* ssa = instr_to_ssa_str(ins);
+                snprintf(hi_sym_buf, sizeof(hi_sym_buf), "(%s + 1)", sym);
+                isel_emit(isel, "MOV", dst_hi, hi_sym_buf, ssa);
+                isel_emit(isel, "MOV", dst_lo, sym, NULL);
+                free(ssa);
+            } else {
+                /* sym lookup failed: load via A as fallback */
+                int r = isel_reload_spill(isel, v, 2, ins);
+                if (r >= 0) {
+                    if (*move_count < 64)
+                        moves[(*move_count)++] = (RegMove){.dst = targ_hi, .src = r};
+                    if (*move_count < 64)
+                        moves[(*move_count)++] = (RegMove){.dst = targ_lo, .src = r + 1};
+                } else {
+                    emit_mov(isel, dst_hi, "A", ins); /* last resort */
+                    emit_mov(isel, dst_lo, "A", NULL);
+                }
+            }
+            return;
+        }
+    }
+
     const char* src_hi = isel_get_extended_hi_reg(isel, v, 2);
     const char* src_lo = isel_get_extended_lo_reg(isel, v, 2);
 
@@ -1043,10 +1147,21 @@ static void setup_call_param_u16(ISelContext* isel, Instr* ins, const char* call
             src_hi_reg = r;
             src_lo_reg = r + 1;
         } else {
-            src_hi = "A";
-            src_lo = "A";
-            src_hi_reg = ACC_REG;
-            src_lo_reg = ACC_REG;
+            const char* sym = lookup_value_addr_symbol(isel, v);
+            if (!sym && isel->ctx && isel->ctx->value_to_spill) {
+                char* spk = int_to_key(v);
+                sym = (const char*)dict_get(isel->ctx->value_to_spill, spk);
+                free(spk);
+            }
+            if (sym) {
+                static char hi_sym_buf2[256];
+                char* ssa2 = instr_to_ssa_str(ins);
+                snprintf(hi_sym_buf2, sizeof(hi_sym_buf2), "(%s + 1)", sym);
+                isel_emit(isel, "MOV", dst_hi, hi_sym_buf2, ssa2);
+                isel_emit(isel, "MOV", dst_lo, sym, NULL);
+                free(ssa2);
+            }
+            return;
         }
     }
 

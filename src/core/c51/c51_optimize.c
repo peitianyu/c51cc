@@ -600,11 +600,11 @@ static int peephole_remove_empty_local_label(List* instrs, int start) {
     return 1;
 }
 
-/* 窥孔优化：ADD/ADDC A, #0 是算术 NOP，直接删除
- * ADD A, #0 → 无操作（不修改 A，但设置 carry；这里只删 #0 立即数的版本）
- * ADDC A, #0 → 只保留了 carry，A 值不变，删除
- * 注意：ADD A, #0 会更新 PSW（C/OV等），若之后读取 PSW flags 需保留。
- * 保守策略：若下一条指令是 ADDC（使用 carry），则不删 ADD A, #0。
+/* 窥孔优化：ADD A, #0 是算术 NOP，可在安全时删除。
+ * 注意：ADDC A, #0 不是 NOP——当 carry=1 时它会把进位传播到高字节，
+ * 因此绝不能在这里删除。
+ * 另外，ADD A, #0 会更新 PSW（C/OV 等），若下一条是 ADDC 使用 carry，
+ * 也必须保留。
  */
 static int peephole_add_addc_zero(List* instrs, int start) {
     AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
@@ -612,8 +612,7 @@ static int peephole_add_addc_zero(List* instrs, int start) {
     if (is_basic_block_barrier(ins)) return 0;
 
     bool is_add  = (strcmp(ins->op, "ADD")  == 0);
-    bool is_addc = (strcmp(ins->op, "ADDC") == 0);
-    if (!is_add && !is_addc) return 0;
+    if (!is_add) return 0;
 
     const char* dst = get_operand(ins, 0);
     const char* src = get_operand(ins, 1);
@@ -622,7 +621,7 @@ static int peephole_add_addc_zero(List* instrs, int start) {
     if (strcmp(src, "#0") != 0) return 0;
 
     /* ADD A, #0: 若下条是 ADDC，则 carry 被使用，不能删除 ADD（会清零 C） */
-    if (is_add && start + 1 < instrs->len) {
+    if (start + 1 < instrs->len) {
         AsmInstr* next = (AsmInstr*)list_get(instrs, start + 1);
         if (next && next->op && strcmp(next->op, "ADDC") == 0) return 0;
     }
@@ -1318,6 +1317,8 @@ static int peephole_idata_store_load_forward(List* instrs, int start) {
  *   MOV Rx, sym    <- current instruction (start)
  */
 static int peephole_idata_load_from_reg(List* instrs, int start) {
+    return 0;
+
     if (start < 1) return 0;
 
     AsmInstr* ins = (AsmInstr*)list_get(instrs, start);
@@ -1811,6 +1812,21 @@ static int peephole_forward_copy_to_dest(List* instrs, int start) {
                 if (operands_equal(dst_n, dst1)) break;
                 /* 验证：Rd 在 terminal copy 之后未被读取 */
                 if (reg_read_before_write_or_end(instrs, start + offset + 1, dst1)) break;
+                /* 验证：Rf 在 [start+1, start+offset-1] 内未被写入。
+                 * 若中间有写 Rf 的指令，变换后 MOV Rf, A 会被这些写操作覆盖，
+                 * 导致 Rf 的最终值错误（典型问题：第二次 reload 写入 Rf 后，
+                 * 再通过 terminal copy 修正，变换后丢失了 terminal copy）。 */
+                bool rf_written_between = false;
+                for (int k = 1; k < offset; k++) {
+                    AsmInstr* ins_k = (AsmInstr*)list_get(instrs, start + k);
+                    if (!ins_k) continue;
+                    const char* dst_k = get_operand(ins_k, 0);
+                    if (dst_k && operands_equal(dst_k, dst_n)) {
+                        rf_written_between = true;
+                        break;
+                    }
+                }
+                if (rf_written_between) break;
                 /* 执行替换：将 ins1 的 dst 改为 Rf，删除 terminal copy */
                 free(ins1->args->head->elem);
                 ins1->args->head->elem = strdup(dst_n);

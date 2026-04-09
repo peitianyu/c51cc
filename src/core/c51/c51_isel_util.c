@@ -82,23 +82,29 @@ int reg_index_from_name(const char* s) {
 
 int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
     if (!isel) return ACC_REG;
-    /* Keep temporaries out of R6/R7.
-     * Those two registers often hold live parameters / return values across
-     * loop bodies and branch edges; using them as scratch temporaries causes
-     * hard-to-see clobbers in control-flow-heavy code. */
-    const int temp_reg_max = 5;
-    for (int r = C51_ALLOCATABLE_REG_MIN; r <= temp_reg_max; r++) {
-        if (r + size - 1 > temp_reg_max) continue;
-        bool ok = true;
-        for (int j = 0; j < size; j++) {
-            if (isel->reg_busy[r + j]) { ok = false; break; }
+    /* Prefer R0-R5 for scratch temps, but allow a fallback into R6/R7 when
+     * lower registers are all live. This avoids clobbering an actually-live
+     * allocated value by collapsing back to the hardcoded R0/R1 fallback. */
+    const int temp_reg_pref_max = 5;
+    const int temp_reg_hard_max = C51_ALLOCATABLE_REG_MAX;
+
+    for (int pass = 0; pass < 2; pass++) {
+        int reg_min = C51_ALLOCATABLE_REG_MIN;
+        int reg_max = (pass == 0) ? temp_reg_pref_max : temp_reg_hard_max;
+        if (pass == 1) reg_min = temp_reg_pref_max + 1;
+        for (int r = reg_min; r <= reg_max; r++) {
+            if (r + size - 1 > reg_max) continue;
+            bool ok = true;
+            for (int j = 0; j < size; j++) {
+                if (isel->reg_busy[r + j]) { ok = false; break; }
+            }
+            if (!ok) continue;
+            for (int j = 0; j < size; j++) {
+                isel->reg_busy[r + j] = true;
+                isel->reg_val[r + j] = val;
+            }
+            return r;
         }
-        if (!ok) continue;
-        for (int j = 0; j < size; j++) {
-            isel->reg_busy[r + j] = true;
-            isel->reg_val[r + j] = val;
-        }
-        return r;
     }
     return ACC_REG;
 }
@@ -211,7 +217,22 @@ void emit_copy_value(ISelContext* isel, Instr* ins, ValueName src, int dst_reg, 
     const char* src_lo = isel_get_lo_reg(isel, src);
     const char* dst_lo = isel_reg_name(dst_reg + (size == 2 ? 1 : 0));
     if (size == 2) {
-        const char* src_hi = isel_get_hi_reg(isel, src);
+        int src_size = get_value_size(isel, src);
+        const char* src_hi = (src_size == 1) ? "#0" : isel_get_hi_reg(isel, src);
+        if (src_size == 1) {
+            Ctype* type = get_value_type(isel, src);
+            if (type && !get_attr(type->attr).ctype_unsigned && type->type != CTYPE_BOOL) {
+                /* Sign extension */
+                const char* dst_hi = isel_reg_name(dst_reg);
+                emit_mov(isel, "A", src_lo, ins);
+                isel_emit(isel, "RLC", "A", NULL, NULL);
+                isel_emit(isel, "SUBB", "A", "ACC", NULL);
+                emit_mov(isel, dst_hi, "A", NULL);
+                emit_mov(isel, dst_lo, src_lo, NULL);
+                return;
+            }
+        }
+        
         const char* dst_hi = isel_reg_name(dst_reg);
         int src_hi_tmp = -1;
         const char* src_hi_safe = src_hi;
@@ -428,44 +449,14 @@ int isel_reload_spill(ISelContext* isel, ValueName val, int size, Instr* ins) {
         char* k = int_to_key(val);
         int* existing = (int*)dict_get(isel->ctx->value_to_reg, k);
         free(k);
-        if (existing && *existing != SPILL_REG) return *existing;
-    }
-
-    /* Before picking a temporary register for the reload, protect all
-     * registers that are currently bound to non-SPILL values.  This
-     * prevents clobbering a live variable whose register was not marked
-     * busy by prepare_reg_state_for_instr (because it didn't appear in
-     * the current instruction's operands). */
-    bool extra_busy[8] = {false};
-    if (isel->ctx && isel->ctx->value_to_reg) {
-        List* keys = dict_keys(isel->ctx->value_to_reg);
-        if (keys) {
-            for (Iter ki = list_iter(keys); !iter_end(ki);) {
-                const char* dk = (const char*)iter_next(&ki);
-                if (!dk) continue;
-                int* rp = (int*)dict_get(isel->ctx->value_to_reg, dk);
-                if (!rp) continue;
-                int r = *rp;
-                if (r < 0 || r == SPILL_REG) continue;  /* SPILL_REG = -3 */
-                for (int j = 0; j < size && r + j < 8; j++) {
-                    if (!isel->reg_busy[r + j]) {
-                        isel->reg_busy[r + j] = true;
-                        extra_busy[r + j] = true;
-                    }
-                }
-            }
-            free(keys);
+        if (existing && *existing != SPILL_REG) {
+            int reg = *existing;
+            if (reg == ACC_REG) return reg;
+            if (reg >= 0 && reg < 8 && isel->reg_val[reg] == val) return reg;
         }
     }
 
     int reg = alloc_temp_reg(isel, val, size);
-
-    /* Restore the extra busy flags we set (but keep the one for the newly
-     * allocated register, which alloc_temp_reg already set). */
-    for (int j = 0; j < 8; j++) {
-        if (extra_busy[j] && isel->reg_val[j] != val)
-            isel->reg_busy[j] = false;
-    }
 
     const char* ssa = ins ? instr_to_ssa_str(ins) : NULL;
 

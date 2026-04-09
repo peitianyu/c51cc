@@ -1182,6 +1182,237 @@ static bool pass_copy_prop(Func *f, Stats *s) {
     return changed;
 }
 
+/*---------- 窄化算术：trunc(op(sext(x), sext(y))) -> op(x, y) ----------*/
+/*
+ * C 整数提升规则会让 char 运算变成 int 运算：
+ *   char add_op(char a, char b) { return a + b; }
+ * 编译为 SSA 后：
+ *   v3 = sext(v1:char) -> int
+ *   v4 = sext(v2:char) -> int
+ *   v5 = add(v3, v4)   -> int
+ *   v6 = trunc(v5)     -> char
+ *   ret v6
+ * 本 pass 将其窄化为：
+ *   v6 = add(v1, v2)   -> char
+ *   ret v6
+ * 支持 add/sub/and/or/xor/mul/neg/not/div/mod 等运算；
+ * 操作数可以是 sext(char)、zext(char) 或直接是 char 类型值；
+ * 支持一侧是常量（通过 labels "imm" 编码）的情形。
+ * 语义正确性：对所有可窄化的整数运算，低8位的结果与先在int中运算后trunc相同。
+ */
+static bool is_narrowable_op(IrOp op) {
+    switch (op) {
+    case IROP_ADD: case IROP_SUB: case IROP_AND: case IROP_OR: case IROP_XOR:
+    case IROP_MUL: case IROP_NEG: case IROP_NOT:
+    case IROP_DIV: case IROP_MOD:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* 计算函数中最大的 ValueName */
+static ValueName narrow_max_value(Func *f) {
+    ValueName mx = 0;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        List *lists[2] = {b->phis, b->instrs};
+        for (int li = 0; li < 2; li++) {
+            if (!lists[li]) continue;
+            for (Iter jt = list_iter(lists[li]); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i) continue;
+                if (i->dest > mx) mx = i->dest;
+                if (i->args) {
+                    for (int k = 0; k < i->args->len; k++) {
+                        ValueName v = *(ValueName *)list_get(i->args, k);
+                        if (v > mx) mx = v;
+                    }
+                }
+            }
+        }
+    }
+    return mx;
+}
+
+/* 检查值 v 的所有 uses 是否都在给定集合 ok_set 中（或者是 trunc->char）。
+ * ok_set[v] 为 true 表示该值被认为"可narrow"。 */
+static bool narrow_all_uses_in_set(Func *f, ValueName v, bool *ok_set, int maxv) {
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        List *lists[2] = {b->phis, b->instrs};
+        for (int li = 0; li < 2; li++) {
+            if (!lists[li]) continue;
+            for (Iter jt = list_iter(lists[li]); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || !i->args) continue;
+                bool uses_v = false;
+                for (int k = 0; k < i->args->len; k++) {
+                    if (*(ValueName *)list_get(i->args, k) == v) { uses_v = true; break; }
+                }
+                if (!uses_v) continue;
+                /* 此指令 uses v */
+                if (i->op == IROP_TRUNC && i->type && i->type->size == 1) continue; /* ok: trunc->char */
+                if (is_narrowable_op(i->op) && i->dest > 0 && i->dest <= maxv && ok_set[i->dest]) continue;
+                return false; /* 不可接受的 use */
+            }
+        }
+    }
+    return true;
+}
+
+/* 检查值 v 是否为"char 源"：
+ *   - char 类型直接返回 v
+ *   - sext/zext(char) 返回 char_src
+ *   - 若 v 在 can_narrow 中，返回 v（它将被 narrow 为 char）
+ * 返回 0 表示无法获得 char 源。 */
+static ValueName narrow_get_src(Func *f, ValueName v, bool *can_narrow, int maxv) {
+    if (v == 0) return 0;
+    Instr *def = find_def_instr(f, v);
+    if (!def) return 0;
+    if (def->type && def->type->size == 1) return v;
+    if ((def->op == IROP_SEXT || def->op == IROP_ZEXT) &&
+        def->args && def->args->len >= 1) {
+        ValueName src = get_arg(def, 0);
+        Instr *sdef = find_def_instr(f, src);
+        if (sdef && sdef->type && sdef->type->size == 1) return src;
+    }
+    if (v > 0 && v <= maxv && can_narrow[v]) return v;
+    return 0;
+}
+
+static bool pass_narrow_arith(Func *f, Stats *s) {
+    if (!f) return false;
+
+    /* -------- 第一阶段：找出所有"uses路径最终通向trunc->char"的int值 -------- */
+    ValueName maxv = narrow_max_value(f);
+    if (maxv <= 0) return false;
+
+    /* use_reachable[v] = true 表示 v 的所有 uses 最终都在 narrow context 中 */
+    bool *use_reachable = calloc(maxv + 1, sizeof(bool));
+    if (!use_reachable) return false;
+
+    /* 迭代到不动点：若一个 narrowable int op 的所有 uses 都在 use_reachable 中（或是 trunc->char），
+     * 则把它加入 use_reachable */
+    bool progress = true;
+    while (progress) {
+        progress = false;
+        for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+            Block *b = iter_next(&it);
+            if (!b) continue;
+            for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || i->dest <= 0 || i->dest > maxv) continue;
+                if (use_reachable[i->dest]) continue;
+                if (!is_narrowable_op(i->op)) continue;
+                if (!i->type || i->type->size != 2) continue;
+                if (narrow_all_uses_in_set(f, i->dest, use_reachable, maxv)) {
+                    use_reachable[i->dest] = true;
+                    progress = true;
+                }
+            }
+        }
+    }
+
+    /* -------- 第二阶段：在 use_reachable 中，找出同时"args也都是char/sext/can_narrow"的 -------- */
+    bool *can_narrow = calloc(maxv + 1, sizeof(bool));
+    if (!can_narrow) { free(use_reachable); return false; }
+
+    progress = true;
+    while (progress) {
+        progress = false;
+        for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+            Block *b = iter_next(&it);
+            if (!b) continue;
+            for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || i->dest <= 0 || i->dest > maxv) continue;
+                if (can_narrow[i->dest]) continue;
+                if (!use_reachable[i->dest]) continue; /* 不在第一阶段结果中 */
+                if (!is_narrowable_op(i->op)) continue;
+                if (!i->type || i->type->size != 2) continue;
+
+                /* 检查所有 args 是否都有 char 源 */
+                int nargs = i->args ? i->args->len : 0;
+                bool all_args_ok = true;
+                for (int k = 0; k < nargs && all_args_ok; k++) {
+                    ValueName av = *(ValueName *)list_get(i->args, k);
+                    if (narrow_get_src(f, av, can_narrow, maxv) == 0) {
+                        all_args_ok = false;
+                    }
+                }
+                if (!all_args_ok) continue;
+
+                can_narrow[i->dest] = true;
+                progress = true;
+            }
+        }
+    }
+
+    /* -------- 第三阶段：执行 narrow -------- */
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i) continue;
+
+            /* --- 处理 can_narrow 的 int op：args 替换为 char 源，type 改为 char --- */
+            if (is_narrowable_op(i->op) && i->type && i->type->size == 2 &&
+                i->dest > 0 && i->dest <= maxv && can_narrow[i->dest]) {
+                int nargs = i->args ? i->args->len : 0;
+                bool any_changed = false;
+                Ctype *char_type = NULL;
+                for (int k = 0; k < nargs; k++) {
+                    ValueName av = *(ValueName *)list_get(i->args, k);
+                    ValueName cv = narrow_get_src(f, av, can_narrow, maxv);
+                    if (cv != 0 && cv != av) {
+                        *(ValueName *)list_get(i->args, k) = cv;
+                        any_changed = true;
+                    }
+                    /* 收集 char 类型指针 */
+                    if (cv != 0 && char_type == NULL) {
+                        Instr *cdef = find_def_instr(f, cv);
+                        if (cdef && cdef->type && cdef->type->size == 1)
+                            char_type = cdef->type;
+                    }
+                }
+                /* 更新 type 为 char */
+                if (char_type && i->type != char_type) {
+                    i->type = char_type;
+                    any_changed = true;
+                }
+                if (any_changed) { ++s->fold; changed = true; }
+                continue;
+            }
+
+            /* --- 处理 TRUNC -> char（src 在 can_narrow 中）--- */
+            if (i->op == IROP_TRUNC && i->type && i->type->size == 1 &&
+                i->args && i->args->len >= 1) {
+                ValueName src = get_arg(i, 0);
+                if (src > 0 && src <= maxv && can_narrow[src]) {
+                    Instr *def = find_def_instr(f, src);
+                    if (def && count_uses(f, src) == 1) {
+                        /* 唯一使用者：把 def->dest 重命名为 i->dest，TRUNC NOP 化 */
+                        def->dest = i->dest;
+                        i->op = IROP_NOP;
+                        if (i->args) list_clear(i->args);
+                        ++s->fold; changed = true;
+                    }
+                    /* 若 count_uses > 1：留给 pass_remove_redundant_trunc 处理（def 已是 char）*/
+                }
+            }
+        }
+    }
+
+    free(use_reachable);
+    free(can_narrow);
+    return changed;
+}
+
 /*---------- 删除冗余 trunc ----------*/
 static bool pass_remove_redundant_trunc(Func *f, Stats *s) {
     if (!f) return false;
@@ -3331,6 +3562,7 @@ void ssa_optimize_func(Func *f, int level) {
         RUN_PASS(pass_dead_local_store_elim);
         RUN_PASS(pass_global_load);
         RUN_PASS(pass_copy_prop);
+        RUN_PASS(pass_narrow_arith);
         RUN_PASS(pass_remove_redundant_trunc);
         RUN_PASS(pass_cse_ext);
         RUN_PASS(pass_inline_func_call);

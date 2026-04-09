@@ -70,14 +70,17 @@ int isel_get_value_reg(ISelContext* isel, ValueName val) {
     char* key = int_to_key(val);
     int* reg_ptr = (int*)dict_get(isel->ctx->value_to_reg, key);
     free(key);
-    if (reg_ptr && *reg_ptr >= 0) return *reg_ptr;
+    if (reg_ptr && *reg_ptr >= 0) {
+        int reg = *reg_ptr;
+        if (reg < 8 && isel->reg_val[reg] == val) return reg;
+    }
     if (reg_ptr && *reg_ptr == ACC_REG) return *reg_ptr;
+    if (reg_ptr && *reg_ptr == SPILL_REG) return *reg_ptr;
     if (isel) {
         for (int reg = 0; reg < 8; reg++) {
             if (isel->reg_val[reg] == val) return reg;
         }
     }
-    if (reg_ptr) return *reg_ptr;
     return -1;
 }
 
@@ -189,9 +192,17 @@ const char* isel_get_hi_reg(ISelContext* isel, ValueName val) {
 
 static void mark_value_regs_busy(ISelContext* isel, ValueName val) {
     if (!isel || val <= 0) return;
-    int base_reg = isel_get_value_reg(isel, val);
     int size = get_value_size(isel, val);
-    if (base_reg < 0 || size <= 0) return;
+    int base_reg = -1;
+
+    if (size <= 0) return;
+    for (int reg = 0; reg < 8; reg++) {
+        if (isel->reg_val[reg] == val) {
+            base_reg = reg;
+            break;
+        }
+    }
+    if (base_reg < 0) return;
     for (int i = 0; i < size && base_reg + i < 8; i++) {
         isel->reg_busy[base_reg + i] = true;
         isel->reg_val[base_reg + i] = val;
@@ -202,7 +213,6 @@ static void prepare_reg_state_for_instr(ISelContext* isel, Instr* ins, Instr* ne
     if (!isel) return;
     for (int i = 0; i < 8; i++) {
         isel->reg_busy[i] = false;
-        isel->reg_val[i] = -1;
     }
     if (ins && ins->args) {
         for (int i = 0; i < ins->args->len; i++) {
@@ -214,6 +224,23 @@ static void prepare_reg_state_for_instr(ISelContext* isel, Instr* ins, Instr* ne
         for (int i = 0; i < next->args->len; i++) {
             ValueName* pv = list_get(next->args, i);
             if (pv) mark_value_regs_busy(isel, *pv);
+        }
+    }
+    if (isel->block_instrs && isel->block_instr_count > 0) {
+        int protected_count = 0;
+        for (int j = isel->block_instr_pos + 1; j < isel->block_instr_count && protected_count < 8; j++) {
+            Instr* future = isel->block_instrs[j];
+            if (!future) continue;
+            if (future->op == IROP_NOP || future->op == IROP_CONST) continue;
+            if (!future->args) {
+                protected_count++;
+                continue;
+            }
+            for (int i = 0; i < future->args->len; i++) {
+                ValueName* pv = list_get(future->args, i);
+                if (pv) mark_value_regs_busy(isel, *pv);
+            }
+            protected_count++;
         }
     }
     isel->acc_busy = false;
@@ -233,7 +260,12 @@ int alloc_dest_reg(ISelContext* isel, Instr* ins, Instr* next, int size, bool tr
 
 char* isel_new_label(ISelContext* isel, const char* prefix) {
     char buf[32];
-    snprintf(buf, sizeof(buf), "%s_%d", prefix, isel->label_counter++);
+    /* Use ctx->label_counter (global across all functions) to avoid
+     * label name collisions when multiple functions share the same
+     * per-function counter reset. isel->label_counter is kept in sync
+     * but the canonical counter is ctx->label_counter. */
+    int idx = (isel && isel->ctx) ? isel->ctx->label_counter++ : isel->label_counter++;
+    snprintf(buf, sizeof(buf), "%s_%d", prefix, idx);
     return strdup(buf);
 }
 
@@ -878,19 +910,45 @@ void isel_block(ISelContext* isel, Block* block) {
     precompute_sbit_cpl(isel, instrs, num_instrs);
     precompute_br_simplify(isel, instrs, num_instrs);
 
+    isel->block_instrs = instrs;
+    isel->block_instr_count = num_instrs;
+
     for (int i = 0; i < num_instrs; i++) {
+        isel->block_instr_pos = i;
         /* 寻找下一条有意义的指令（跳过CONST/NOP，它们不产生代码，不阻断BR-aware路径�?*/
         Instr* next = NULL;
+        Instr* next2 = NULL;
+        Instr* next3 = NULL;
+        Instr* next4 = NULL;
         for (int j = i + 1; j < num_instrs; j++) {
             Instr* cand = instrs[j];
             if (!cand) continue;
             if (cand->op == IROP_NOP) continue;
             if (cand->op == IROP_CONST) continue;
-            next = cand;
+            if (!next) {
+                next = cand;
+                continue;
+            }
+            if (!next2) {
+                next2 = cand;
+                continue;
+            }
+            if (!next3) {
+                next3 = cand;
+                continue;
+            }
+            next4 = cand;
             break;
         }
+        isel->lookahead_next2 = next2;
+        isel->lookahead_next3 = next3;
+        isel->lookahead_next4 = next4;
         isel_instr(isel, instrs[i], next);
     }
+
+    isel->block_instrs = NULL;
+    isel->block_instr_count = 0;
+    isel->block_instr_pos = 0;
 
     free(instrs);
 }

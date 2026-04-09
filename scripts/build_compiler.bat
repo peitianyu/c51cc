@@ -25,10 +25,3 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo Build OK: %OUT%
-REM Also copy to scripts\c51cc.exe so that build_all.bat picks up the new compiler
-if not "%OUT%"=="scripts\c51cc.exe" (
-    if exist "%~dp0" (
-        copy /Y "%OUT%" "%~dp0c51cc.exe" >nul 2>&1
-    )
-)
-endlocal

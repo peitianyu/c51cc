@@ -172,14 +172,14 @@ if not "%EXTRA_FILE%"=="" (
 
 REM Auto-include delay.c from ../include if present and not already an EXTRA_FILE
 if "%EXTRA_BASE%"=="" (
-    if exist "..\include\delay.c" (
-        copy /y "..\include\delay.c" "delay.c" >nul
-        set "EXTRA_BASE=delay"
-        set "EXTRA_FILE_NAME=delay.c"
-        echo   [Keil] compiling delay.c (from include)
-        call :keil_compile_one "delay.c"
-        if errorlevel 1 goto :keil_fail_pop
-    )
+    @REM if exist "..\include\delay.c" (
+    @REM     copy /y "..\include\delay.c" "delay.c" >nul
+    @REM     set "EXTRA_BASE=delay"
+    @REM     set "EXTRA_FILE_NAME=delay.c"
+    @REM     echo   [Keil] compiling delay.c (from include)
+    @REM     call :keil_compile_one "delay.c"
+    @REM     if errorlevel 1 goto :keil_fail_pop
+    @REM )
 )
 
 if exist "STARTUP.A51" (
@@ -256,7 +256,7 @@ if not "%EXTRA_FILE%"=="" (
 
 REM Check for delay.c in include dir when no extra file is given
 if "%C51CC_EXTRA_SRC%"=="" (
-    if exist "..\include\delay.c" set "C51CC_EXTRA_SRC=..\include\delay.c"
+    @REM if exist "..\include\delay.c" set "C51CC_EXTRA_SRC=..\include\delay.c"
 )
 
 if defined C51CC_EXTRA_SRC (
