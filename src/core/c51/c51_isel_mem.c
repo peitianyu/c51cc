@@ -1038,13 +1038,19 @@ void emit_addr(ISelContext* isel, Instr* ins) {
             } else if (mattr.ctype_data == CTYPE_DATA_XDATA) {
                 use_kind = SEC_XDATA; sec_prefix = "?XD?";
             }
-            int sec_idx = obj_find_or_add_section(isel->ctx->obj, sec_prefix, use_kind, 1);
-            Section* sec = obj_get_section(isel->ctx->obj, sec_idx);
-            if (sec) {
-                int offset = sec->size;
-                section_append_zeros(sec, ins->mem_type->size);
-                obj_add_symbol(isel->ctx->obj, var_name, SYM_DATA, sec_idx,
-                               offset, ins->mem_type->size, SYM_FLAG_LOCAL);
+            /* extern 声明的引用: 不分配存储, 生成 extern 符号, 由其它编译单元定义 */
+            if (mattr.ctype_extern) {
+                obj_add_symbol(isel->ctx->obj, var_name, SYM_DATA, -1, 0,
+                               ins->mem_type->size, SYM_FLAG_GLOBAL | SYM_FLAG_EXTERN);
+            } else {
+                int sec_idx = obj_find_or_add_section(isel->ctx->obj, sec_prefix, use_kind, 1);
+                Section* sec = obj_get_section(isel->ctx->obj, sec_idx);
+                if (sec) {
+                    int offset = sec->size;
+                    section_append_zeros(sec, ins->mem_type->size);
+                    obj_add_symbol(isel->ctx->obj, var_name, SYM_DATA, sec_idx,
+                                   offset, ins->mem_type->size, SYM_FLAG_LOCAL);
+                }
             }
         }
     }

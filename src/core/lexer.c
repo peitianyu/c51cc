@@ -180,12 +180,18 @@ static Token read_number(char first)
         else { ungetc_with_pos(c); break; }
     }
 
-    /* 后缀 f/F/l/L 仅影响输出格式 */
-    int suf = getc_with_pos();
-    if (suf != 'f' && suf != 'F' && suf != 'l' && suf != 'L')
+    /* 后缀 u/U/l/L 吞掉(无符号/长); f/F 表示浮点字面量 */
+    int is_float_suf = 0;
+    for (;;) {
+        int suf = getc_with_pos();
+        if (suf == 'u' || suf == 'U' || suf == 'l' || suf == 'L')
+            continue;                    /* 整数后缀: 仅影响类型, 解析阶段忽略 */
+        if (suf == 'f' || suf == 'F') { is_float_suf = 1; continue; }
         ungetc_with_pos(suf);
+        break;
+    }
 
-    if (dot || suf == 'f' || suf == 'F')
+    if (dot || is_float_suf)
         string_appendf(&s, "%ld.%0*ld", ival, fscale, fval);
     else
         string_appendf(&s, "%ld", ival);

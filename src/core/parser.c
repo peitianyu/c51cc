@@ -300,6 +300,58 @@ static Ast *ast_decl(Ast *var, Ast *init)
     return r;
 }
 
+/* C99 复合字面量: (type){ init } — 匿名局部变量, 表达式求值前完成初始化 */
+static Ast *read_decl_array_init_recurse(Ctype *ctype);
+static Ast *read_decl_struct_init(Ctype *ctype);
+static Ast *read_compound_literal(Ctype *target)
+{
+    static int clit_no = 0;
+    char name[64];
+    snprintf(name, sizeof name, "__clit%d", clit_no++);
+
+    Ast *var = ast_lvar(target, strdup(name));
+    Ast *decl;
+
+    if (target->type == CTYPE_ARRAY) {
+        Ast *init = read_decl_array_init_recurse(target);
+        if (target->len == -1) {
+            int len = (init->type == AST_STRING) ? (int)strlen(init->sval) + 1
+                                                 : list_len(init->arrayinit);
+            target->len = len;
+            target->size = len * target->ptr->size;
+        }
+        decl = ast_decl(var, init);
+        /* 数组复合字面量在表达式中衰减为指向首元素的指针 */
+        Ast *r = malloc(sizeof(Ast));
+        r->type = AST_COMPOUND_LIT;
+        r->ctype = make_ptr_type(target->ptr);
+        r->left = decl;
+        r->operand = var;
+        return r;
+    }
+
+    if (target->type == CTYPE_STRUCT) {
+        Ast *init = read_decl_struct_init(target);
+        decl = ast_decl(var, init);
+        Ast *r = malloc(sizeof(Ast));
+        r->type = AST_COMPOUND_LIT;
+        r->ctype = target;
+        r->left = decl;
+        r->operand = var;
+        return r;
+    }
+
+    /* 标量复合字面量 (int){5} */
+    Ast *init = read_expr();
+    decl = ast_decl(var, init);
+    Ast *r = malloc(sizeof(Ast));
+    r->type = AST_COMPOUND_LIT;
+    r->ctype = target;
+    r->left = decl;
+    r->operand = var;
+    return r;
+}
+
 static Ast *ast_array_init(List *arrayinit)
 {
     Ast *r = malloc(sizeof(Ast));
@@ -1136,7 +1188,15 @@ static Ast *read_unary_expr(void)
 
     if (is_punct(tok, '(') && is_type_keyword(peek_token())) {
         Ctype *target = read_decl_spec();
+        /* 复合字面量/类型转换支持数组维度: (int[]){..} */
+        if (is_punct(peek_token(), '[')) {
+            target = read_array_dimensions(target);
+        }
         expect(')');
+        if (is_punct(peek_token(), '{')) {
+            /* C99 复合字面量 (type){...}：匿名局部变量 + 初始化, 返回地址 */
+            return read_compound_literal(target);
+        }
         Ast *expr = read_unary_expr();
         return ast_cast(target, expr);
     }
@@ -1923,7 +1983,13 @@ static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
         }
 
         // FIXME: 注意这里直接填地址有危险, 不建议这么做, 程序可能会飞, 后期将这部分限制住????
-        ast_inttype(ctype_int, eval_intexpr(init));
+        // 仅对整型常量表达式做常量折叠; 变量/解引用/调用等运行时值跳过
+        // (eval_intexpr 对 AST_LVAR 会直接报错, 导致 `char *p = q;` 无法编译)
+        if (init->type != AST_LVAR && init->type != AST_DEREF &&
+            init->type != AST_FUNCALL && init->type != AST_STRUCT_REF &&
+            init->type != AST_BIT_REF) {
+            ast_inttype(ctype_int, eval_intexpr(init));
+        }
         if (var->type == AST_GVAR) var->ginit = init;
         return ast_decl(var, init);
     }
@@ -2054,9 +2120,12 @@ static Ast *read_decl_init_single(Ast *var)
 static Ast *read_global_decl_multi(Ctype *ctype, char *first_ident)
 {
     List *decls = make_list();
+    /* 基类型 = 剥掉 read_decl_spec 已消费的(第一个变量的)指针层 */
     Ctype *base_ctype = ctype;
+    while (base_ctype && base_ctype->type == CTYPE_PTR)
+        base_ctype = base_ctype->ptr;
     char *ident = first_ident;
-    Ctype *ident_ctype = base_ctype;
+    Ctype *ident_ctype = ctype;
 
     while (1) {
         Ctype *var_ctype = read_array_dimensions(ident_ctype);
@@ -2092,9 +2161,31 @@ static Ast *read_global_decl_multi(Ctype *ctype, char *first_ident)
 static Ast *read_decl_multi(Ctype *ctype, Token first_name)
 {
     List *decls = make_list();
+    /* 基类型 = 剥掉 read_decl_spec 已消费的(第一个变量的)指针层,
+     * 使 `T *x, *y` / `T *x, y` 中每个变量独立计算指针深度,
+     * 避免 `*y` 在已有指针的基类型上重复嵌套。 */
     Ctype *base_ctype = ctype;
+    int first_ptr_depth = 0;
+    while (base_ctype && base_ctype->type == CTYPE_PTR && first_ptr_depth < 4) {
+        base_ctype = base_ctype->ptr;
+        first_ptr_depth++;
+    }
+    /* c51cc 把 const/volatile 限定符放在指针节点上; 剥指针时传回基类型,
+     * 使 `const char *x, *y` 的 y 也带 const */
+    if (first_ptr_depth > 0 && base_ctype) {
+        union { CtypeAttr c_attr; int i_attr; } ba_u = {0}, ca_u = {0}, nb_u = {0};
+        ba_u.i_attr = base_ctype->attr;
+        ca_u.i_attr = ctype->attr;
+        nb_u.i_attr = ba_u.i_attr;
+        if ((ca_u.c_attr.ctype_const) && !(nb_u.c_attr.ctype_const))
+            nb_u.c_attr.ctype_const = 1;   /* const */
+        if ((ca_u.c_attr.ctype_volatile) && !(nb_u.c_attr.ctype_volatile))
+            nb_u.c_attr.ctype_volatile = 1; /* volatile */
+        if (nb_u.i_attr != ba_u.i_attr)
+            base_ctype = clone_ctype_with_attr(base_ctype, nb_u.i_attr);
+    }
     Token varname = first_name;
-    Ctype *var_base = base_ctype;
+    Ctype *var_base = ctype;   /* 第一个变量: 用 read_decl_spec 的完整类型 */
 
     /* Detect static local variable: ctype_static==1 inside a function scope */
     bool is_static_local = localenv && get_attr(ctype->attr).ctype_static;

@@ -150,6 +150,14 @@ void handle_normal_global_var(C51GenContext *ctx, GlobalVar *g)
         section_append_zeros(sec, 16 - sec->size);
     }
 
+    /* SEC_DATA variables are direct-addressed (MOV addr) and share the
+     * IRAM 0x00-0x7F space with the register bank and the stack.  Reserve
+     * the first 16 bytes (registers 0x00-0x07 + stack 0x08-0x0F) so a data
+     * variable never aliases R0-R7 or a pushed stack frame. */
+    if (kind == SEC_DATA && sec && sec->size < 16) {
+        section_append_zeros(sec, 16 - sec->size);
+    }
+
     unsigned int offset = sec->size;
     
     int flags = SYM_FLAG_GLOBAL;

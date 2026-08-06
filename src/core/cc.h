@@ -60,6 +60,7 @@ enum {
     AST_CAST,
     AST_INTERRUPT_DEF,  /* 中断函数定义 */
     AST_ASM,            /* 顶层/语句 asm 块（由 __asm__/__asm__ 语法产生） */
+    AST_COMPOUND_LIT,   /* C99 复合字面量 (int[]){...} */
     PUNCT_EQ,
     PUNCT_GE,        // >=
     PUNCT_LE,        // <=
@@ -322,6 +323,7 @@ extern CtypeAttr get_attr(int in_attr);
 /* pp.c - 预处理器 */
 extern bool pp_preprocess_to_stdin(const char *filename);
 extern void pp_global_add_include_path(const char *path);
+extern void pp_global_free(void);
 
 /* debug */
 #define error(...) errorf(__FILE__, __LINE__, __VA_ARGS__)

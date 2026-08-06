@@ -36,6 +36,11 @@ typedef struct C51GenContext {
     List* temp_values;
     
     int value_in_acc;       /* 当前在累加器A中的值，-1表示没有 */
+
+    /* 线性扫描活跃区间快照 (linscan_allocate 后填充),
+     * 供临时寄存器分配 (alloc_temp_reg) 避开持久分配的活跃值 */
+    int *linscan_iv_start, *linscan_iv_end, *linscan_iv_reg, *linscan_iv_size;
+    int linscan_iv_count, linscan_iv_cap;
 } C51GenContext;
 
 /* 主入口 */

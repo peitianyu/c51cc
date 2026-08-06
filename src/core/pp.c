@@ -808,6 +808,9 @@ static char *pp_expand_macros_for_if(PPContext *ctx, const char *args, List *exp
         while (*p && isspace((unsigned char)*p)) p++;
         if (!*p) break;
 
+        /* 跳过 // 行注释 (常见于 `#if !defined(X) // comment`) */
+        if (*p == '/' && p[1] == '/') break;
+
         if (is_ident_start(*p)) {
             int len = 0;
             char *ident = pp_get_ident(p, &len);
@@ -2005,7 +2008,8 @@ bool pp_preprocess_to_stdin(const char *filename)
     
     fflush(tmp);
     rewind(tmp);
-    pp_global_free();
+    /* 注意: 不在多文件编译中途释放 g_pp, 否则 -I include 路径在第二个文件起丢失。
+     * g_pp 由 main.c 在全部文件处理完后统一 pp_global_free()。 */
 
 #ifdef _WIN32
     return _dup2(_fileno(tmp), _fileno(stdin)) == 0;

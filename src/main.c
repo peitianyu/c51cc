@@ -301,17 +301,35 @@ int main(int argc, char **argv) {
     if (list_len(objs) == 1) {
         out = list_get(objs, 0);
     } else {
-        /* 标记非第一个输入文件中的 main 为 extern，避免重复定义 */
+        /* 找到第一个含 main 定义的文件(保留其 main), 其余文件的 main 标 extern,
+         * 避免重复定义。之前固定保留第一个文件, 但第一个文件可能没有 main
+         * (如 SDCC 回归测试: 测试文件 + 生成 wrapper 的 main)。 */
+        char *main_file = NULL;
+        {
+            Iter pit0 = list_iter(input_paths);
+            Iter oit0 = list_iter(objs);
+            while (!iter_end(pit0) && !iter_end(oit0)) {
+                char *pp0 = iter_next(&pit0);
+                ObjFile *oo0 = iter_next(&oit0);
+                if (!pp0 || !oo0) continue;
+                bool has_main = false;
+                for (Iter sit0 = list_iter(oo0->symbols); !iter_end(sit0);) {
+                    Symbol *s0 = iter_next(&sit0);
+                    if (s0 && s0->name && s0->section >= 0 && strcmp(s0->name, "main") == 0) {
+                        has_main = true; break;
+                    }
+                }
+                if (has_main) { main_file = pp0; break; }
+            }
+        }
+
         Iter pit = list_iter(input_paths);
         Iter oit = list_iter(objs);
-        /* first_input 已是第一个路径 */
-        /* Advance both iterators and for any path not equal to first_input,
-           set its 'main' symbol to undefined (section = -1) if present. */
         while (!iter_end(pit) && !iter_end(oit)) {
             char *pp = iter_next(&pit);
             ObjFile *oo = iter_next(&oit);
             if (!pp || !oo) continue;
-            if (strcmp(pp, first_input) == 0) continue;
+            if (main_file && strcmp(pp, main_file) == 0) continue;
             /* Scan symbols and mark 'main' as extern */
             for (Iter sit = list_iter(oo->symbols); !iter_end(sit);) {
                 Symbol *s = iter_next(&sit);
@@ -409,6 +427,7 @@ int main(int argc, char **argv) {
     for (Iter it3 = list_iter(input_paths); !iter_end(it3);) free(iter_next(&it3));
     free(input_paths);
     free(objs);
+    pp_global_free();
     return 0;
 
 fail_cleanup:

@@ -43,6 +43,10 @@ typedef struct ISelContext {
     int block_instr_count;
     int block_instr_pos;
 
+    /* 全局指令序号 (含 phi 槽位), 与 linscan 的 instr_idx 对齐,
+     * 供 alloc_temp_reg 查询活跃区间 */
+    int global_instr_idx;
+
     /* 额外前瞻，用于保护短生命周期但跨过少量指令仍然活跃的寄存器值 */
     Instr* lookahead_next2;
     Instr* lookahead_next3;

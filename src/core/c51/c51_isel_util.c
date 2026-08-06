@@ -88,6 +88,11 @@ int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
     const int temp_reg_pref_max = 5;
     const int temp_reg_hard_max = C51_ALLOCATABLE_REG_MAX;
 
+    /* 检查该寄存器是否被 linscan 持久分配的活跃区间占用。
+     * 临时值绝不能覆盖跨指令/跨块仍活跃的值 (如循环中的 phi 源/结果)。 */
+    int cur_idx = isel->global_instr_idx;
+    C51GenContext* ctx = isel->ctx;
+
     for (int pass = 0; pass < 2; pass++) {
         int reg_min = C51_ALLOCATABLE_REG_MIN;
         int reg_max = (pass == 0) ? temp_reg_pref_max : temp_reg_hard_max;
@@ -99,6 +104,20 @@ int alloc_temp_reg(ISelContext* isel, ValueName val, int size) {
                 if (isel->reg_busy[r + j]) { ok = false; break; }
             }
             if (!ok) continue;
+            /* 避开 linscan 活跃区间 */
+            if (ctx && ctx->linscan_iv_count > 0) {
+                for (int k = 0; k < ctx->linscan_iv_count; k++) {
+                    int iv_reg = ctx->linscan_iv_reg[k];
+                    if (iv_reg < 0 || iv_reg == ACC_REG || iv_reg == SPILL_REG) continue;
+                    if (iv_reg + ctx->linscan_iv_size[k] - 1 < r) continue;
+                    if (iv_reg > r + size - 1) continue;
+                    if (cur_idx >= ctx->linscan_iv_start[k] && cur_idx <= ctx->linscan_iv_end[k]) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) continue;
+            }
             for (int j = 0; j < size; j++) {
                 isel->reg_busy[r + j] = true;
                 isel->reg_val[r + j] = val;

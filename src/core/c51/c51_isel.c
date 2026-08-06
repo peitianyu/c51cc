@@ -70,12 +70,14 @@ int isel_get_value_reg(ISelContext* isel, ValueName val) {
     char* key = int_to_key(val);
     int* reg_ptr = (int*)dict_get(isel->ctx->value_to_reg, key);
     free(key);
-    if (reg_ptr && *reg_ptr >= 0) {
+    if (reg_ptr) {
         int reg = *reg_ptr;
-        if (reg < 8 && isel->reg_val[reg] == val) return reg;
+        /* 信任线性扫描的持久分配。reg_val[] 只是块内动态簿记,
+         * 对跨基本块的值(phi/循环变量)块入口处寄存器内容仍有效,
+         * 但 reg_val 可能被块内临时指令改写 -> 不能因此放弃 linscan 分配。 */
+        if (reg >= 0 && reg < 8) return reg;
+        if (reg == ACC_REG || reg == SPILL_REG) return reg;
     }
-    if (reg_ptr && *reg_ptr == ACC_REG) return *reg_ptr;
-    if (reg_ptr && *reg_ptr == SPILL_REG) return *reg_ptr;
     if (isel) {
         for (int reg = 0; reg < 8; reg++) {
             if (isel->reg_val[reg] == val) return reg;
@@ -757,6 +759,7 @@ static bool const_used_only_as_add_rhs(ISelContext* isel, Instr* ins) {
 
 void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins) return;
+    isel->global_instr_idx++;
     isel_record_dest_type(isel, ins);
     prepare_reg_state_for_instr(isel, ins, next);
 
@@ -899,6 +902,10 @@ void isel_block(ISelContext* isel, Block* block) {
         isel_emit(isel, label, NULL, NULL, NULL);
     }
 
+    /* 对齐 linscan 序号: phi 占位 (生成阶段不发射 phi 代码) */
+    if (block->phis)
+        isel->global_instr_idx += block->phis->len;
+
     int num_instrs = block->instrs->len;
     Instr** instrs = malloc(sizeof(Instr*) * num_instrs);
     int idx = 0;
@@ -973,6 +980,7 @@ void isel_function(C51GenContext* ctx, Func* func) {
     isel.ctx = ctx;
     isel.sec = sec;
     isel.label_counter = 0;
+    isel.global_instr_idx = 0;
     isel.br_bitinfo = make_dict(NULL);
     isel.br_invert = make_dict(NULL);
     isel.sbit_cpl_stores = make_dict(NULL);

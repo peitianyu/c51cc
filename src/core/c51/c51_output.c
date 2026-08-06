@@ -290,43 +290,140 @@ int c51_write_asm(FILE *fp, const ObjFile *obj)
     return 0;
 }
 
+/* 数据段注入: 每段一个 MOVC 复制循环 (最多 255 字节/段) */
+typedef struct { int dest; int src; int len; const unsigned char *bytes; } HexDataSeg;
+
+/* 段内最小符号偏移 = 数据起点 (跳过 reserve 空洞/寄存器区) */
+static int data_seg_start(const ObjFile *obj, int sec_idx)
+{
+    int min_off = -1;
+    for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
+        Symbol *sym = iter_next(&it);
+        if (sym && sym->section == sec_idx && sym->size > 0) {
+            if (min_off < 0 || sym->value < min_off) min_off = sym->value;
+        }
+    }
+    return min_off;
+}
+
+static void hex_emit_line(FILE *fp, unsigned address, const unsigned char *bytes, int len)
+{
+    while (len > 0) {
+        int chunk = len > 16 ? 16 : len;
+        int sum = chunk + ((address >> 8) & 0xFF) + (address & 0xFF);
+        fprintf(fp, ":%02X%04X00", chunk, address & 0xFFFF);
+        for (int i = 0; i < chunk; i++) {
+            sum += bytes[i];
+            fprintf(fp, "%02X", bytes[i]);
+        }
+        fprintf(fp, "%02X\n", (unsigned char)((-sum) & 0xFF));
+        address += chunk;
+        bytes += chunk;
+        len -= chunk;
+    }
+}
+
 int c51_write_hex(FILE *fp, const ObjFile *obj)
 {
-    int code_base = 0;
-    int sec_idx = 0;
-
     if (!fp || !obj) return -1;
 
+    /* ── 第一遍: CODE 总长, 启动段 LJMP 目标 ── */
+    int code_total = 0;
+    int main_addr = -1;
+    int startup_ljmp_sec = -1, startup_ljmp_off = -1;
+    int sec_idx = 0;
     for (Iter it = list_iter(obj->sections); !iter_end(it); sec_idx++) {
         Section *sec = iter_next(&it);
         if (!sec || sec->kind != SEC_CODE || sec->bytes_len <= 0) continue;
-
-        if (sec->align > 1) {
-            code_base = ((code_base + sec->align - 1) / sec->align) * sec->align;
-        }
-
-        for (int offset = 0; offset < sec->bytes_len; offset += 16) {
-            unsigned address = (unsigned)(code_base + offset);
-            unsigned chunk = (unsigned)((sec->bytes_len - offset) > 16 ? 16 : (sec->bytes_len - offset));
-            unsigned sum;
-
-            /* 8051 addresses fit in 16 bits — no Extended Linear Address
-               (type 04) record is needed.  Many simple loaders / emulators
-               only accept type 00 (data) and type 01 (EOF) records and
-               reject type 04, so we intentionally omit it. */
-
-            sum = chunk + ((address >> 8) & 0xFF) + (address & 0xFF);
-            fprintf(fp, ":%02X%04X00", chunk, address & 0xFFFF);
-            for (unsigned i = 0; i < chunk; i++) {
-                unsigned char byte = sec->bytes[offset + (int)i];
-                sum += byte;
-                fprintf(fp, "%02X", byte);
+        if (sec->align > 1)
+            code_total = ((code_total + sec->align - 1) / sec->align) * sec->align;
+        if (main_addr < 0 && sec->bytes_len >= 6) {
+            /* 启动段: MOV SP,#07H (75 81 07) + LJMP (02 hh ll) 在段内搜索 */
+            const unsigned char *b = sec->bytes;
+            int n = sec->bytes_len;
+            for (int i = 0; i + 5 < n; i++) {
+                if (b[i] == 0x75 && b[i+1] == 0x81 && b[i+2] == 0x07 && b[i+3] == 0x02) {
+                    main_addr = (b[i+4] << 8) | b[i+5]; /* LJMP 高字节在前 */
+                    startup_ljmp_sec = sec_idx;
+                    startup_ljmp_off = i + 4;
+                    break;
+                }
             }
-            fprintf(fp, "%02X\n", (unsigned char)((-((int)sum)) & 0xFF));
         }
+        code_total += sec->bytes_len;
+    }
 
+    /* ── 收集需初始化的数据段 (SEC_DATA / SEC_IDATA, 直接寻址/IRAM) ── */
+    HexDataSeg segs[64];
+    int nseg = 0;
+    sec_idx = 0;
+    for (Iter it = list_iter(obj->sections); !iter_end(it); sec_idx++) {
+        Section *sec = iter_next(&it);
+        if (!sec) continue;
+        if (sec->kind != SEC_DATA && sec->kind != SEC_IDATA) continue;
+        if (sec->bytes_len <= 0) continue;
+        int start = data_seg_start(obj, sec_idx);
+        if (start < 0) start = 0;
+        int len = sec->bytes_len - start;
+        if (len <= 0 || len > 255) continue; /* 单段 >255B 暂不支持, 跳过 */
+        if (nseg >= 64) break;
+        segs[nseg].dest = start;
+        segs[nseg].bytes = sec->bytes + start;
+        segs[nseg].len = len;
+        nseg++;
+    }
+
+    int copy_len = nseg ? (nseg * 14 + 3) : 0;
+    int copy_start = code_total;
+    int data_base = copy_start + copy_len;
+    int d_off = 0;
+    for (int i = 0; i < nseg; i++) {
+        segs[i].src = data_base + d_off;
+        d_off += segs[i].len;
+    }
+
+    /* ── 第二遍: 输出 CODE 段 (启动段 LJMP 改指复制代码) ── */
+    int code_base = 0;
+    sec_idx = 0;
+    for (Iter it = list_iter(obj->sections); !iter_end(it); sec_idx++) {
+        Section *sec = iter_next(&it);
+        if (!sec || sec->kind != SEC_CODE || sec->bytes_len <= 0) continue;
+        if (sec->align > 1)
+            code_base = ((code_base + sec->align - 1) / sec->align) * sec->align;
+
+        if (sec_idx == startup_ljmp_sec && nseg > 0) {
+            /* 复制段字节, 修改 LJMP 目标 → 复制代码首地址 */
+            unsigned char *tmp = malloc(sec->bytes_len);
+            if (!tmp) return -1;
+            memcpy(tmp, sec->bytes, sec->bytes_len);
+            tmp[startup_ljmp_off]     = (copy_start >> 8) & 0xFF;
+            tmp[startup_ljmp_off + 1] = copy_start & 0xFF;
+            hex_emit_line(fp, (unsigned)code_base, tmp, sec->bytes_len);
+            free(tmp);
+        } else {
+            hex_emit_line(fp, (unsigned)code_base, sec->bytes, sec->bytes_len);
+        }
         code_base += sec->bytes_len;
     }
+
+    /* ── 复制代码 + 数据 ── */
+    for (int i = 0; i < nseg; i++) {
+        unsigned char c[14];
+        c[0] = 0x78; c[1] = segs[i].dest & 0xFF;              /* MOV R0,#dest   */
+        c[2] = 0x90; c[3] = (segs[i].src >> 8) & 0xFF;
+        c[4] = segs[i].src & 0xFF;                            /* MOV DPTR,#src  */
+        c[5] = 0x79; c[6] = segs[i].len & 0xFF;               /* MOV R1,#len    */
+        c[7] = 0xE4; c[8] = 0x93; c[9] = 0xF6;                /* CLR A; MOVC A,@A+DPTR; MOV @R0,A */
+        c[10] = 0x08; c[11] = 0xA3;                           /* INC R0; INC DPTR */
+        c[12] = 0xD9; c[13] = (unsigned char)(-7);            /* DJNZ R1, loop  */
+        hex_emit_line(fp, (unsigned)(copy_start + i * 14), c, 14);
+    }
+    if (nseg > 0) {
+        unsigned char tail[3] = { 0x02, (main_addr >> 8) & 0xFF, main_addr & 0xFF };
+        hex_emit_line(fp, (unsigned)(copy_start + nseg * 14), tail, 3);
+    }
+    for (int i = 0; i < nseg; i++)
+        hex_emit_line(fp, (unsigned)segs[i].src, segs[i].bytes, segs[i].len);
 
     fprintf(fp, ":00000001FF\n");
     return 0;

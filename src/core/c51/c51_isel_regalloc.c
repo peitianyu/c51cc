@@ -396,8 +396,10 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
                         int iv_idx = val_to_iv[*pv];
                         if (iv_idx < 0) continue;
                         LiveInterval* iv = &lsc->intervals[iv_idx];
-                        /* Only extend values defined before this loop header */
-                        if (iv->start < hdr_start && iv->end < backedge_end)
+                        /* 扩展: 在 header 之前定义、或被 header 的 phi 定义的值,
+                         * 都必须存活到回边前驱末尾。phi 的 start == hdr_start,
+                         * 因此用 <= 而非 < 。 */
+                        if (iv->start <= hdr_start && iv->end < backedge_end)
                             iv->end = backedge_end;
                     }
                 }
@@ -413,7 +415,9 @@ void linscan_compute_intervals(LinearScanContext* lsc, Func* func, C51GenContext
 /* 释放寄存器中过期的�?*/
 static void expire_old_intervals(LinearScanContext* lsc, int current_instr) {
     for (int r = 0; r < 8; r++) {
-        if (lsc->active_regs[r] >= 0 && lsc->active_reg_end[r] <= current_instr) {
+        /* 严格小于才释放: end 表示“最后使用指令的序号”(含该点),
+         * 在 end 处该值仍被使用(如移位计数被下一条指令读取), 不能提前释放。 */
+        if (lsc->active_regs[r] >= 0 && lsc->active_reg_end[r] < current_instr) {
             /* 该寄存器中的值已过期，释放它 */
             lsc->active_regs[r] = -1;
             lsc->active_reg_end[r] = -1;
@@ -847,12 +851,46 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                     bool conflict = false;
 
                     /* Check dst_val itself: if src and dst live ranges overlap,
-                     * we cannot place src in dst_reg (dst already occupies it). */
+                     * we cannot place src in dst_reg (dst already occupies it).
+                     *
+                     * EXCEPTION (loop back-edge phi): if src is defined in a block
+                     * that comes AFTER the header in linear order (i.e. the loop
+                     * back-edge update, e.g. v11 = v3+1 in the loop body), the
+                     * overlap is an artifact of the conservative back-edge liveness
+                     * fix (we extended dst's interval to the end of the back-edge
+                     * block even though dst is never used there).  Physically the
+                     * update value only lives in the back-edge block, so dst and
+                     * src can safely share the register: src overwrites it in the
+                     * back-edge block, and dst reads it at the header entry.
+                     */
                     {
                         int dst_start = lsc->intervals[dst_iv].start;
                         int dst_end   = lsc->intervals[dst_iv].end;
                         if (dst_end >= src_start && dst_start <= src_end) {
-                            conflict = true;
+                            /* 判断 src 是否定义在 header(本 block)之后 —— 回边更新值 */
+                            bool src_is_backedge_update = false;
+                            if (src_def) {
+                                for (Iter bit2 = list_iter(coalesce_func->blocks); !iter_end(bit2);) {
+                                    Block* b2 = iter_next(&bit2);
+                                    if (!b2 || b2->id <= blk->id) continue; /* 只查 header 之后 */
+                                    if (b2->instrs) {
+                                        for (Iter i2 = list_iter(b2->instrs); !iter_end(i2);) {
+                                            Instr* t = iter_next(&i2);
+                                            if (t == src_def) { src_is_backedge_update = true; break; }
+                                        }
+                                    }
+                                    if (b2->phis) {
+                                        for (Iter i2 = list_iter(b2->phis); !iter_end(i2);) {
+                                            Instr* t = iter_next(&i2);
+                                            if (t == src_def) { src_is_backedge_update = true; break; }
+                                        }
+                                    }
+                                    if (src_is_backedge_update) break;
+                                }
+                            }
+                            if (!src_is_backedge_update) {
+                                conflict = true;
+                            }
                         }
                     }
 
@@ -973,6 +1011,26 @@ void linscan_allocate(LinearScanContext* lsc, C51GenContext* genctx) {
                 fprintf(stderr, "  v%d: start=%d end=%d size=%d reg=R%d\n",
                     iv->val, iv->start, iv->end, iv->size, iv->reg);
         }
+    }
+
+    /* 将最终 interval 快照复制到 genctx, 供指令生成时临时寄存器分配避让 */
+    if (genctx->linscan_iv_cap < lsc->interval_count) {
+        genctx->linscan_iv_cap = lsc->interval_count;
+        genctx->linscan_iv_start = realloc(genctx->linscan_iv_start,
+            sizeof(int) * genctx->linscan_iv_cap);
+        genctx->linscan_iv_end = realloc(genctx->linscan_iv_end,
+            sizeof(int) * genctx->linscan_iv_cap);
+        genctx->linscan_iv_reg = realloc(genctx->linscan_iv_reg,
+            sizeof(int) * genctx->linscan_iv_cap);
+        genctx->linscan_iv_size = realloc(genctx->linscan_iv_size,
+            sizeof(int) * genctx->linscan_iv_cap);
+    }
+    genctx->linscan_iv_count = lsc->interval_count;
+    for (int i = 0; i < lsc->interval_count; i++) {
+        genctx->linscan_iv_start[i] = lsc->intervals[i].start;
+        genctx->linscan_iv_end[i] = lsc->intervals[i].end;
+        genctx->linscan_iv_reg[i] = lsc->intervals[i].reg;
+        genctx->linscan_iv_size[i] = lsc->intervals[i].size;
     }
 }
 int alloc_reg_for_value(ISelContext* isel, ValueName val, int size) {

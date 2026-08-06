@@ -950,6 +950,29 @@ ObjFile *c51_link_startup(const char *source_path, ObjFile *main_obj)
             free(startup_path);
         }
     }
+    if (!startup_obj) {
+        /* 未找到 STARTUP.A51 时注入内置默认启动:
+         * 清 IDATA + 设 SP + 跳 main, 保证程序从 0x0000 正确启动 */
+        const char *builtin_startup =
+            "?C_STARTUP:\n"
+            "    MOV R0, #07FH\n"
+            "    CLR A\n"
+            "?C_IDATALOOP:\n"
+            "    MOV @R0, A\n"
+            "    DJNZ R0, ?C_IDATALOOP\n"
+            "    MOV SP, #07H\n"
+            "    LJMP _main\n";
+        ObjFile *bso = obj_new();
+        int bsec = obj_add_section(bso, "?C_STARTUP", SEC_CODE, 0, 1);
+        Section *bsecp = obj_get_section(bso, bsec);
+        if (bsecp) {
+            c51_emit_asm_text(bsecp, builtin_startup);
+            c51_encode(NULL, bso);
+            startup_obj = bso;
+        } else {
+            obj_free(bso);
+        }
+    }
 
     /* startup must come first so its code lands at address 0x0000,
      * then main, then runtime libs. */

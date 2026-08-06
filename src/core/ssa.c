@@ -1066,6 +1066,12 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         if (ast->ctype && ast->ctype->type == CTYPE_ARRAY) {
             return ssa_build_addr(b, ast->varname, ast->ctype);
         }
+        /* volatile 局部变量: 每次读取强制走内存 (IROP_LOAD),
+         * 不能走 var_map 的 SSA 值 (会被常量折叠/寄存器化, 违反 volatile 语义) */
+        if (ast->ctype && get_attr(ast->ctype->attr).ctype_volatile) {
+            ValueName vaddr = ssa_build_addr(b, ast->varname, ast->ctype);
+            return ssa_build_load(b, vaddr, ast->ctype, ast->ctype);
+        }
         return ssa_build_read(b, ast->varname);
     }
 
@@ -1308,7 +1314,12 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             ValueName val = gen_expr(b, ast->right);
             // 可能需要类型转换
             val = gen_type_cast(b, val, expr_value_type(ast->right), ast->left->ctype);
-            ssa_build_write(b, ast->left->varname, val);
+            if (ast->left->ctype && get_attr(ast->left->ctype->attr).ctype_volatile) {
+                ValueName vaddr = ssa_build_addr(b, ast->left->varname, ast->left->ctype);
+                ssa_build_store(b, vaddr, val, ast->left->ctype);
+            } else {
+                ssa_build_write(b, ast->left->varname, val);
+            }
             return val;
         } else if (ast->left && ast->left->type == AST_GVAR) {
             ValueName addr = ssa_build_addr(b, ast->left->varname, ast->left->ctype);
@@ -1483,6 +1494,14 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         ValueName val = gen_expr(b, ast->cast_expr);
         return gen_type_cast(b, val, ast->cast_expr->ctype, ast->ctype);
     }
+
+    case AST_COMPOUND_LIT: {
+        /* 先执行匿名变量的初始化, 再返回其值/地址 */
+        gen_stmt(b, ast->left);
+        if (ast->ctype && ast->ctype->type == CTYPE_PTR)
+            return ssa_build_addr(b, ast->operand->varname, ast->operand->ctype);
+        return ssa_build_read(b, ast->operand->varname);
+    }
     
     case AST_STRUCT_REF: {
         // ptr->field 或 s.field（后者先取地址）
@@ -1624,9 +1643,21 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
 
                     ValueName val = gen_expr(b, ast->declinit);
                     val = gen_type_cast(b, val, expr_value_type(ast->declinit), var->ctype);
-                    ssa_build_write(b, var->varname, val);
+                    if (var->ctype && get_attr(var->ctype->attr).ctype_volatile) {
+                        /* volatile 局部变量初始化: 写入内存 */
+                        ValueName vaddr = ssa_build_addr(b, var->varname, var->ctype);
+                        ssa_build_store(b, vaddr, val, var->ctype);
+                    } else {
+                        ssa_build_write(b, var->varname, val);
+                    }
                 } else {
-                    ssa_build_write(b, var->varname, 0);
+                    if (var->ctype && get_attr(var->ctype->attr).ctype_volatile) {
+                        ValueName vaddr = ssa_build_addr(b, var->varname, var->ctype);
+                        ValueName zero = ssa_build_const(b, 0);
+                        ssa_build_store(b, vaddr, zero, var->ctype);
+                    } else {
+                        ssa_build_write(b, var->varname, 0);
+                    }
                 }
             }
         }
