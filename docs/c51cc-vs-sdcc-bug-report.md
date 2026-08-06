@@ -259,3 +259,27 @@ python3 scripts/compare_sdcc.py --filter struct
 1. **bug-2448**：SEC_DATA/SEC_IDATA 物理重叠（架构级，需 @R0 全面改造）
 2. **bug-2458**：SSA 优化 phi 悬空（多 pass 交互，深层）
 3. **bug-1292721/2175/2582**：待进一步分析（static/volatile/struct 参数相关）
+
+## 13. 修复记录（2026-08-06 第五轮：static局部变量 / SSA phi 残留标签 / struct 成员访问）
+
+### 新增修复（5 个 commit：892799b/99c4873/32dce94/206b844）
+| # | Bug | 文件 | 根因与修复 |
+|---|---|---|---|
+| 15 | **函数内 static 局部变量撞寄存器组+初值丢失**（bug-1292721 根因之一） | ssa.c | 静态局部（AST_GVAR）此前不注册进 unit->globals，isel fallback 建符号时既无 16 字节寄存器组/栈保留区（`__sloc_0` 落到 IRAM 0x00=R0，bar() 的 `MOV R0,#0` 把 ret 写回 0），初值也丢成全 0（`static char ret=7` 编出 DB 000H）。gen_stmt AST_DECL 加 AST_GVAR 分支 → ssa_add_global（含 init_instr），由 handle_normal_global_var 统一 reserve+写初值 |
+| 16 | **SSA phi 置 NOP 残留块标签 → 幻影 CFG 边**（bug-1292721 死循环根因） | ssa.c/ssa_pass.c | ssa_try_remove_trivial_phi 把 trivial phi 置 NOP 时保留前驱块标签；尾部 NOP 被 rebuild_preds/pass_block_merge 当终止指令读取 → 幻影 preds，块合并把 preheader 的 `aa=bar()` 拉进循环体（每轮重执行→死循环）。修复：置 NOP 时清 args/labels；rebuild_preds/block_has_other_preds/pass_block_merge/block_has_terminator 改用最后非 NOP 指令作终止指令 |
+| 17 | **pass_block_merge 误删尾部 PHI → 自环 jmp**（bug-1408066 链接错误） | ssa_pass.c | 块结构可为 `[JMP, PHI]`，list_remove_last 删的是 PHI 而非 JMP，残留 JMP 经 replace_label_all 变 `jmp b0` 自环 → 悬空 L0 重定位。改为按 effective terminator（最后非 NOP/PHI 指令）指针移除 |
+| 18 | **全局 struct 成员访问错（struct 参数类）**（bug-2582 根因） | ssa.c | AST_STRUCT_REF/AST_ASSIGN 对 AST_GVAR 走 gen_expr（LOAD 整个 struct 当作指针）+offset，而非取地址（AST_BIT_REF 已正确处理 GVAR）。修复：GVAR 与 LVAR 一样 ssa_build_addr；嵌套 struct/数组字段的 STRUCT_REF 返回地址不 load |
+| 19 | **嵌套 OFFSET 链无法折叠 → 寄存器残留**（bug-2582 读写错） | c51_isel_mem.c | emit_offset/emit_store/emit_load 折叠检查只解析一层 OFFSET(ADDR/LOAD)；嵌套 offset(offset(offset(addr,0),0),0)（嵌套 struct 成员产生）无法解析 → 外层按 linscan 寄存器复制内层值，而内层因折叠未物化 → 拿到 mpStyle 写后残留的 R2:R3。新增 resolve_offset_chain 递归解析 (符号,总偏移) 三处统一使用；不解析 LOAD(ADDR(sym)) 链（指针字段加载，折叠会把指针值错当基地址） |
+
+### 调试工具
+- `C51CC_SKIP_PASS`（ssa_pass.c）/ `C51CC_SKIP_PEEP`（c51_optimize.c）：环境变量跳过指定优化 pass/窥孔，用于二分定位。
+- `scripts/run3.py` / `scripts/suite_check.py`：单独跑 SDCC 3 个 bug 用例 / 自带套件（Android 可跑，替代 Windows run_suite.py）。
+
+### 最终状态
+- SDCC 回归集：**150 PASS** / 3 行为差异（bug-2448/2458/2632）/ 162 编译失败（特性缺失）
+- 自带套件：66/6（6 个为历史遗留：14_if_chain/23_func_recursive/49_func_ptr/52_multi_return/62_power/69_enum，与基线一致）
+
+### 剩余 3 个 diff 根因
+1. **bug-2448**：SEC_DATA/SEC_IDATA 物理重叠（架构级，需 @R0 全面改造 + IDATA 移 0x80+）
+2. **bug-2458**：SSA phi 悬空（多 pass 交互，深层）
+3. **bug-2632**：大数组下标寻址（testArr255[255] 超出 SEC_DATA 直接寻址域，i*24+j 索引地址计算断链；全优化级别均挂）
