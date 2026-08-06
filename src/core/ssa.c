@@ -1349,7 +1349,7 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             ValueName base;
             Ctype *struct_type;
 
-            if (ref->struc->type == AST_LVAR) {
+            if (ref->struc->type == AST_LVAR || ref->struc->type == AST_GVAR) {
                 base = ssa_build_addr(b, ref->struc->varname, ref->struc->ctype);
                 struct_type = ref->struc->ctype;
             } else if (ref->struc->type == AST_DEREF) {
@@ -1518,8 +1518,8 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         ValueName base;
         Ctype *struct_type;
         
-        if (ast->struc->type == AST_LVAR) {
-            // s.field -> (&s)->field
+        if (ast->struc->type == AST_LVAR || ast->struc->type == AST_GVAR) {
+            // s.field -> (&s)->field (全局 struct 同理, 必须取地址不能 load)
             base = ssa_build_addr(b, ast->struc->varname, ast->struc->ctype);
             struct_type = ast->struc->ctype;
         } else if (ast->struc->type == AST_DEREF) {
@@ -1545,6 +1545,9 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         // 普通字段：计算偏移地址后加载
         ValueName field_addr = ssa_build_offset(b, base,
             ssa_build_const(b, field->offset), 1);
+        /* 嵌套 struct/数组字段: 返回地址 (a.b.c 中 b 是 struct 时不能 load) */
+        if (field->type == CTYPE_STRUCT || field->type == CTYPE_ARRAY)
+            return field_addr;
         return ssa_build_load(b, field_addr, field, field);
     }
     case AST_BIT_REF: {

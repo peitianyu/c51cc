@@ -20,6 +20,40 @@ static void emit_load_save_byte(ISelContext* isel, int dst_reg, int size, bool h
     }
 }
 
+/* 通过 OFFSET(value, const) / LOAD(ADDR(sym)) 链解析出 (符号, 累计偏移).
+ * 用于 emit_offset/emit_store/emit_load 的折叠检查: 嵌套的
+ * offset(offset(offset(addr gWindow,0),0),0) 必须能解析到 gWindow+0,
+ * 否则内层 OFFSET 折叠后值未进寄存器, 外层按寄存器复制会拿到残留值
+ * (bug-2582: mpStyle 写完后 R2:R3 残留 gWindowRenderStyle 地址被当 gWindow). */
+static bool resolve_offset_chain(ISelContext* isel, ValueName value, const char **out_sym, int64_t *out_off, int depth) {
+    if (!isel || !isel->ctx || !isel->ctx->current_func || value <= 0) return false;
+    if (depth > 16) return false;
+    Func *f = isel->ctx->current_func;
+    Instr *def = find_def_instr_in_func(f, value);
+    if (!def) return false;
+    if (def->op == IROP_ADDR) {
+        if (!isel->ctx->value_to_addr) return false;
+        char *bk = int_to_key(def->dest);
+        const char *sym = (const char *)dict_get(isel->ctx->value_to_addr, bk);
+        free(bk);
+        if (!sym) return false;
+        *out_sym = sym;
+        *out_off = 0;
+        return true;
+    }
+    if (def->op == IROP_OFFSET && def->args && def->args->len >= 2) {
+        ValueName base = *(ValueName*)list_get(def->args, 0);
+        ValueName idx = *(ValueName*)list_get(def->args, 1);
+        int64_t idxv = 0;
+        if (!try_get_value_const(isel, idx, &idxv)) return false;
+        int64_t scale = def->imm.ival ? def->imm.ival : 1;
+        if (!resolve_offset_chain(isel, base, out_sym, out_off, depth + 1)) return false;
+        *out_off += idxv * scale;
+        return true;
+    }
+    return false;
+}
+
 static void store_spilled_mem_result(ISelContext* isel, Instr* ins, int reg, int size) {
     if (!ins) return;
     emit_store_spilled_result(isel, ins->dest, reg, size, ins);
@@ -613,44 +647,22 @@ void emit_offset(ISelContext* isel, Instr* ins) {
         int64_t idx_imm = 0;
         bool idx_is_imm_early = try_get_value_const(isel, idx, &idx_imm);
         if (idx_is_imm_early) {
-            /* Resolve base symbol */
+            /* Resolve (sym, total_off) through nested OFFSET chains */
             const char *osym = NULL;
-            Func *f = isel->ctx->current_func;
-            Instr *bdef = find_def_instr_in_func(f, base);
-            if (bdef && bdef->op == IROP_ADDR) {
-                if (isel->ctx->value_to_addr) {
-                    char *bk = int_to_key(bdef->dest);
-                    osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
-                    free(bk);
-                }
-            } else if (bdef && bdef->op == IROP_LOAD
-                       && bdef->args && bdef->args->len >= 1) {
-                ValueName inner = *(ValueName*)list_get(bdef->args, 0);
-                Instr *idef2 = find_def_instr_in_func(f, inner);
-                if (idef2 && idef2->op == IROP_ADDR && isel->ctx->value_to_addr) {
-                    char *bk = int_to_key(idef2->dest);
-                    osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
-                    free(bk);
-                }
-            } else if (isel->ctx->value_to_addr) {
-                char *bk = int_to_key(base);
-                osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
-                free(bk);
-            }
-            if (osym) {
+            int64_t total_off = 0;
+            if (resolve_offset_chain(isel, ins->dest, &osym, &total_off, 0)) {
                 SectionKind osec = get_symbol_section_kind(isel, osym);
                 if (osec == SEC_DATA || osec == SEC_IDATA || osec == SEC_XDATA) {
-                    /* Result value only used as LOAD/STORE pointer �?no register needed */
+                    /* Result value only used as LOAD/STORE pointer - no register needed */
                     if (!addr_value_needs_materialization(isel, ins->dest)) {
                         return;
                     }
                 }
-                /* CODE segment with constant offset �?255: emit_load handles this via
+                /* CODE segment with constant offset <= 255: emit_load handles this via
                  * MOV DPTR,#sym; MOV A,#off; MOVC A,@A+DPTR directly, so no register
                  * materialization is needed. */
                 if (osec == SEC_CODE) {
-                    int total = (int)(idx_imm * (int)(ins->imm.ival ? ins->imm.ival : 1));
-                    if (total >= 0 && total <= 255 && !addr_value_needs_materialization(isel, ins->dest)) {
+                    if (total_off >= 0 && total_off <= 255 && !addr_value_needs_materialization(isel, ins->dest)) {
                         return;
                     }
                 }
@@ -824,45 +836,16 @@ void emit_store(ISelContext* isel, Instr* ins) {
             if (def && def->op == IROP_ADDR) {
                 allow_pointer_store = false;
             }
-            /* Optimization: STORE through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) �?direct sym+off store */
+            /* Optimization: STORE through nested OFFSET(ADDR/LOAD(ADDR)) chain -> direct sym+off store */
             if (allow_pointer_store && def && def->op == IROP_OFFSET
                     && def->args && def->args->len >= 2) {
-                ValueName base = *(ValueName*)list_get(def->args, 0);
-                ValueName offv = *(ValueName*)list_get(def->args, 1);
-                /* Resolve base: may be ADDR(sym) or LOAD(ADDR(sym)) */
+                /* Resolve (sym, off) through nested OFFSET/LOAD chains */
                 const char *sym = NULL;
-                Instr *bdef = find_def_instr_in_func(isel->ctx->current_func, base);
-                if (bdef && bdef->op == IROP_ADDR) {
-                    /* OFFSET(ADDR(sym), k) */
-                    if (isel->ctx->value_to_addr) {
-                        char *bkey = int_to_key(bdef->dest);
-                        sym = (const char*)dict_get(isel->ctx->value_to_addr, bkey);
-                        free(bkey);
-                    }
-                } else if (bdef && bdef->op == IROP_LOAD
-                           && bdef->args && bdef->args->len >= 1) {
-                    /* OFFSET(LOAD(ADDR(sym)), k) */
-                    ValueName inner = *(ValueName*)list_get(bdef->args, 0);
-                    Instr *idef = find_def_instr_in_func(isel->ctx->current_func, inner);
-                    if (idef && idef->op == IROP_ADDR && isel->ctx->value_to_addr) {
-                        char *bkey = int_to_key(idef->dest);
-                        sym = (const char*)dict_get(isel->ctx->value_to_addr, bkey);
-                        free(bkey);
-                    }
-                } else {
-                    /* direct lookup in value_to_addr */
-                    if (isel->ctx->value_to_addr) {
-                        char *bkey = int_to_key(base);
-                        sym = (const char*)dict_get(isel->ctx->value_to_addr, bkey);
-                        free(bkey);
-                    }
-                }
-                if (sym) {
-                    Instr *cdef = find_def_instr_in_func(isel->ctx->current_func, offv);
+                int64_t chain_off = 0;
+                if (resolve_offset_chain(isel, ptr, &sym, &chain_off, 0)) {
+                    Instr *cdef = find_def_instr_in_func(isel->ctx->current_func,
+                                                         *(ValueName*)list_get(def->args, 1));
                     if (cdef && cdef->op == IROP_CONST) {
-                        int64_t idx_imm = cdef->imm.ival;
-                        int scale = (int)(def->imm.ival ? def->imm.ival : 1);
-                        int off = (int)(idx_imm * scale);
                         SectionKind sym_sec = get_symbol_section_kind(isel, sym);
                         if (sym_sec == SEC_DATA || sym_sec == SEC_IDATA || sym_sec == SEC_XDATA) {
                             int store_size = ins->mem_type ? c51_abi_type_size(ins->mem_type) : 1;
@@ -870,9 +853,9 @@ void emit_store(ISelContext* isel, Instr* ins) {
                             if (store_size > 2) store_size = 2;
                             const char* vlo = isel_get_extended_lo_reg(isel, val, store_size);
                             const char* vhi = (store_size == 2) ? isel_get_extended_hi_reg(isel, val, store_size) : NULL;
-                            emit_store_symbol_byte(isel, sym, off, vlo, ins);
+                            emit_store_symbol_byte(isel, sym, (int)chain_off, vlo, ins);
                             if (store_size == 2 && vhi) {
-                                emit_store_symbol_byte(isel, sym, off + 1, vhi, NULL);
+                                emit_store_symbol_byte(isel, sym, (int)chain_off + 1, vhi, NULL);
                             }
                             return;
                         }
@@ -1155,39 +1138,13 @@ void emit_load(ISelContext* isel, Instr* ins) {
                     }
                 }
             }
-            /* Optimization: LOAD through OFFSET(ADDR(sym)/LOAD(ADDR(sym)), const) �?direct sym+off load */
+            /* Optimization: LOAD through nested OFFSET(ADDR/LOAD(ADDR)) chain -> direct sym+off load */
             if (allow_pointer_deref && def && def->op == IROP_OFFSET
                     && def->args && def->args->len >= 2) {
-                ValueName obase = *(ValueName*)list_get(def->args, 0);
-                ValueName ooffv = *(ValueName*)list_get(def->args, 1);
                 const char *osym = NULL;
-                Instr *obdef = find_def_instr_in_func(isel->ctx->current_func, obase);
-                if (obdef && obdef->op == IROP_ADDR) {
-                    if (isel->ctx->value_to_addr) {
-                        char *bk = int_to_key(obdef->dest);
-                        osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
-                        free(bk);
-                    }
-                } else if (obdef && obdef->op == IROP_LOAD
-                           && obdef->args && obdef->args->len >= 1) {
-                    ValueName inner = *(ValueName*)list_get(obdef->args, 0);
-                    Instr *idef2 = find_def_instr_in_func(isel->ctx->current_func, inner);
-                    if (idef2 && idef2->op == IROP_ADDR && isel->ctx->value_to_addr) {
-                        char *bk = int_to_key(idef2->dest);
-                        osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
-                        free(bk);
-                    }
-                } else if (isel->ctx->value_to_addr) {
-                    char *bk = int_to_key(obase);
-                    osym = (const char*)dict_get(isel->ctx->value_to_addr, bk);
-                    free(bk);
-                }
-                if (osym) {
-                    Instr *ocdef = find_def_instr_in_func(isel->ctx->current_func, ooffv);
-                    if (ocdef && ocdef->op == IROP_CONST) {
-                        int64_t oidx = ocdef->imm.ival;
-                        int oscale = (int)(def->imm.ival ? def->imm.ival : 1);
-                        int ooff = (int)(oidx * oscale);
+                int64_t ochain_off = 0;
+                if (resolve_offset_chain(isel, ptr, &osym, &ochain_off, 0)) {
+                    int ooff = (int)ochain_off;
                         SectionKind osec = get_symbol_section_kind(isel, osym);
                         if (osec == SEC_DATA || osec == SEC_IDATA || osec == SEC_XDATA) {
                             int size = ins->type ? c51_abi_type_size(ins->type) : 1;
@@ -1242,7 +1199,6 @@ void emit_load(ISelContext* isel, Instr* ins) {
                         }
                     }
                 }
-            }
         }
         if (allow_pointer_deref && emit_load_from_pointer_value(isel, ins, ptr)) return;
     }

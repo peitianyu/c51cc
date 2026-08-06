@@ -3209,97 +3209,73 @@ static void optimize_section(Section* sec) {
 
         for (int i = 0; i < sec->asminstrs->len; i++) {
             int removed = 0;
+            /* 调试用: C51CC_SKIP_PEEP=peephole_xxx 跳过指定窥孔优化 */
+#define RUN_PEEP(_fn) do { const char *_skip = getenv("C51CC_SKIP_PEEP"); \
+             if (!(_skip && *_skip && strstr(#_fn, _skip))) { \
+                 removed = _fn(sec->asminstrs, i); \
+                 if (removed) { changed = 1; continue; } \
+             } } while (0)
 
-            removed = peephole_remove_empty_local_label(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_remove_empty_local_label);
 
-            removed = peephole_add_zero_16(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_add_zero_16);
 
-            removed = peephole_add_addc_zero(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_add_addc_zero);
 
-            removed = peephole_anl_bit0_branch(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_anl_bit0_branch);
 
-            removed = peephole_logical_nop(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_logical_nop);
 
             // CLR C; RLC A → ADD A, A (逻辑左移1位，节省1条指令)
-            removed = peephole_clr_c_rlc_to_add(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_clr_c_rlc_to_add);
 
-            removed = peephole_orl_with_zero_acc(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_orl_with_zero_acc);
 
-            removed = peephole_drop_dead_mov_before_bit_branch(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_drop_dead_mov_before_bit_branch);
 
-            removed = peephole_dead_mov_a(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_dead_mov_a);
 
-            removed = peephole_fold_mov_a_to_mem(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_fold_mov_a_to_mem);
 
-            removed = peephole_copy_pair_fold(sec->asminstrs, i);
-            if (removed) { changed = 1; i += removed - 1; continue; }
+            RUN_PEEP(peephole_copy_pair_fold);
 
-            removed = peephole_redundant_swap(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_redundant_swap);
 
-            removed = peephole_redundant_load(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_redundant_load);
 
-            removed = peephole_eliminate_temp_reg(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_eliminate_temp_reg);
 
-            removed = peephole_copy_propagate(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_copy_propagate);
 
-            removed = peephole_forward_copy_to_dest(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_forward_copy_to_dest);
 
-            removed = peephole_idata_store_load_forward(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_idata_store_load_forward);
 
-            removed = peephole_idata_load_from_reg(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_idata_load_from_reg);
 
-            removed = peephole_spill16_store_reload_forward(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_spill16_store_reload_forward);
 
-            removed = peephole_xdata_store_load_forward(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_xdata_store_load_forward);
 
-            removed = peephole_dec_reg_branch(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_dec_reg_branch);
 
-            removed = peephole_mov_dec_djnz(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_mov_dec_djnz);
 
-            removed = peephole_sbit_bool_materialize(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_sbit_bool_materialize);
 
-            removed = peephole_sbit_bool_jz(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_sbit_bool_jz);
 
-            removed = peephole_mov_reg_to_any(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_mov_reg_to_any);
 
-            removed = peephole_propagate_reg_imm(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_propagate_reg_imm);
 
-            removed = peephole_mov_chain(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_mov_chain);
 
-            removed = peephole_dead_code(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_dead_code);
 
-            removed = peephole_dead_after_jump(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_dead_after_jump);
 
-            removed = peephole_self_mov(sec->asminstrs, i);
-            if (removed) { changed = 1; continue; }
+            RUN_PEEP(peephole_self_mov);
 
             /* Control-flow peepholes here are currently too aggressive and can
              * collapse live blocks (e.g. branch true-path arithmetic blocks in
