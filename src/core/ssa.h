@@ -125,6 +125,7 @@ void      ssa_build_destroy(SSABuild *b);
 void      ast_to_ssa(SSABuild *b, Ast *ast);
 
 void      ssa_print_instr(FILE *fp, Instr *i, List *consts);
+void      ssa_print_func(FILE *fp, Func *f);
 void      ssa_print(FILE *fp, SSAUnit *unit);
 
 void      ssa_add_global(SSABuild *b, const char *name, Ctype *type, long init_value, bool has_init,

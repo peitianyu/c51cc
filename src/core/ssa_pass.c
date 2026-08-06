@@ -6,6 +6,10 @@
 
 static SSAUnit *g_unit;
 
+/* 返回块中最后一条非 NOP 指令 (真正的终止指令).
+ * 定义在文件后半部, 这里前置声明. */
+static Instr *block_last_effective_instr(Block *b);
+
 /*---------- 通用基础设施 ----------*/
 static void *pass_alloc(size_t sz) {
     void *p = malloc(sz);
@@ -232,7 +236,7 @@ static bool block_has_other_preds(Func *f, Block *t, Block *only) {
         Block *b = iter_next(&it);
         if (!b || b == only) continue;
         if (!b->instrs || b->instrs->len == 0) continue;
-        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        Instr *term = block_last_effective_instr(b);
         if (!term || !term->labels) continue;
         for (int k = 0; k < term->labels->len; k++) {
             int id = -1;
@@ -390,7 +394,9 @@ static void rebuild_preds(Func *f) {
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
         if (!b || !b->instrs || b->instrs->len == 0) continue;
-        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        /* 用最后一条非 NOP 指令作为终止指令: 被 NOP 化的 phi 可能残留
+         * 块标签, 若直接用 list_get(len-1) 会得到幻影 CFG 边. */
+        Instr *term = block_last_effective_instr(b);
         if (!term || !term->labels) continue;
         for (int k = 0; k < term->labels->len; k++) {
             int tid = -1;
@@ -2765,11 +2771,16 @@ static bool pass_block_merge(Func *f, Stats *s) {
     bool changed = false;
     if (!f || !f->blocks) return false;
     rebuild_preds(f);
+    if (getenv("C51CC_MERGE_DEBUG")) {
+        fprintf(stderr, "[merge] start func=%s\n", f->name ? f->name : "?");
+    }
+
 
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
         if (!b || !b->instrs || b->instrs->len == 0) continue;
-        Instr *term = (Instr *)list_get(b->instrs, b->instrs->len - 1);
+        /* 用最后一条非 NOP 指令作为终止指令 (NOP 化 phi 可能残留标签) */
+        Instr *term = block_last_effective_instr(b);
         if (!term || term->op != IROP_JMP || !term->labels || term->labels->len < 1) continue;
 
         int tid = -1;
@@ -2781,7 +2792,21 @@ static bool pass_block_merge(Func *f, Stats *s) {
         if (!t->instrs || t->instrs->len == 0) continue;
          if (t->preds && t->preds->len != 1) continue;
 
-        list_remove_last(b->instrs, NULL);
+        /* 移除 b 的真实 JMP 终止指令 (最后一个非 NOP/PHI 指令;
+         * 块的 instrs 末尾可能还有 NOP 化 phi 或 PHI, 不能直接 list_remove_last) */
+        {
+            List *nb = make_list();
+            for (Iter _rit = list_iter(b->instrs); !iter_end(_rit);) {
+                Instr *ri = iter_next(&_rit);
+                if (ri == term) continue; /* 跳过 JMP 终止指令 */
+                list_push(nb, ri);
+            }
+            b->instrs = nb;
+        }
+        if (getenv("C51CC_MERGE_DEBUG"))
+            fprintf(stderr, "[merge] func=%s b%ld + t%ld (t->preds=%d)\n",
+                    f->name ? f->name : "?", (long)b->id, (long)t->id,
+                    t->preds ? t->preds->len : -1);
         for (Iter jt = list_iter(t->instrs); !iter_end(jt);) list_push(b->instrs, iter_next(&jt));
 
         if (t->instrs && t->instrs->len > 0) {
@@ -3545,13 +3570,26 @@ static bool ensure_block_targets_exist(Func *f) {
 }
 
 /*---------- 统一迭代框架 ----------*/
+static bool pass_skipped(const char *name) {
+    const char *skip = getenv("C51CC_SKIP_PASS");
+    return skip && *skip && strstr(name, skip) != NULL;
+}
+
+static void dump_pass_ssa(Func *f, const char *name) {
+    const char *want = getenv("C51CC_SSA_TRACE");
+    if (!want || !*want) return;
+    if (strcmp(want, "*") != 0 && strstr(name, want) == NULL) return;
+    fprintf(stderr, "\n===== after %s (func %s) =====\n", name, f->name ? f->name : "?");
+    ssa_print_func(f, stderr);
+}
+
 void ssa_optimize_func(Func *f, int level) {
     if (!f || level == OPT_O0) return;
     Stats st = {0};
     bool changed;
     int it = 0;
     do {
-#define RUN_PASS(_p) do { if (_p(f, &st)) { changed = true; rebuild_preds(f); } } while (0)
+#define RUN_PASS(_p) do { if (!pass_skipped(#_p)) { if (_p(f, &st)) { changed = true; rebuild_preds(f); } dump_pass_ssa(f, #_p); } } while (0)
         changed = false;
         RUN_PASS(pass_const_fold);
         RUN_PASS(pass_simplify_redundant_ne);

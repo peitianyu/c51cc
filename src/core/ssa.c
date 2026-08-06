@@ -79,7 +79,12 @@ static void ssa_emit(SSABuild *b, Instr *i) {
 
 static bool block_has_terminator(Block *blk) {
     if (!blk || !blk->instrs || blk->instrs->len == 0) return false;
-    Instr *last = list_get(blk->instrs, blk->instrs->len - 1);
+    /* 跳过尾部 NOP (如被 ssa_try_remove_trivial_phi 置 NOP 的 phi) */
+    Instr *last = NULL;
+    for (Iter it = list_iter(blk->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (i && i->op != IROP_NOP) last = i;
+    }
     if (!last) return false;
     return last->op == IROP_JMP || last->op == IROP_BR || last->op == IROP_RET;
 }
@@ -276,6 +281,11 @@ static ValueName ssa_try_remove_trivial_phi(SSABuild *b, Instr *phi) {
     if (has_same) {
         replace_uses(b, phi->dest, same);
         phi->op = IROP_NOP;
+        /* 必须清掉 phi 的标签/操作数: phi 的 labels 是前驱块标签,
+         * 残留的 NOP 会被 rebuild_preds / pass_block_merge 当作终止指令
+         * 读取, 产生幻影 CFG 边 (bug-1292721 死循环根因). */
+        if (phi->args) list_clear(phi->args);
+        if (phi->labels) list_clear(phi->labels);
         return same;
     }
     return 0;
@@ -1599,6 +1609,52 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
     }
     case AST_DECL: {
         Ast *var = ast->declvar;
+        if (var && var->type == AST_GVAR) {
+            /* 函数内 static 局部变量: 注册为全局(持久存储), 初值写入数据段.
+             * (此前完全不注册, isel 阶段 fallback 建符号时既无 16 字节
+             * 寄存器组/栈保留区, 初值也被丢成全 0.) */
+            long init_val = 0;
+            bool has_init = false;
+            Instr *init_instr = NULL;
+            if (ast->declinit) {
+                if (ast->declinit->type == AST_STRING && ast->declinit->slabel) {
+                    /* 指针由字符串初始化: 确保字符串本身作为独立全局导出 */
+                    if (!ssa_find_global(b->unit, ast->declinit->slabel)) {
+                        int slen = (int)strlen(ast->declinit->sval) + 1;
+                        Ctype *sctype = ssa_alloc(sizeof(Ctype));
+                        sctype->type = CTYPE_ARRAY;
+                        sctype->ptr = ctype_char;
+                        sctype->size = slen;
+                        sctype->attr = (6 << 7); /* code/.const */
+                        sctype->bit_offset = 0;
+                        sctype->bit_size = 0;
+                        sctype->fields = NULL;
+                        sctype->len = slen;
+                        Instr *sinit = build_global_init_instr(b, sctype, ast->declinit);
+                        ssa_add_global(b, ast->declinit->slabel, sctype, 0,
+                                       sinit != NULL, sinit, true, false);
+                    }
+                    Instr *pinit = ssa_make_instr(b, IROP_CONST);
+                    list_push(pinit->labels, ssa_strdup(ast->declinit->slabel));
+                    init_instr = pinit;
+                    if (var->ctype) var->ctype->attr |= (6 << 7);
+                    has_init = true;
+                } else if (ast->declinit->type == AST_LITERAL &&
+                           is_inttype(ast->declinit->ctype)) {
+                    init_val = ast->declinit->ival;
+                    has_init = true;
+                } else {
+                    init_instr = build_global_init_instr(b, var->ctype, ast->declinit);
+                    if (init_instr && init_instr->imm.blob.bytes &&
+                        init_instr->imm.blob.len > 0) has_init = true;
+                }
+            }
+            CtypeAttr gattr = get_attr(var->ctype->attr);
+            if (gattr.ctype_extern && !has_init) break;
+            ssa_add_global(b, var->varname, var->ctype, init_val, has_init,
+                           init_instr, gattr.ctype_static, gattr.ctype_extern);
+            break;
+        }
         if (var && var->type == AST_LVAR) {
             (void)0;
             if (var->ctype && (var->ctype->type == CTYPE_STRUCT || var->ctype->type == CTYPE_ARRAY)) {
@@ -2658,7 +2714,7 @@ void ssa_print_instr(FILE *fp, Instr *i, List *consts) {
     fprintf(fp, "\n");
 }
 
-static void ssa_print_func(FILE *fp, Func *f) {
+void ssa_print_func(FILE *fp, Func *f) {
     if (!f) return;
     g_print_func = f;
     fprintf(fp, "@%s(", f->name);
