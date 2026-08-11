@@ -222,6 +222,107 @@ static void block_label_name(char* out, size_t n, int id) {
     snprintf(out, n, "L%d", id);
 }
 
+/* ============================================================
+ * Keil C251 ABI 参数寄存器（tinycc_c251 c251-lib.inc:169 实测验证）：
+ *   u8:  {A(R11), R7, R6, R5, R4}  按序取第一个未被占用的字节寄存器
+ *   u16: {WR6, WR4, WR2, WR0}      按序取第一个未被占用的 WR 对
+ *   u32: {DR4, DR0}                (M2 报错，M3 支持)
+ * 参数按声明序；u16 占用 R6:R7 影响后续 u8 槽（Keil 实测 three_args
+ * u8,u16,u8 → A, WR6, R5：R7/R6 被 WR6 占）。
+ * 返回: u8 → 字节寄存器号(0-15)；u16 → WR 索引(0/2/4/6)；-1 不足；-2 不支持的宽度
+ * ============================================================ */
+static int abi_param_reg(int *used, int sz, int *u8i, int *u16i) {
+    if (sz <= 1) {
+        static const int u8seq[5] = { 11, 7, 6, 5, 4 };  /* A, R7, R6, R5, R4 */
+        while (*u8i < 5) {
+            int r = u8seq[(*u8i)++];
+            if (!used[r]) { used[r] = 1; return r; }
+        }
+        return -1;
+    }
+    if (sz <= 2) {
+        static const int u16seq[4] = { 6, 4, 2, 0 };  /* WR6, WR4, WR2, WR0 */
+        while (*u16i < 4) {
+            int wr = u16seq[(*u16i)++];
+            if (!used[wr] && !used[wr + 1]) { used[wr] = used[wr + 1] = 1; return wr; }
+        }
+        return -1;
+    }
+    return -2;  /* u32/指针: M3 */
+}
+
+/* 字节寄存器名（A=R11 用助记符 A） */
+static const char* reg_name(int r) {
+    if (r == 11) return "A";
+    static char buf[8];
+    snprintf(buf, sizeof(buf), "R%d", r);
+    return buf;
+}
+
+/* 值宽度：1 字节 / 2 字（M2 只支持这两个；未知默认 2） */
+static int value_size_of(ISelContext* isel, ValueName v) {
+    C251GenContext *ctx = isel->ctx;
+    if (v >= 0) {
+        char *k = c251_key(v);
+        Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
+        free(k);
+        if (t) return t->size > 1 ? 2 : 1;
+    }
+    return 2;
+}
+
+/* 把值 v 的低字节装载到字节寄存器 r（Keil ABI u8 参数装载）：
+ * 值在 WR → MOV Rr,低字节(R(wr+1))；常量 → MOV Rr,#v&0xFF；槽 → MOV Rr,__spill_N */
+static void load_u8_to_r(ISelContext* isel, ValueName v, int r) {
+    C251GenContext *ctx = isel->ctx;
+    const char *rn = reg_name(r);
+    int vr = isel_value_reg(ctx, v);
+    if (vr >= 0) {
+        char lo[16]; snprintf(lo, sizeof(lo), "R%d", vr + 1);  /* WRj 大端低字节 = R(j+1) */
+        isel_emit(isel, "MOV", rn, lo);
+        return;
+    }
+    char *k = c251_key(v);
+    int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k);
+    free(k);
+    if (cv) {
+        char imm[16]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFF);
+        isel_emit(isel, "MOV", rn, imm);
+        return;
+    }
+    char *sp = c251_value_spill(ctx, v);
+    if (sp) { isel_emit(isel, "MOV", rn, sp); return; }
+    fprintf(stderr, "c251 isel: u8 实参 %d 无来源\n", v);
+    isel_emit(isel, "MOV", rn, "#0");
+}
+
+/* 调用前活值压栈（caller-saves + 递归安全）：逆序 PUSH 活值 WR 对（WR6,WR4,WR2,WR0）
+ * 字节序: WRj 大端 = Rj(高):R(j+1)(低)，PUSH 高字节在前（栈顶=低字节，POP 先取低） */
+static void save_live_regs_stack(ISelContext* isel) {
+    for (int i = 3; i >= 0; i--) {
+        if (isel->reg_val[i] >= 0) {
+            char rh[8], rl[8];
+            snprintf(rh, sizeof(rh), "R%d", i * 2);
+            snprintf(rl, sizeof(rl), "R%d", i * 2 + 1);
+            isel_emit(isel, "PUSH", rh, NULL);
+            isel_emit(isel, "PUSH", rl, NULL);
+        }
+    }
+}
+
+/* 调用后恢复：正序 POP（先低字节后高字节，逆压栈序） */
+static void restore_live_regs_stack(ISelContext* isel) {
+    for (int i = 0; i < 4; i++) {
+        if (isel->reg_val[i] >= 0) {
+            char rh[8], rl[8];
+            snprintf(rh, sizeof(rh), "R%d", i * 2);
+            snprintf(rl, sizeof(rl), "R%d", i * 2 + 1);
+            isel_emit(isel, "POP", rl, NULL);
+            isel_emit(isel, "POP", rh, NULL);
+        }
+    }
+}
+
 /* 边缘 phi 拷贝：为跳转到 succ_id 的边发射 MOV __spill_phiN, param
  * （phi dest 在 isel_block 块首分配 EDATA 槽；参数按来源块选择） */
 static void emit_phi_copies(ISelContext* isel, int succ_id) {
@@ -467,8 +568,53 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         break;
     }
-    case IROP_PARAM:
-        break; /* M1: 参数直接是 SSA 值，无需额外处理 */
+    case IROP_PARAM: {
+        /* 被调函数参数：按声明序从 ABI 寄存器装载（Keil C251） */
+        int idx = isel->param_counter++;
+        Func *f = ctx->current_func;
+        int sz = 2;
+        if (f && f->param_types && idx < (int)list_len(f->param_types)) {
+            Ctype *pt = (Ctype*)list_get(f->param_types, idx);
+            sz = pt ? (pt->size > 1 ? 2 : 1) : 2;
+        }
+        int reg = abi_param_reg(isel->param_used, sz, &isel->param_u8i, &isel->param_u16i);
+        if (reg == -2) { fprintf(stderr, "c251 isel: 参数 %d 宽度>16位 M3 支持\n", idx); break; }
+        if (reg < 0) { fprintf(stderr, "c251 isel: 参数 %d 寄存器不足 (M3 栈传参)\n", idx); break; }
+        if (sz <= 1) {
+            /* u8 参数在字节寄存器 → MOVZ WRj,Rr（零扩展物化到值寄存器） */
+            int wr = isel_alloc_wr(isel, ins->dest);
+            if (wr >= 0) {
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+                isel_emit(isel, "MOVZ", wbuf, reg_name(reg));
+            } else {
+                int tmp = isel_temp_wr(isel, -1, -1);
+                char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+                isel_emit(isel, "MOVZ", tbuf, reg_name(reg));
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                isel_emit(isel, "MOV", sp, tbuf);
+            }
+        } else {
+            /* u16 参数已在 WRreg → 物化到值寄存器/槽 */
+            int wr = isel_alloc_wr(isel, ins->dest);
+            if (wr >= 0) {
+                if (wr != reg) {
+                    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+                    char rbuf[16]; wr_name(rbuf, sizeof(rbuf), reg);
+                    isel_emit(isel, "MOV", wbuf, rbuf);
+                }
+            } else {
+                int tmp = isel_temp_wr(isel, -1, -1);
+                char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+                if (tmp != reg) {
+                    char rbuf[16]; wr_name(rbuf, sizeof(rbuf), reg);
+                    isel_emit(isel, "MOV", tbuf, rbuf);
+                }
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                isel_emit(isel, "MOV", sp, tbuf);
+            }
+        }
+        break;
+    }
     case IROP_ADD:
     case IROP_SUB:
     case IROP_MUL: {
@@ -509,19 +655,85 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     }
     case IROP_RET: {
         ValueName v = src1_of(ins);
-        if (v >= 0) {
-            int r = isel_value_reg(ctx, v);
-            if (r >= 0) {
-                if (r != 6) { char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r); isel_emit(isel, "MOV", "WR6", rbuf); }
-            } else {
-                load_value_to_wr(isel, v, 6);   /* const → MOV WR6,#imm; spill → MOV WR6,__spill_N */
+        /* 返回宽度: u8 → A(R11)；u16 → WR6（Keil C251 实测, golden tmp_func3.src） */
+        bool is_u8 = ins->type && ins->type->size <= 1;
+        if (is_u8) {
+            if (v >= 0) {
+                load_u8_to_r(isel, v, 11);  /* 值低字节 → A */
+            } else if (has_imm_label(ins)) {
+                char imm[16]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFF);
+                isel_emit(isel, "MOV", "A", imm);
             }
-        } else if (has_imm_label(ins)) {
-            /* ret const → 常量直接进 WR6 */
-            char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
-            isel_emit(isel, "MOV", "WR6", imm);
+        } else {
+            if (v >= 0) {
+                int r = isel_value_reg(ctx, v);
+                if (r >= 0) {
+                    if (r != 6) { char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r); isel_emit(isel, "MOV", "WR6", rbuf); }
+                } else {
+                    load_value_to_wr(isel, v, 6);   /* const → MOV WR6,#imm; spill → MOV WR6,__spill_N */
+                }
+            } else if (has_imm_label(ins)) {
+                /* ret const → 常量直接进 WR6 */
+                char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
+                isel_emit(isel, "MOV", "WR6", imm);
+            }
         }
         isel_emit(isel, "RET", NULL, NULL);
+        break;
+    }
+    case IROP_CALL: {
+        /* 函数调用（Keil C251 ABI）: labels[0]=函数名, args=实参值, dest=返回值
+         * 1) 活值全部溢出（caller-saves 保守版，参数装载会覆盖 ABI 寄存器）
+         * 2) 逆序装载实参到 ABI 寄存器（防先装载的实参被后装载覆盖）
+         * 3) LCALL
+         * 4) 返回值物化 (u8→A, u16→WR6) */
+        const char *fname = (ins->labels && list_len(ins->labels) > 0)
+            ? (const char*)list_get(ins->labels, 0) : NULL;
+        if (!fname || strcmp(fname, "indirect") == 0) {
+            fprintf(stderr, "c251 isel: 间接调用 (函数指针) M2.5 支持\n");
+            break;
+        }
+        int nargs = ins->args ? (int)list_len(ins->args) : 0;
+        /* ① 活值压栈（递归安全：内层调用覆盖寄存器后，外层经 POP 恢复） */
+        save_live_regs_stack(isel);
+        /* ② 逆序装载实参（防先装载的实参被后装载覆盖） */
+        int used[16] = { 0 };
+        int u8i = 0, u16i = 0;
+        int fail = 0;
+        for (int i = nargs - 1; i >= 0 && !fail; i--) {
+            ValueName av = *(ValueName*)list_get(ins->args, i);
+            int asz = value_size_of(isel, av);
+            int reg = abi_param_reg(used, asz, &u8i, &u16i);
+            if (reg == -2) { fprintf(stderr, "c251 isel: %s 实参 %d 宽度>16位 M3 支持\n", fname, i); fail = 1; break; }
+            if (reg < 0) { fprintf(stderr, "c251 isel: %s 实参 %d 寄存器不足 (M3 栈传参)\n", fname, i); fail = 1; break; }
+            if (asz <= 1) load_u8_to_r(isel, av, reg);
+            else           load_value_to_wr(isel, av, reg);
+        }
+        /* ③ 调用 */
+        isel_emit(isel, "LCALL", fname, NULL);
+        /* ④ 返回值暂存：u16 在 WR6（可能被恢复活值 POP 覆盖）；u8 在 A(R11) 不参与 POP，无需暂存 */
+        bool r_u8 = ins->type && ins->type->size <= 1;
+        char *ret_spill = NULL;
+        if (ins->dest > 0 && !r_u8) {
+            ret_spill = c251_alloc_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", ret_spill, "WR6");
+        }
+        /* ⑤ 恢复活值 */
+        restore_live_regs_stack(isel);
+        /* ⑥ dest 物化（u8 从 A；u16 从 ret_spill=dest 槽） */
+        if (ins->dest > 0) {
+            int wr = isel_alloc_wr(isel, ins->dest);
+            if (wr >= 0) {
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+                if (r_u8) isel_emit(isel, "MOVZ", wbuf, "A");
+                else isel_emit(isel, "MOV", wbuf, ret_spill);
+            } else if (r_u8) {
+                /* dest 溢出：A → dest 槽（字节写高字节位；M2 u8 槽语义） */
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                isel_emit(isel, "MOV", sp, "A");
+            }
+            /* u16 且 dest 溢出：值已在 ret_spill=dest 槽，无需再操作 */
+        }
         break;
     }
     case IROP_LOAD: {
@@ -557,6 +769,19 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_STORE: {
+        /* ssa_pass 优化格式: labels[0]="@sym", 值在 imm.ival（无 args）——store @g, const 30 */
+        if (ins->labels && list_len(ins->labels) > 0) {
+            const char *lab = (const char*)list_get(ins->labels, 0);
+            if (lab && lab[0] == '@') {
+                const char *sym = lab + 1;
+                int tmp = isel_temp_wr(isel, -1, -1);
+                char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+                char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
+                isel_emit(isel, "MOV", tbuf, imm);
+                isel_emit(isel, "MOV", sym, tbuf);
+                break;
+            }
+        }
         /* store ptr, val → MOV SYMBOL,WRj（编码器 dir16 写形态） */
         ValueName ptr = src1_of(ins), val = src2_of(ins);
         char *sym = value_to_addr_lookup(ctx, ptr);
@@ -802,7 +1027,7 @@ void isel_function(C251GenContext* ctx, Func* func) {
     /* 预扫描跨块活值（死值释放的安全边界） */
     Dict *global_live = compute_global_live(func);
 
-    int sec_idx = obj_add_section(ctx->obj, "?PR?", SEC_CODE, 0, 1);
+    int sec_idx = obj_find_or_add_section(ctx->obj, "?PR?", SEC_CODE, 1);
     Section* sec = obj_get_section(ctx->obj, sec_idx);
     int flags = SYM_FLAG_GLOBAL;
     obj_add_symbol(ctx->obj, func->name, SYM_FUNC, sec_idx, sec->size, 0, flags);
@@ -832,6 +1057,11 @@ void isel_function(C251GenContext* ctx, Func* func) {
     for (int i = 0; i < 4; i++) isel.reg_val[i] = -1;
     isel.global_live = global_live;
     isel.block_map = make_dict(NULL);
+    /* Keil ABI 参数分配状态（每函数重置） */
+    isel.param_counter = 0;
+    memset(isel.param_used, 0, sizeof(isel.param_used));
+    isel.param_u8i = 0;
+    isel.param_u16i = 0;
     for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
         Block *blk = iter_next(&bit);
         char key[32]; snprintf(key, sizeof(key), "%d", blk->id);

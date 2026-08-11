@@ -26,6 +26,14 @@ typedef struct ISelContext {
 
     /* 块 id → Block* 映射（phi 拷贝查找目标块，isel_function 建立） */
     Dict* block_map;
+
+    /* Keil C251 ABI 参数寄存器分配状态（每函数重置）：
+     * 被调函数侧: PARAM 指令按声明序消费 ABI 寄存器（param_used 位图跟踪占用）；
+     * 调用方侧: 实参装载同样用 abi_param_reg 计算目标寄存器（每次 CALL 重置）。 */
+    int param_counter;      /* 被调函数已消费的参数个数 */
+    int param_used[16];     /* 字节寄存器占用位图 (0-15) */
+    int param_u8i;          /* u8 候选序列游标 {11,7,6,5,4} */
+    int param_u16i;         /* u16 候选序列游标 {6,4,2,0} */
 } ISelContext;
 
 /* 指令选择主入口 */

@@ -35,12 +35,19 @@ typedef struct RelFixup {
     char *label;        /* 目标标签名（无冒号） */
 } RelFixup;
 
+/* 绝对地址 fixup（LJMP/LCALL 目标符号；函数符号 value 在编码中才确定，需两遍） */
+typedef struct AbsFixup {
+    int offset;         /* 指令起始偏移（地址 hi/lo 在 offset+1..offset+2） */
+    char *symbol;       /* 目标符号名 */
+} AbsFixup;
+
 typedef struct EncodeState {
     Section *sec;
     const ObjFile *obj;
     int pc;
     Dict *label_pos;    /* char* label(无冒号) -> int* offset */
     List *fixups;       /* List<RelFixup*> */
+    List *absfixups;    /* List<AbsFixup*> */
 } EncodeState;
 
 static void emit1(EncodeState *st, unsigned char b) {
@@ -63,11 +70,15 @@ static void emit4(EncodeState *st, unsigned char b1, unsigned char b2, unsigned 
     st->pc += 4;
 }
 
-/* R0-R7 → 0-7；WR0/WR2/WR4/... → 0,2,4,...；失败返回 -1 */
+/* R0-R15 → 0-15；A → 11 (R11, 累加器)；WR0/WR2/WR4/... → 0,2,4,...；失败返回 -1 */
 static int parse_reg(const char *s, int *is_word) {
     if (!s) return -1;
     *is_word = 0;
-    if (s[0] == 'R' && s[1] >= '0' && s[1] <= '7' && s[2] == '\0') return s[1] - '0';
+    if (s[0] == 'A' && s[1] == '\0') return 11;  /* A = R11 (sim251 RF_ACC) */
+    if (s[0] == 'R') {
+        char *end; long v = strtol(s + 1, &end, 10);
+        if (*end == '\0' && v >= 0 && v <= 15) return (int)v;
+    }
     if (s[0] == 'W' && s[1] == 'R') {
         char *end; long v = strtol(s + 2, &end, 10);
         if (*end == '\0' && v >= 0 && v <= 30 && (v % 2) == 0) { *is_word = 1; return (int)v; }
@@ -162,6 +173,11 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
         if (n > 0 && lbl[n - 1] == ':') lbl[n - 1] = '\0';
         int *pos = malloc(sizeof(int)); *pos = st->pc;
         dict_put(st->label_pos, lbl, pos);
+        /* 函数标签 `_name:` → 更新函数符号 value（代码偏移，供 LJMP/LCALL fixup） */
+        if (lbl[0] == '_') {
+            Symbol *s = c251_find_symbol(st->obj, lbl + 1);
+            if (s && s->kind == SYM_FUNC) s->value = st->pc;
+        }
         return 0;
     }
 
@@ -172,6 +188,63 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
 
     if (!strcmp(op, "NOP"))            { emit1(st, 0x00); return 0; }
     if (!strcmp(op, "RET"))            { emit1(st, 0x22); return 0; }
+
+    /* PUSH dir8 / POP dir8 (8051 兼容, 递归栈保护用; R0-R7 → 地址 0x00-0x07) */
+    if (!strcmp(op, "PUSH") || !strcmp(op, "POP")) {
+        int r1 = parse_reg(a1, &w1);
+        if (r1 >= 0 && !w1 && r1 <= 7) {
+            emit2(st, !strcmp(op, "PUSH") ? 0xC0 : 0xD0, (unsigned char)r1);
+            return 0;
+        }
+        return -1;
+    }
+
+    /* LCALL sym: 12 hi lo (Keil C251 实测用 LCALL, golden tmp_func3.src)；
+     * 函数符号 value 编码中才确定 → 占位 + AbsFixup 两遍填充 */
+    if (!strcmp(op, "LCALL")) {
+        const char *tgt = a1;
+        if (tgt && is_symbol_arg(tgt)) {
+            emit3(st, 0x12, 0x00, 0x00);
+            AbsFixup *fx = malloc(sizeof(AbsFixup));
+            fx->offset = st->pc - 3;
+            fx->symbol = strdup(tgt);
+            list_push(st->absfixups, fx);
+            return 0;
+        }
+        return -1;
+    }
+
+    /* LJMP sym: 02 hi lo (入口 stub 跳 main)；同样两遍填充 */
+    if (!strcmp(op, "LJMP")) {
+        const char *tgt = a1;
+        if (tgt && is_symbol_arg(tgt)) {
+            emit3(st, 0x02, 0x00, 0x00);
+            AbsFixup *fx = malloc(sizeof(AbsFixup));
+            fx->offset = st->pc - 3;
+            fx->symbol = strdup(tgt);
+            list_push(st->absfixups, fx);
+            return 0;
+        }
+        return -1;
+    }
+
+    /* MOVZ WRj,Rm: 0A (j/2)4|m (字节零扩展, functional.py movz_wr_rn) */
+    if (!strcmp(op, "MOVZ")) {
+        int r1 = parse_reg(a1, &w1);
+        int r2 = parse_reg(a2, &w2);
+        if (r1 >= 0 && w1 && r2 >= 0 && !w2)
+            { emit2(st, 0x0A, (unsigned char)(((r1 / 2) << 4) | r2)); return 0; }
+        return -1;
+    }
+
+    /* MOVS WRj,Rm: 1A (j/2)4|m (字节符号扩展) */
+    if (!strcmp(op, "MOVS")) {
+        int r1 = parse_reg(a1, &w1);
+        int r2 = parse_reg(a2, &w2);
+        if (r1 >= 0 && w1 && r2 >= 0 && !w2)
+            { emit2(st, 0x1A, (unsigned char)(((r1 / 2) << 4) | r2)); return 0; }
+        return -1;
+    }
 
     /* 条件跳转 / SJMP（rel8，第二遍 resolve_fixups 填充） */
     {
@@ -327,13 +400,29 @@ static void resolve_fixups(EncodeState *st) {
     }
 }
 
+/* 绝对地址 fixup（LJMP/LCALL）：编码完成后函数符号 value 已确定，填充 hi/lo */
+static void resolve_abs_fixups(EncodeState *st) {
+    if (!st->absfixups) return;
+    for (Iter it = list_iter(st->absfixups); !iter_end(it);) {
+        AbsFixup *fx = iter_next(&it);
+        Symbol *s = c251_find_symbol(st->obj, fx->symbol);
+        if (!s || s->section < 0) {
+            fprintf(stderr, "c251_encode: unknown abs target: %s\n", fx->symbol);
+            continue;
+        }
+        unsigned addr = (unsigned)s->value;
+        st->sec->bytes[fx->offset + 1] = (unsigned char)((addr >> 8) & 0xFF);
+        st->sec->bytes[fx->offset + 2] = (unsigned char)(addr & 0xFF);
+    }
+}
+
 void c251_encode(C251GenContext* ctx, ObjFile* obj) {
     if (!obj) return;
     (void)ctx;
     for (Iter sit = list_iter(obj->sections); !iter_end(sit);) {
         Section *sec = iter_next(&sit);
         if (!sec || sec->kind != SEC_CODE || !sec->asminstrs) continue;
-        EncodeState st = { sec, obj, 0, make_dict(NULL), make_list() };
+        EncodeState st = { sec, obj, 0, make_dict(NULL), make_list(), make_list() };
         for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
             AsmInstr *ai = iter_next(&ait);
             if (encode_instr(&st, ai) < 0) {
@@ -341,6 +430,7 @@ void c251_encode(C251GenContext* ctx, ObjFile* obj) {
             }
         }
         resolve_fixups(&st);
+        resolve_abs_fixups(&st);
         dict_free(st.label_pos, free);
         /* 先释放 fx->label（list_free 会释放 fx 结构与节点本身） */
         for (Iter it = list_iter(st.fixups); !iter_end(it);) {
@@ -349,5 +439,11 @@ void c251_encode(C251GenContext* ctx, ObjFile* obj) {
         }
         list_free(st.fixups);
         free(st.fixups);
+        for (Iter it = list_iter(st.absfixups); !iter_end(it);) {
+            AbsFixup *fx = iter_next(&it);
+            if (fx) free(fx->symbol);
+        }
+        list_free(st.absfixups);
+        free(st.absfixups);
     }
 }

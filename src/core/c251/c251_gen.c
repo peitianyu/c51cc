@@ -119,6 +119,41 @@ ObjFile *c251_gen(SSAUnit *unit) {
         if (f) process_function(ctx, f);
     }
 
+    /* 入口 stub：存在 main 时在第一个 CODE section 头部插入 LJMP main
+     * （sim251 reset 后 PC=0 从代码区开头执行；多函数时第一个函数未必是 main）
+     * LJMP 目标经 AbsFixup 两遍填充（函数符号 value 由 c251_encode 标签处理设置） */
+    {
+        for (Iter sit = list_iter(ctx->obj->sections); !iter_end(sit);) {
+            Section *sec = iter_next(&sit);
+            if (!sec || sec->kind != SEC_CODE) continue;
+            bool has_main = false;
+            for (Iter sit2 = list_iter(ctx->obj->symbols); !iter_end(sit2);) {
+                Symbol *s = iter_next(&sit2);
+                if (s && s->name && strcmp(s->name, "main") == 0) { has_main = true; break; }
+            }
+            if (has_main) {
+                AsmInstr *ai = calloc(1, sizeof(AsmInstr));
+                ai->op = strdup("LJMP");
+                ai->args = make_list();
+                list_push(ai->args, strdup("main"));
+                /* 头部插入：stub 在第一个函数之前（地址 0x0000） */
+                if (sec->asminstrs) {
+                    List *nl = make_list();
+                    list_push(nl, ai);
+                    for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
+                        list_push(nl, iter_next(&ait));
+                    }
+                    sec->asminstrs = nl;
+                } else {
+                    sec->asminstrs = make_list();
+                    list_push(sec->asminstrs, ai);
+                }
+                /* stub 占 3 字节 (LJMP 02 hi lo)，函数符号 value 由 encode 标签处理设置 */
+            }
+            break;
+        }
+    }
+
     c251_encode(ctx, ctx->obj);
 
     ObjFile* obj = ctx->obj;
