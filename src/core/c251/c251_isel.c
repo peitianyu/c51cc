@@ -812,7 +812,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
         load_value_to_wr(isel, s1, w);
         if (!have_amt) {
-            fprintf(stderr, "c251 isel: 变量移位量 M2.5 支持 (v%d)\n", ins->dest);
+            fprintf(stderr, "c251 isel: 变量移位量 M2.5 支持 (v%d)，发射 0 兜底\n", ins->dest);
+            isel_emit(isel, "MOV", wbuf, "#0");
         } else {
             long long n = amt & 0xFFFF;
             if (n == 0) {
@@ -841,7 +842,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
          * 32 位：需运行时库（M3），先报错 + 0 兜底。 */
         ValueName s1 = src1_of(ins), s2 = src2_of(ins);
         bool want_mod = ins->op == IROP_MOD;
-        bool us = value_is_unsigned(isel, s1) && value_is_unsigned(isel, s2);
+        /* C 常用算术转换：任一操作数无符号即按无符号除法（与同文件比较路径 || 用法一致） */
+        bool us = value_is_unsigned(isel, s1) || value_is_unsigned(isel, s2);
         int size = ins->type ? ins->type->size : 2;
         if (size > 2) {
             fprintf(stderr, "c251 isel: 32 位 DIV/MOD 需运行时库 (M3)\n");
