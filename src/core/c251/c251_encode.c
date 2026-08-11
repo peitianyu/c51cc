@@ -33,6 +33,7 @@
 typedef struct RelFixup {
     int offset;         /* 跳转指令起始偏移（rel 字节在 offset+1） */
     char *label;        /* 目标标签名（无冒号） */
+    int seq;            /* 跳转指令序号（重编码时关联降级决策） */
 } RelFixup;
 
 /* 绝对地址 fixup（LJMP/LCALL 目标符号；函数符号 value 在编码中才确定，需两遍） */
@@ -47,7 +48,10 @@ typedef struct EncodeState {
     int pc;
     Dict *label_pos;    /* char* label(无冒号) -> int* offset */
     List *fixups;       /* List<RelFixup*> */
-    List *absfixups;    /* List<AbsFixup*> */
+    List *absfixups;    /* List<AbsFixup*> 函数符号绝对跳转 */
+    List *abslabfixups; /* List<AbsFixup*> 代码内标签绝对跳转（LJMP 降级） */
+    List *degraded_seqs;/* List<int*> 已降级跳转序号（跨轮次保留） */
+    int jump_seq;       /* 跳转指令序号计数器（每轮重置） */
 } EncodeState;
 
 static void emit1(EncodeState *st, unsigned char b) {
@@ -126,6 +130,35 @@ static int rel_jump_opcode(const char *op) {
     if (!strcmp(op, "JZ"))   return 0x60;  /* A==0 */
     if (!strcmp(op, "JNZ"))  return 0x70;  /* A!=0 */
     return -1;
+}
+
+/* 条件跳转反转（用于 rel8 越界降级：反转跳转跳过 LJMP 序列）。无条件跳转返回 -1 */
+static int invert_jcc(int opcode) {
+    switch (opcode) {
+        case 0x68: return 0x78;  /* JE <-> JNE */
+        case 0x78: return 0x68;
+        case 0x38: return 0x28;  /* JG <-> JLE */
+        case 0x28: return 0x38;
+        case 0x48: return 0x58;  /* JSL <-> JSGE */
+        case 0x58: return 0x48;
+        case 0x08: return 0x18;  /* JSLE <-> JSG */
+        case 0x18: return 0x08;
+        case 0x40: return 0x50;  /* JC <-> JNC */
+        case 0x50: return 0x40;
+        case 0x60: return 0x70;  /* JZ <-> JNZ */
+        case 0x70: return 0x60;
+    }
+    return -1;  /* SJMP 等无条件跳转 */
+}
+
+/* 跳转序号是否已在降级集合中（重编码时决定发射 LJMP 序列） */
+static int seq_is_degraded(List *degraded_seqs, int seq) {
+    if (!degraded_seqs) return 0;
+    for (Iter it = list_iter(degraded_seqs); !iter_end(it);) {
+        int *sp = iter_next(&it);
+        if (sp && *sp == seq) return 1;
+    }
+    return 0;
 }
 
 /* 符号查找（仿 c51_encode find_symbol_for_asm：带 '@' 前缀时跳过前缀再试） */
@@ -257,16 +290,40 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
         return -1;
     }
 
-    /* 条件跳转 / SJMP（rel8，第二遍 resolve_fixups 填充） */
+    /* 条件跳转 / SJMP（rel8，第二遍 resolve_fixups 填充；越界时降级 LJMP 序列） */
     {
         int jop = rel_jump_opcode(op);
         if (jop >= 0) {
-            emit2(st, (unsigned char)jop, 0x00);  /* rel 占位 */
             const char *tgt = a1;
+            int seq = st->jump_seq++;
+            if (tgt && seq_is_degraded(st->degraded_seqs, seq)) {
+                /* 降级为 LJMP 绝对跳转（重编码轮次中）:
+                 *   无条件 SJMP → 02 hi lo (3 字节)
+                 *   条件跳转 → 反转跳转 rel=3 (跳过 LJMP) + 02 hi lo (5 字节) */
+                if (jop == 0x80) {
+                    emit3(st, 0x02, 0x00, 0x00);
+                    AbsFixup *fx = malloc(sizeof(AbsFixup));
+                    fx->offset = st->pc - 3;
+                    fx->symbol = strdup(tgt);
+                    list_push(st->abslabfixups, fx);
+                } else {
+                    int inv = invert_jcc(jop);
+                    if (inv < 0) return -1;
+                    emit2(st, (unsigned char)inv, 0x03);  /* 反转跳转：目标 = LJMP 之后 (rel=3) */
+                    emit3(st, 0x02, 0x00, 0x00);
+                    AbsFixup *fx = malloc(sizeof(AbsFixup));
+                    fx->offset = st->pc - 3;
+                    fx->symbol = strdup(tgt);
+                    list_push(st->abslabfixups, fx);
+                }
+                return 0;
+            }
+            emit2(st, (unsigned char)jop, 0x00);  /* rel 占位 */
             if (tgt) {
                 RelFixup *fx = malloc(sizeof(RelFixup));
                 fx->offset = st->pc - 2;
                 fx->label = strdup(tgt);
+                fx->seq = seq;
                 list_push(st->fixups, fx);
             }
             return 0;
@@ -503,7 +560,8 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     return -1; /* 未支持指令（M2 扩展） */
 }
 
-/* 第二遍：填充条件跳转/SJMP 的 rel8 偏移（rel = 目标 - (指令起始 + 2)） */
+/* 第二遍：填充条件跳转/SJMP 的 rel8 偏移（rel = 目标 - (指令起始 + 2)）。
+ * 越界（超出 ±128）→ 加入 degraded_seqs，下一轮重编码降级为 LJMP 序列。 */
 static void resolve_fixups(EncodeState *st) {
     if (!st->fixups) return;
     for (Iter it = list_iter(st->fixups); !iter_end(it);) {
@@ -514,9 +572,31 @@ static void resolve_fixups(EncodeState *st) {
             continue;
         }
         int rel = *lp - (fx->offset + 2);
-        if (rel < -128 || rel > 127)
-            fprintf(stderr, "c251_encode: rel8 overflow for %s (rel=%d)\n", fx->label, rel);
+        if (rel < -128 || rel > 127) {
+            fprintf(stderr, "c251_encode: rel8 overflow for %s (rel=%d), degrading to LJMP\n", fx->label, rel);
+            int *sp = malloc(sizeof(int));
+            *sp = fx->seq;
+            list_push(st->degraded_seqs, sp);
+            continue;  /* 不填充 rel；下一轮重编码时该跳转降级为 LJMP */
+        }
         st->sec->bytes[fx->offset + 1] = (unsigned char)(rel & 0xFF);
+    }
+}
+
+/* 绝对地址 fixup（代码内标签）：LJMP 降级序列的 02 hi lo，
+ * 目标为代码内标签（label_pos 查找，非 obj 符号） */
+static void resolve_abs_label_fixups(EncodeState *st) {
+    if (!st->abslabfixups) return;
+    for (Iter it = list_iter(st->abslabfixups); !iter_end(it);) {
+        AbsFixup *fx = iter_next(&it);
+        int *lp = (int*)dict_get(st->label_pos, fx->symbol);
+        if (!lp) {
+            fprintf(stderr, "c251_encode: unknown abs label target: %s\n", fx->symbol);
+            continue;
+        }
+        unsigned addr = (unsigned)*lp;
+        st->sec->bytes[fx->offset + 1] = (unsigned char)((addr >> 8) & 0xFF);
+        st->sec->bytes[fx->offset + 2] = (unsigned char)(addr & 0xFF);
     }
 }
 
@@ -536,34 +616,54 @@ static void resolve_abs_fixups(EncodeState *st) {
     }
 }
 
+/* 释放 fixup 列表（label/symbol strdup + 节点；list_free 只释放节点结构） */
+static void free_absfixups(List *list) {
+    if (!list) return;
+    for (Iter it = list_iter(list); !iter_end(it);) {
+        AbsFixup *fx = iter_next(&it);
+        if (fx) free(fx->symbol);
+    }
+    list_free(list);
+    free(list);
+}
+
 void c251_encode(C251GenContext* ctx, ObjFile* obj) {
     if (!obj) return;
     (void)ctx;
     for (Iter sit = list_iter(obj->sections); !iter_end(sit);) {
         Section *sec = iter_next(&sit);
         if (!sec || sec->kind != SEC_CODE || !sec->asminstrs) continue;
-        EncodeState st = { sec, obj, 0, make_dict(NULL), make_list(), make_list() };
-        for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
-            AsmInstr *ai = iter_next(&ait);
-            if (encode_instr(&st, ai) < 0) {
-                fprintf(stderr, "c251_encode: unsupported instruction: %s\n", ai->op ? ai->op : "?");
+        /* rel8 越界降级决策（跨轮次保留）：List<int*> 跳转序号 */
+        List *degraded_seqs = make_list();
+        for (int round = 0; round < 20; round++) {
+            EncodeState st = { sec, obj, 0, make_dict(NULL), make_list(), make_list(),
+                               make_list(), degraded_seqs, 0 };
+            sec->bytes_len = 0;  /* 重置代码段，重新编码 */
+            for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
+                AsmInstr *ai = iter_next(&ait);
+                if (encode_instr(&st, ai) < 0) {
+                    fprintf(stderr, "c251_encode: unsupported instruction: %s\n", ai->op ? ai->op : "?");
+                }
             }
+            int before = list_len(degraded_seqs);
+            resolve_fixups(&st);
+            resolve_abs_label_fixups(&st);
+            resolve_abs_fixups(&st);
+            int after = list_len(degraded_seqs);
+            /* 释放本轮临时结构 */
+            dict_free(st.label_pos, free);
+            for (Iter it = list_iter(st.fixups); !iter_end(it);) {
+                RelFixup *fx = iter_next(&it);
+                if (fx) free(fx->label);
+            }
+            list_free(st.fixups);
+            free(st.fixups);
+            free_absfixups(st.absfixups);
+            free_absfixups(st.abslabfixups);
+            if (after == before) break;  /* 无新降级，稳定 */
         }
-        resolve_fixups(&st);
-        resolve_abs_fixups(&st);
-        dict_free(st.label_pos, free);
-        /* 先释放 fx->label（list_free 会释放 fx 结构与节点本身） */
-        for (Iter it = list_iter(st.fixups); !iter_end(it);) {
-            RelFixup *fx = iter_next(&it);
-            if (fx) free(fx->label);
-        }
-        list_free(st.fixups);
-        free(st.fixups);
-        for (Iter it = list_iter(st.absfixups); !iter_end(it);) {
-            AbsFixup *fx = iter_next(&it);
-            if (fx) free(fx->symbol);
-        }
-        list_free(st.absfixups);
-        free(st.absfixups);
+        /* 释放降级序号集：list_free 释放 int* 元素 + 节点，再释放 List 结构 */
+        list_free(degraded_seqs);
+        free(degraded_seqs);
     }
 }
