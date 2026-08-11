@@ -19,7 +19,9 @@ void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* 
 
 int isel_value_reg(C251GenContext* ctx, ValueName val) {
     if (!ctx || val < 0) return -1;
-    int *r = (int*)dict_get(ctx->value_to_reg, c251_key(val));
+    char *k = c251_key(val);
+    int *r = (int*)dict_get(ctx->value_to_reg, k);
+    free(k);
     return r ? *r : -1;
 }
 
@@ -45,6 +47,14 @@ static Dict* compute_global_live(Func* func) {
                 ValueName *ap = iter_next(&ait);
                 if (!ap || *ap < 0) continue;
                 char *k = c251_key(*ap);
+                LiveInfo *li = (LiveInfo*)dict_get(d, k);
+                if (!li) { li = calloc(1, sizeof(LiveInfo)); dict_put(d, k, li); }
+                else free(k);
+                if (li->last_block != block_id) { li->last_block = block_id; li->cnt++; }
+            }
+            /* 块内指令 dest 定义：定义块+使用块 ≥2 → 跨块活（防跨块值被死值释放） */
+            if (ins->dest >= 0) {
+                char *k = c251_key(ins->dest);
                 LiveInfo *li = (LiveInfo*)dict_get(d, k);
                 if (!li) { li = calloc(1, sizeof(LiveInfo)); dict_put(d, k, li); }
                 else free(k);
@@ -112,7 +122,9 @@ static int isel_temp_wr(ISelContext* isel, int avoid1, int avoid2) {
             char *sp = c251_alloc_spill(ctx, rv);
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
             isel_emit(isel, "MOV", sp, wbuf);
-            dict_remove(ctx->value_to_reg, c251_key(rv));
+            char *k = c251_key(rv);
+            dict_remove(ctx->value_to_reg, k);
+            free(k);
             isel->reg_val[w/2] = -1;
             return w;
         }
@@ -152,7 +164,9 @@ static int load_value_to_wr(ISelContext* isel, ValueName v, int w) {
     int r = isel_value_reg(ctx, v);
     if (r == w) return 0;
     if (r >= 0) { char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r); isel_emit(isel, "MOV", wbuf, rbuf); return 0; }
-    int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, c251_key(v));
+    char *k = c251_key(v);
+    int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k);
+    free(k);
     if (cv) {
         char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
         isel_emit(isel, "MOV", wbuf, imm);
@@ -167,7 +181,10 @@ static int load_value_to_wr(ISelContext* isel, ValueName v, int w) {
 /* 查 ADDR 产物指向的全局符号名（无则 NULL） */
 static char* value_to_addr_lookup(C251GenContext* ctx, ValueName val) {
     if (!ctx || !ctx->value_to_addr) return NULL;
-    return (char*)dict_get(ctx->value_to_addr, c251_key(val));
+    char *k = c251_key(val);
+    char *sym = (char*)dict_get(ctx->value_to_addr, k);
+    free(k);
+    return sym;
 }
 
 /* 从 SSA 指令取 src1/src2 值名 */
@@ -221,7 +238,12 @@ static void emit_binop_src2(ISelContext* isel, const char* opm, int op,
         isel_emit(isel, opm, wbuf, r2buf);
         return;
     }
-    int64_t *cv = (s2 >= 0) ? (int64_t*)dict_get(ctx->value_to_const, c251_key(s2)) : NULL;
+    int64_t *cv = NULL;
+    if (s2 >= 0) {
+        char *k = c251_key(s2);
+        cv = (int64_t*)dict_get(ctx->value_to_const, k);
+        free(k);
+    }
     if (cv) { emit_op_with_imm(isel, opm, op, wbuf, w, isel_value_reg(ctx, s1), *cv); return; }
     if (s2 >= 0) {
         char *sp = c251_value_spill(ctx, s2);

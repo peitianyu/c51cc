@@ -38,7 +38,10 @@ char* c251_key(int n) {
 
 char* c251_value_spill(C251GenContext* ctx, ValueName val) {
     if (!ctx || !ctx->value_to_spill) return NULL;
-    return (char*)dict_get(ctx->value_to_spill, c251_key(val));
+    char *k = c251_key(val);
+    char *sp = (char*)dict_get(ctx->value_to_spill, k);
+    free(k);
+    return sp;
 }
 
 char* c251_alloc_spill(C251GenContext* ctx, ValueName val) {
