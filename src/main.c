@@ -17,7 +17,20 @@ int main(int argc, char **argv) {
 
 #include "core/cc.h"
 #include "core/ssa.h"
+
+#ifdef C251CC_BUILD
+#include "core/c251/c251_gen.h"
+#define BACKEND_GEN       c251_gen
+#define BACKEND_LINK      c251_link_startup
+#define BACKEND_WRITE_ASM c251_write_asm
+#define BACKEND_WRITE_HEX c251_write_hex
+#else
 #include "core/c51/c51_gen.h"
+#define BACKEND_GEN       c51_gen
+#define BACKEND_LINK      c51_link_startup
+#define BACKEND_WRITE_ASM c51_write_asm
+#define BACKEND_WRITE_HEX c51_write_hex
+#endif
 
 /* ---------------------------------------------------------------
  * 用法:
@@ -284,7 +297,7 @@ int main(int argc, char **argv) {
         ssa_optimize(b->unit, opt_level);
 
         /* 4. 代码生成 */
-        ObjFile *o = c51_gen(b->unit);
+        ObjFile *o = BACKEND_GEN(b->unit);
         ssa_build_destroy(b);
         list_free(strings);
         list_free(ctypes);
@@ -407,15 +420,15 @@ int main(int argc, char **argv) {
     }
 
     /* 注入 startup / runtime */
-    ObjFile *linked_obj = c51_link_startup(first_input, out);
+    ObjFile *linked_obj = BACKEND_LINK(first_input, out);
     if (linked_obj && linked_obj != out) {
         obj_free(out);
         out = linked_obj;
     }
 
     /* 输出 */
-    if (opt_asm) c51_write_asm(asm_fp, out);
-    if (opt_hex) c51_write_hex(hex_fp, out);
+    if (opt_asm) BACKEND_WRITE_ASM(asm_fp, out);
+    if (opt_hex) BACKEND_WRITE_HEX(hex_fp, out);
 
     if (out) obj_free(out);
     if (asm_fp != stdout) fclose(asm_fp);

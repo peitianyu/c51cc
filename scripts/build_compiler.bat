@@ -1,25 +1,26 @@
 @echo off
 REM ======================================
-REM  C51CC 正式编译器构建脚本 (TCC)
-REM  构建出 c51cc.exe 编译器本身
-REM
-REM  用法: build_compiler.bat [输出名称]
-REM
-REM  示例:
-REM    build_compiler.bat
-REM    build_compiler.bat my_c51cc.exe
+REM  C51CC / C251CC build script (TCC)
+REM  Usage: build_compiler.bat [c51cc|c251cc|my.exe]
+REM    c51cc.exe  (default) - link C51 backend
+REM    c251cc.exe           - link C251 backend (-DC251CC_BUILD)
 REM ======================================
 setlocal enabledelayedexpansion
-
 set OUT=%~1
 if "%OUT%"=="" set OUT=c51cc.exe
 
-set SRCS=D:\ws\test\C51CC\src\main.c
-for %%f in (D:\ws\test\C51CC\src\core\*.c) do set SRCS=!SRCS! %%f
-for %%f in (D:\ws\test\C51CC\src\core\c51\*.c) do set SRCS=!SRCS! %%f
+set ROOT=%~dp0..
+set SRCS=%ROOT%\src\main.c
+for %%f in (%ROOT%\src\core\*.c) do set SRCS=!SRCS! %%f
 
-echo Building %OUT% ...
-tcc %SRCS% -o %OUT%
+if /i "%OUT%"=="c251cc.exe" (
+    for %%f in (%ROOT%\src\core\c251\*.c) do set SRCS=!SRCS! %%f
+    set EXTRA=-DC251CC_BUILD
+) else (
+    for %%f in (%ROOT%\src\core\c51\*.c) do set SRCS=!SRCS! %%f
+    set EXTRA=
+)
+tcc %EXTRA% !SRCS! -o %OUT%
 if %ERRORLEVEL% NEQ 0 (
     echo Build FAILED.
     exit /b 1
