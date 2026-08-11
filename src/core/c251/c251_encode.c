@@ -22,6 +22,7 @@
 
 typedef struct EncodeState {
     Section *sec;
+    const ObjFile *obj;
     int pc;
 } EncodeState;
 
@@ -70,6 +71,42 @@ static int is_label_instr(const AsmInstr *ins) {
     return ins && ins->op && ins->op[strlen(ins->op) - 1] == ':';
 }
 
+/* 符号查找（仿 c51_encode find_symbol_for_asm：带 '@' 前缀时跳过前缀再试） */
+static Symbol *c251_find_symbol(const ObjFile *obj, const char *name) {
+    if (!obj || !name) return NULL;
+    for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
+        Symbol *s = iter_next(&it);
+        if (s && s->name && strcmp(s->name, name) == 0) return s;
+    }
+    if (name[0] == '@') {
+        for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
+            Symbol *s = iter_next(&it);
+            if (s && s->name && strcmp(s->name, name + 1) == 0) return s;
+        }
+    }
+    return NULL;
+}
+
+/* 符号地址 = sym->value（EDATA 从 0 布局，value 即地址，与 hex 输出一致） */
+static unsigned symbol_addr(EncodeState *st, const char *name) {
+    Symbol *s = c251_find_symbol(st->obj, name);
+    if (!s || s->section < 0) {
+        fprintf(stderr, "c251_encode: unknown symbol: %s\n", name);
+        return 0;
+    }
+    return (unsigned)s->value;
+}
+
+/* 判定操作数是否为符号名：非 #imm、非 R0-R7、非 WRj、非纯数字 */
+static int is_symbol_arg(const char *s) {
+    if (!s || s[0] == '\0' || s[0] == '#') return 0;
+    if (s[0] == 'R' && s[1] >= '0' && s[1] <= '7' && s[2] == '\0') return 0;
+    if (s[0] == 'W' && s[1] == 'R') return 0;
+    char *end; strtol(s, &end, 0);
+    if (*end == '\0' && end != s) return 0;  /* 纯数字字面量 */
+    return 1;
+}
+
 static const char* arg(const AsmInstr *ins, int i) {
     if (!ins->args) return NULL;
     int n = 0;
@@ -95,7 +132,7 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
 
     if (!strcmp(op, "MOV")) {
         int r1 = parse_reg(a1, &w1);
-        if (r1 >= 0 && w1) { /* WRj */
+        if (r1 >= 0 && w1) { /* WRj 目标 */
             if (a2 && a2[0] == '#') {
                 imm = parse_imm(a2, &ok);
                 if (!ok) return -1;
@@ -105,7 +142,14 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
             }
             int r2 = parse_reg(a2, &w2);
             if (r2 >= 0 && w2) { emit2(st, 0x7D, (unsigned char)(((r1 / 2) << 4) | (r2 / 2))); return 0; }
-        } else if (r1 >= 0) { /* Rm */
+            if (is_symbol_arg(a2)) {
+                /* MOV WRj,dir16: 7E (j/2)7 hi lo (decode_impl.inc case 0x7) */
+                unsigned addr = symbol_addr(st, a2);
+                emit4(st, 0x7E, (unsigned char)(((r1 / 2) << 4) | 0x7),
+                      (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
+                return 0;
+            }
+        } else if (r1 >= 0) { /* Rm 目标 */
             if (a2 && a2[0] == '#') {
                 imm = parse_imm(a2, &ok);
                 if (!ok) return -1;
@@ -114,6 +158,29 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
             }
             int r2 = parse_reg(a2, &w2);
             if (r2 >= 0 && !w2) { emit2(st, 0x7C, (unsigned char)((r1 << 4) | r2)); return 0; }
+            if (is_symbol_arg(a2)) {
+                /* MOV Rm,dir16: 7E m3 hi lo (decode_impl.inc case 0x3) */
+                unsigned addr = symbol_addr(st, a2);
+                emit4(st, 0x7E, (unsigned char)((r1 << 4) | 0x3),
+                      (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
+                return 0;
+            }
+        } else if (is_symbol_arg(a1)) {
+            /* 目标是符号：MOV SYM,src */
+            int r2 = parse_reg(a2, &w2);
+            unsigned addr = symbol_addr(st, a1);
+            if (r2 >= 0 && w2) {
+                /* MOV dir16,WRj: 7A (j/2)7 hi lo (mov_op1_reg case 0x7) */
+                emit4(st, 0x7A, (unsigned char)(((r2 / 2) << 4) | 0x7),
+                      (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
+                return 0;
+            }
+            if (r2 >= 0 && !w2) {
+                /* MOV dir16,Rm: 7A m3 hi lo (mov_op1_reg case 0x3) */
+                emit4(st, 0x7A, (unsigned char)((r2 << 4) | 0x3),
+                      (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
+                return 0;
+            }
         }
         return -1; /* 未支持的 MOV 形态（M2 扩展） */
     }
@@ -171,10 +238,11 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
 
 void c251_encode(C251GenContext* ctx, ObjFile* obj) {
     if (!obj) return;
+    (void)ctx;
     for (Iter sit = list_iter(obj->sections); !iter_end(sit);) {
         Section *sec = iter_next(&sit);
         if (!sec || sec->kind != SEC_CODE || !sec->asminstrs) continue;
-        EncodeState st = { sec, 0 };
+        EncodeState st = { sec, obj, 0 };
         for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
             AsmInstr *ai = iter_next(&ait);
             if (encode_instr(&st, ai) < 0) {
