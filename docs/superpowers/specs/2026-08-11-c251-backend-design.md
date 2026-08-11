@@ -25,7 +25,8 @@ c51cc 是自研 C 编译器（SSA 中端：`pp.c → parser.c → ssa.c → ssa_
 | D4 | 实现方案 | **C 混合**：复用 obj/输出/流水线/运行时库模式等与指令集无关部分；指令选择、分层寄存器分配、Source Mode 编码全新实现 |
 | D5 | 验证 | 复制 `D:\work\tinycc_c251\tests\c251\` 验证脚本到 `scripts/c251/`，测试 `test/` 下所有文件（suite 73 + execute 216 + ssa 81 + stc32g 32） |
 | D6 | 对齐节奏 | **与 Keil 不断对齐**是持续机制：每实现一个功能模块 → 跑 sim_keil_validate + keil_size_compare → 有偏差立即修正 |
-| D7 | 构建 | 使用 **tcc.exe** 构建（同 c51cc 现有 `build_compiler.bat` 模式），产出 `c251cc.exe` |
+| D7 | 构建 | 使用 **tcc.exe** 构建（唯一构建方式，同 c51cc 现有 `build_compiler.bat` 模式），产出 `c251cc.exe` |
+| D8 | 仓库精简 | **保持代码仓库精简**：复用优先、只提取最小必要资产，禁止整文件复制膨胀（c51 后端不复制、tinycc_c251 资产只摘取编码表/ABI/例程序段） |
 
 ## 3. 架构设计
 
@@ -39,19 +40,20 @@ c51cc 是自研 C 编译器（SSA 中端：`pp.c → parser.c → ssa.c → ssa_
 
 ### 3.2 构建脚本
 
-`build_compiler.bat c251cc`：tcc 编译 `src/main.c + src/core/*.c + src/core/c251/*.c` → `c251cc.exe`。
+`build_compiler.bat c251cc`：**tcc.exe** 编译 `src/main.c + src/core/*.c + src/core/c251/*.c` → `c251cc.exe`。
 
+- tcc.exe 是唯一构建方式（不做 clang/gcc 多工具链支持）
 - c251cc 构建**不包含** c51 后端文件（反之亦然），避免符号冲突
 - 注意：现有 `build_compiler.bat` 硬编码路径 `D:\ws\test\C51CC\src`，需改为相对路径 `..\src`
 
-### 3.3 复用 / 新写边界
+### 3.3 复用 / 新写边界（遵循 D8 仓库精简原则）
 
-**复用（拷贝裁剪）**：
+**复用（引用或最小裁剪，不整文件复制）**：
 
-- `obj.c` 链接框架（`obj_link`、符号/section/reloc 管理）
-- `c51_output.c` 的 asm/hex 输出骨架（汇编指令文本、Intel HEX 写出）
-- `c51_gen.c` 的流水线结构（globals → top-level asm → funcs → optimize → encode）
-- linscan 活跃区间计算算法（c51_isel_regalloc.c 的 `linscan_compute_intervals` / `linscan_allocate`）
+- `obj.c` 链接框架（`obj_link`、符号/section/reloc 管理）——**直接共享，不复制**
+- `c51_output.c` 的 asm/hex 输出骨架——提取公共输出逻辑到共享模块（如 `src/core/backend_out.c`）或按需裁剪最小文件
+- `c51_gen.c` 的流水线结构——仅借鉴流程，不复制代码
+- linscan 活跃区间计算算法——如可行，提取为共享算法模块（`src/core/linscan.c`），c51/c251 共用；否则按需移植最小实现
 
 **全新**：
 
@@ -60,27 +62,27 @@ c51cc 是自研 C 编译器（SSA 中端：`pp.c → parser.c → ssa.c → ssa_
 - Source Mode 编码器（AsmInstr → 机器码）
 - C251 窥孔优化
 
-**提取（从已有资产）**：
+**提取（只摘取必要片段，不整文件搬运）**：
 
-- 编码表：tinycc_c251 `src/c251-ops.inc / c251-load.inc / c251-call.inc` 注释（290KB 指令模式）+ sim251 `src/decode_impl.inc` + `sim251/tests/functional.py` 编码辅助函数（交叉验证）
-- Keil ABI 规则：tinycc_c251 `c251-call.inc` 注释
-- 运行时库：tinycc_c251 `c251-lib.inc`（96KB，`?C?` 例程）
+- 编码表：从 tinycc_c251 `src/c251-ops.inc / c251-load.inc / c251-call.inc` 注释**摘取需要的指令编码条目**（转为 c251_encode.c 的紧凑表）+ sim251 `src/decode_impl.inc` + `sim251/tests/functional.py` 编码辅助函数（交叉验证）
+- Keil ABI 规则：从 tinycc_c251 `c251-call.inc` 注释摘取传参/返回表（写入 ABI 注释或文档，不搬运代码）
+- 运行时库：从 tinycc_c251 `c251-lib.inc` 摘取**实际用到的 `?C?` 例程**（先只含 32 位除法/移位等必需项，用到再补）
 
 ## 4. C251 后端模块（src/core/c251/）
 
 | 文件 | 职责 | 来源 |
 |------|------|------|
-| `c251_gen.h/.c` | 后端上下文（值→寄存器/地址/常量映射、spill 管理、linscan 快照、mmio 映射） | C51 骨架裁剪 |
+| `c251_gen.h/.c` | 后端上下文（值→寄存器/地址/常量映射、spill 管理、linscan 快照、mmio 映射） | 按需最小实现 |
 | `c251_isel.c` | isel 入口：`isel_function/block/instr` 分发 + 值位置管理 | 新写（模式仿 c51） |
 | `c251_isel_arith.c` | 16 位优先算术/位运算/移位/比较（WRj 单指令） | 参考 c251-ops.inc |
 | `c251_isel_mem.c` | 加载/存储/地址计算（@WRj/@DRk 间接、dir16、far 指针、MOVC） | 参考 c251-load.inc |
 | `c251_isel_ctrl.c` | 跳转/分支/调用/返回/switch/phi 拷贝 | 参考 c251-call.inc |
 | `c251_regalloc.c` | 分层线性扫描寄存器分配 | 新写（算法仿 c51 linscan） |
 | `c251_optimize.c` | 汇编级窥孔优化 | 参考 c251-opt.inc |
-| `c251_encode.c` | Source Mode 编码（AsmInstr → bytes） | 提取编码表 + sim251 验证 |
-| `c251_lib.inc` | 运行时库（`?C?` 例程汇编源码） | 从 c251-lib.inc 迁移 |
-| `c251_output.c` | asm/hex 写出 | C51 骨架裁剪 |
-| `c251_link.c` | 多文件链接 + STARTUP251 启动代码注入 | C51 骨架裁剪 |
+| `c251_encode.c` | Source Mode 编码（AsmInstr → bytes） | 提取编码表（精简表）+ sim251 验证 |
+| `c251_lib.inc` | 运行时库（`?C?` 例程汇编源码，只含必需例程） | 从 c251-lib.inc 摘取 |
+| `c251_output.c` | asm/hex 写出 | 共享输出模块 / 最小裁剪 |
+| `c251_link.c` | 多文件链接 + STARTUP251 启动代码注入 | 最小实现 |
 
 ## 5. 指令选择策略（16 位优先）
 
@@ -136,7 +138,7 @@ C51 的 SEC_DATA/SEC_IDATA/SEC_XDATA 保留（显式空间声明在 251 上仍�
 
 ## 8. 运行时库（c251_lib.inc）
 
-- 迁移 tinycc_c251 `c251-lib.inc`（96KB）：`?C?UIDIV/SIDIV/ULSHR/…`（32 位除法/移位）、浮点例程（如需要）、STC32G 启动代码
+- 从 tinycc_c251 `c251-lib.inc` 摘取**实际用到的** `?C?` 例程：先只含 32 位除法/移位等必需项，用到再补（遵循 D8 精简原则，不整文件搬运）
 - 例程名与 Keil 一致（`?C?` 前缀），**逐例程用 Keil 输出反汇编交叉验证语义**
 - 32 位运算策略：`u32 + - * & | ^ << >>` 用硬件 DRk 指令；`u32 / %` 调 `?C?` 例程（Keil 同款策略）
 - 启动代码：仿 c51_link_startup 模式注入（初始化 EDATA/SPX/DPX、调用 main、中断向量表跳转）
