@@ -66,6 +66,33 @@ static bool has_imm_label(Instr* ins) {
     return false;
 }
 
+/* 编码器 imm 支持：ADD/SUB 有 WRj,#imm16（2E/9E）；MUL 只支持 WRj,WRk（AD）。
+ * MUL 遇 imm 必须物化到寄存器，否则发射不可编码指令（编码器返回 -1、无字节产生）。 */
+static bool op_supports_imm(int op) {
+    return op == IROP_ADD || op == IROP_SUB;
+}
+
+/* 从 {WR0,WR2,WR4,WR6} 选一个避开 used_a/used_b 的临时寄存器 */
+static int pick_temp_wr(int used_a, int used_b) {
+    for (int w = 0; w <= 6; w += 2)
+        if (w != used_a && w != used_b) return w;
+    return 0;
+}
+
+/* 用立即数发射 op：支持 imm 的 op 直接 op WRj,#imm；否则物化 imm 到临时寄存器再 op */
+static void emit_op_with_imm(ISelContext* isel, const char* opm, int op,
+                             const char* wbuf, int wr, int r1, long long val) {
+    char imm[32]; snprintf(imm, sizeof(imm), "#%lld", val & 0xFFFF);
+    if (op_supports_imm(op)) {
+        isel_emit(isel, opm, wbuf, imm);
+    } else {
+        int tmp = pick_temp_wr(wr, r1);
+        char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+        isel_emit(isel, "MOV", tbuf, imm);
+        isel_emit(isel, opm, wbuf, tbuf);
+    }
+}
+
 void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins) return;
     C251GenContext *ctx = isel->ctx;
@@ -115,8 +142,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 /* s2 无寄存器：查 value_to_const（CONST 已物化但被跳过的兜底） */
                 int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k251_key(s2));
                 if (cv) {
-                    char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
-                    isel_emit(isel, opm, wbuf, imm);
+                    emit_op_with_imm(isel, opm, ins->op, wbuf, wr, r1, *cv);
                 } else {
                     /* 罕见兜底: 未知 s2 → 物化 #0（M2 完整处理） */
                     char w2buf[16]; wr_name(w2buf, sizeof(w2buf), 0);
@@ -126,8 +152,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             }
         } else if (has_imm_label(ins)) {
             /* ssa_pass 常量内联: args=[lhs], labels=["imm"], imm.ival=常量 */
-            char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
-            isel_emit(isel, opm, wbuf, imm);
+            emit_op_with_imm(isel, opm, ins->op, wbuf, wr, r1, ins->imm.ival);
         } else {
             /* 单操作数无 imm（TRUNC 语义不应到 ADD）: 兜底 */
             char w2buf[16]; wr_name(w2buf, sizeof(w2buf), 0);
