@@ -107,7 +107,7 @@ def main():
     workdir.cleanup()
 
     print(f"\n结果: {ok} OK / {fail} FAIL / {skip} SKIP")
-    return 0 if fail == 0 else 1
+    return 0 if fail == 0 and ok > 0 else 1
 
 
 if __name__ == "__main__":

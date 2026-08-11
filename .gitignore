@@ -11,3 +11,10 @@ output/
 .venv/
 .tmp/
 include/
+.pi/
+.pi-subagents/
+.superpowers/
+sim251/obj/
+sim251/*.exe
+__pycache__/
+*.pyc
