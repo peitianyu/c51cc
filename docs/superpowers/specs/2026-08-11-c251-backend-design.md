@@ -148,7 +148,24 @@ C51 的 SEC_DATA/SEC_IDATA/SEC_XDATA 保留（显式空间声明在 251 上仍�
 - 32 位运算策略：`u32 + - * & | ^ << >>` 用硬件 DRk 指令；`u32 / %` 调 `?C?` 例程（Keil 同款策略）
 - 启动代码：仿 c51_link_startup 模式注入（初始化 EDATA/SPX/DPX、调用 main、中断向量表跳转）
 
-## 9. 验证闭环（与 Keil 持续对齐）
+## 9. 验证闭环（sim251 行为验证 + 与 Keil 持续对齐）
+
+### 9.0 sim251 验证机制（核心）
+
+**sim251（`sim251/mcs251.exe`）是行为验证的真值来源**：c251cc 生成的 hex 必须能在 sim251 上正确执行。Keil 对比是质量对齐目标，不是行为判据。
+
+验证流程（每功能模块必跑）：
+
+1. c251cc 编译测试源码 → `.hex`
+2. `mcs251.exe -bios app.hex --cycles N` 执行，`-d cpu` dump 寄存器状态
+3. 断言：函数返回值（R7 / WR6 / DR4）、全局变量内存内容、SFR/外设状态、中断行为
+4. 失败时用 `-d in_asm` 逐条指令 trace 定位（配合 `tools/c251_simdis.py` 反汇编）
+
+**sim251 与 Keil 的分工**：
+
+- **sim251**：证明 c251cc 代码行为正确（自产 hex 在 sim251 上跑断言）
+- **Keil golden**：证明 c251cc 与 Keil 语义对齐（同一源码 Keil 编 → golden hex → sim251 跑 → 对比行为与大小）
+- 两层验证都过才算“对齐通过”
 
 ### 9.1 脚本迁移
 
@@ -156,19 +173,19 @@ C51 的 SEC_DATA/SEC_IDATA/SEC_XDATA 保留（显式空间声明在 251 上仍�
 
 | 脚本 | 作用 |
 |------|------|
-| `c251_sim.py` | c251cc hex → sim251 执行，解析返回值/寄存器 dump |
+| `c251_sim.py` | **核心**：c251cc hex → sim251 执行，解析返回值/寄存器 dump/内存断言 |
 | `sim_keil_validate.py` | 同一源码 Keil 编译 → golden hex → sim251 跑 → 与 c251cc 行为对比（行为对齐） |
 | `keil_size_compare.py` | 逐函数/整体代码大小对比（大小对齐） |
 | `stc32g_build.py` + `stc32g_compare.py` | STC32G 官方示例编译 + 与 Keil 构建结果对比 |
 | `cross_validate.py` | Keil golden 指令序列 vs c251cc 序列的反汇编级 diff |
 | `run_suite.py` | test/ 全量回归 |
 
-### 9.2 测试范围（test/ 下所有文件）
+### 9.2 测试范围（test/ 下所有文件，全部经 sim251 验证）
 
-- `test/suite/`（73 个行为测试）→ c251cc 编译 → sim251 跑，行为断言
-- `test/execute/`（216 个）→ 同上
-- `test/ssa/`（81 个）→ 后端正确性（汇编输出检查）
-- `test/stc32g/`（32 个官方示例）→ 分阶段编译跑通，与 Keil 输出持续对比
+- `test/suite/`（73 个行为测试）→ c251cc 编译 → **sim251 跑，行为断言**
+- `test/execute/`（216 个）→ c251cc 编译 → **sim251 跑，行为断言**
+- `test/ssa/`（81 个）→ 后端正确性（汇编输出检查 + 可选 sim251 执行）
+- `test/stc32g/`（32 个官方示例）→ 分阶段编译 → **sim251 跑（外设行为断言）**，与 Keil 输出持续对比
 - golden 参考记录在 `scripts/c251/golden/`（Keil .LST/.hex）
 
 ### 9.3 对齐节奏
@@ -177,15 +194,15 @@ C51 的 SEC_DATA/SEC_IDATA/SEC_XDATA 保留（显式空间声明在 251 上仍�
 
 ## 10. 里程碑
 
-每阶段门禁：suite 全过 + Keil 对齐。
+每阶段门禁：**sim251 行为验证通过** + suite 全过 + Keil 对齐。
 
 | 里程碑 | 内容 | 验收 |
 |--------|------|------|
-| M1 骨架 | c251cc.exe 平台选择 + obj/输出/链接裁剪 + 编码器骨架（mov/arith 基础表）+ 分层 linscan 雏形 | test/suite 基础算术测试过 sim251 |
-| M2 核心指令 | 16 位算术/比较/控制流/函数调用完整 isel | test/execute 全部跑通 sim251；keil_size_compare 启动 |
-| M3 XSMALL 完整 | near 变量/栈帧/far 指针/@DRk 间接/SEC_EDATA/REGPARMS 传参 | sim_keil_validate 行为对齐通过 |
-| M4 外设与中断 | sfr/sbit 全量、中断函数、STC32G 定时器/串口/GPIO 示例 | stc32g 前 8 个示例跑通 + Keil 对比 |
-| M5 全量对齐 | 32 位运算例程、peephole 打磨、STC32G 全部示例、测试脚本全绿 | 32 个示例 + suite/execute/ssa 全绿，Keil 大小差距记录在案 |
+| M1 骨架 | c251cc.exe 平台选择 + obj/输出/链接裁剪 + 编码器骨架（mov/arith 基础表）+ 分层 linscan 雏形 | test/suite 基础算术测试 **sim251 跑通** |
+| M2 核心指令 | 16 位算术/比较/控制流/函数调用完整 isel | test/execute 全部 **sim251 跑通**；keil_size_compare 启动 |
+| M3 XSMALL 完整 | near 变量/栈帧/far 指针/@DRk 间接/SEC_EDATA/REGPARMS 传参 | **sim_keil_validate（sim251 双跑）行为对齐通过** |
+| M4 外设与中断 | sfr/sbit 全量、中断函数、STC32G 定时器/串口/GPIO 示例 | stc32g 前 8 个示例 **sim251 外设断言跑通** + Keil 对比 |
+| M5 全量对齐 | 32 位运算例程、peephole 打磨、STC32G 全部示例、测试脚本全绿 | 32 个示例 + suite/execute/ssa **全绿（sim251 验证）**，Keil 大小差距记录在案 |
 
 ## 11. 风险与开放问题
 
