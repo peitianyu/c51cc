@@ -1,4 +1,5 @@
-/* 58_sizeof: sizeof运算符 */
+/* 58_sizeof: sizeof运算符 — C251 int=16 位, GCC 32 位差分会错 */
+/* EXPECT 11 */
 
 struct S {
     int a;

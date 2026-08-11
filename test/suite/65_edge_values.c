@@ -1,4 +1,5 @@
-/* 65_edge_values: 边界值测试 */
+/* 65_edge_values: 边界值测试 — C251 16 位溢出 (max_int+1=-32768), GCC 32 位不溢出 */
+/* EXPECT 15 */
 
 int main(void) {
     int max_int = 32767;    /* 0x7FFF */
