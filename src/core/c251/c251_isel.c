@@ -415,56 +415,36 @@ static void restore_live_regs_stack(ISelContext* isel) {
 
 /* 调用前 spill 槽压栈（递归安全：spill 槽是静态 EDATA 地址，内层调用覆盖槽值后
  * 外层必须经 POP 恢复）。快照式：save 时记录 value_to_spill 当前全部槽并逆序压栈。
- * 重用单个中转 WR（PUSH 后值已在栈上，WR 可复用装下一槽），不消耗多个寄存器。
+ * 中转固定用 WR6：WR6 若是活值已由 save_live_regs_stack 压栈（restore_live 最后
+ * POP 恢复），故 save/restore 期间破坏 WR6 无害。不用 isel_temp_wr——其强制溢出
+ * 路径会把 reg_val 置 -1，导致 restore_live_regs_stack 跳过 POP 造成栈不平衡。
  * 调用点内部临时槽（如 ret_spill 在 LCALL 后才分配）不在快照中，天然不受影响。 */
 static List* save_spill_slots_stack(ISelContext* isel) {
     C251GenContext *ctx = isel->ctx;
     if (!ctx->value_to_spill) return NULL;
     List *slots = dict_values(ctx->value_to_spill);   /* char* 槽符号名（共享，不复制） */
-    int t = isel_temp_wr(isel, -1, -1);
-    if (t < 0) { free(slots); return NULL; }
-    char tbuf[16]; wr_name(tbuf, sizeof(tbuf), t);
-    char rh[8], rl[8];
-    snprintf(rh, sizeof(rh), "R%d", t);
-    snprintf(rl, sizeof(rl), "R%d", t + 1);
     for (int i = list_len(slots) - 1; i >= 0; i--) {
         const char *sp = (const char*)list_get(slots, i);
         if (!sp || !sp[0]) continue;
-        isel_emit(isel, "MOV", tbuf, sp);
-        isel_emit(isel, "PUSH", rh, NULL);
-        isel_emit(isel, "PUSH", rl, NULL);
+        isel_emit(isel, "MOV", "WR6", sp);
+        isel_emit(isel, "PUSH", "R6", NULL);
+        isel_emit(isel, "PUSH", "R7", NULL);
     }
     return slots;
 }
 
 /* 调用后恢复：正序 POP（逆压栈序）回写快照中的槽。
- * 重用单个中转 WR（POP 后值在 WR 中，MOV 写槽后 WR 可复用接下一 POP）。
+ * 中转固定用 WR6（破坏 WR6 无害，restore_live 最后 POP 恢复活值）。
  * 注意：slots 的元素是 dict_values 借用的 char* 指针，不可 free 元素本身。 */
 static void restore_spill_slots_stack(ISelContext* isel, List *slots) {
     if (!slots) return;
-    int t = isel_temp_wr(isel, -1, -1);
-    if (t < 0) {
-        /* 无中转寄存器：只能跳过恢复（值留在栈上 = 泄漏但不会崩溃） */
-        for (int i = 0; i < list_len(slots); i++) {
-            const char *sp = (const char*)list_get(slots, i);
-            if (!sp || !sp[0]) continue;
-            isel_emit(isel, "POP", "?", NULL);
-            isel_emit(isel, "POP", "?", NULL);
-        }
-        goto done;
-    }
-    char tbuf[16]; wr_name(tbuf, sizeof(tbuf), t);
-    char rh[8], rl[8];
-    snprintf(rh, sizeof(rh), "R%d", t);
-    snprintf(rl, sizeof(rl), "R%d", t + 1);
     for (int i = 0; i < list_len(slots); i++) {
         const char *sp = (const char*)list_get(slots, i);
         if (!sp || !sp[0]) continue;
-        isel_emit(isel, "POP", rl, NULL);
-        isel_emit(isel, "POP", rh, NULL);
-        isel_emit(isel, "MOV", sp, tbuf);
+        isel_emit(isel, "POP", "R7", NULL);
+        isel_emit(isel, "POP", "R6", NULL);
+        isel_emit(isel, "MOV", sp, "WR6");
     }
-done:
     /* 只释放 list 外壳，不清除 elem（借用的 dict 值） */
     free(slots);
 }
@@ -1171,10 +1151,13 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             ret_spill = c251_alloc_spill(ctx, ins->dest);
             isel_emit(isel, "MOV", ret_spill, "WR6");
         }
+        /* ⑤b 恢复 spill 槽（ret_spill 在快照后分配，不受影响）。
+         * 必须先于活值恢复：save 顺序是①活值压栈→②spill 槽压栈（spill 在栈顶），
+         * 所以 restore 必须②'先 POP spill 槽（栈顶）→①'再 POP 活值（栈底）。
+         * 若顺序颠倒，spill 槽会取到活寄存器数据、活值会取到槽数据。 */
+        restore_spill_slots_stack(isel, spill_slots);
         /* ⑤ 恢复活值 */
         restore_live_regs_stack(isel);
-        /* ⑤b 恢复 spill 槽（ret_spill 在快照后分配，不受影响） */
-        restore_spill_slots_stack(isel, spill_slots);
         /* ⑥ dest 物化（u8 从 A；u16 从 ret_spill=dest 槽） */
         if (ins->dest > 0) {
             int wr = isel_alloc_wr(isel, ins->dest);
