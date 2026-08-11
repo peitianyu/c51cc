@@ -2,7 +2,7 @@
 
 > 日期：2026-08-11
 > 状态：已批准（用户确认，待书面审查）
-> 目标平台：MCS-251 / STC32G，Keil C251 XSMALL 内存模型，Source Mode 指令集
+> 目标平台：MCS-251 / STC32G，Keil C251 XSMALL 内存模型，**Source Mode 指令集（仅）**
 
 ## 1. 背景与目标
 
@@ -27,6 +27,7 @@ c51cc 是自研 C 编译器（SSA 中端：`pp.c → parser.c → ssa.c → ssa_
 | D6 | 对齐节奏 | **与 Keil 不断对齐**是持续机制：每实现一个功能模块 → 跑 sim_keil_validate + keil_size_compare → 有偏差立即修正 |
 | D7 | 构建 | 使用 **tcc.exe** 构建（唯一构建方式，同 c51cc 现有 `build_compiler.bat` 模式），产出 `c251cc.exe` |
 | D8 | 仓库精简 | **保持代码仓库精简**：复用优先、只提取最小必要资产，禁止整文件复制膨胀（c51 后端不复制、tinycc_c251 资产只摘取编码表/ABI/例程序段） |
+| D9 | 指令集 | **只支持 Source Mode**：c251cc 仅生成 Source Mode 指令（251 扩展指令 + Source Mode 下可用的 8051 兼容子集），不做 BINARY 模式支持；与 sim251（Source Mode 模拟器）完全对齐，🔴BINARY 专用指令一律不生成 |
 
 ## 3. 架构设计
 
@@ -90,7 +91,9 @@ c51cc 是自研 C 编译器（SSA 中端：`pp.c → parser.c → ssa.c → ssa_
 | `c251_output.c` | asm/hex 写出 | 共享输出模块 / 最小裁剪 |
 | `c251_link.c` | 多文件链接 + STARTUP251 启动代码注入 | 最小实现 |
 
-## 5. 指令选择策略（16 位优先）
+## 5. 指令选择策略（16 位优先，仅 Source Mode）
+
+> **指令范围限定**：所有指令模式/编码表只覆盖 Source Mode 可用指令（`docs/stc32g_指令功能排序.md` 中 🔵SOURCE 专用 + 无标记通用）；🔴BINARY 专用指令（需 0xA5 前缀才能用的 8051 形式）一律不生成，不进入编码表。
 
 ### 5.1 寄存器模型（分层，大小端规约）
 
