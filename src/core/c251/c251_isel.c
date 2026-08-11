@@ -212,20 +212,25 @@ static void isel_emit_label(ISelContext* isel, const char* name) {
     free(s);
 }
 
-/* 值类型 unsigned 判断（def 时 value_type 已记录）；未知默认有符号（C 语义） */
+/* ins->labels 含 "imm" 标记 → 常量值在 ins->imm.ival（ssa_pass 约定） */
+static bool has_imm_label(Instr* ins);
+
+/* 值类型 unsigned 判断（def 时 value_type 已记录）；未知默认有符号（C 语义）
+ * 注意：rank < int 的 uchar/ushort 会提升为 int（有符号），只有 size>=2 的原生
+ * 无符号类型（uint）才按无符号比较（C 整数提升规则）。 */
 static bool value_is_unsigned(ISelContext* isel, ValueName v) {
     C251GenContext *ctx = isel->ctx;
     if (v >= 0) {
         char *k = c251_key(v);
         Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
         free(k);
-        if (t) return get_attr(t->attr).ctype_unsigned;
+        if (t && t->size >= 2) return get_attr(t->attr).ctype_unsigned;
     }
     return false;
 }
 
-/* CMP lhs,rhs：lhs 必须物化在寄存器（比较方向不可交换）；rhs 可为寄存器/常量/槽 */
-static void emit_cmp(ISelContext* isel, ValueName s1, ValueName s2, int avoid_wr) {
+/* CMP lhs,rhs：lhs 必须物化在寄存器（比较方向不可交换）；rhs 可为寄存器/常量/槽/imm-label */
+static void emit_cmp(ISelContext* isel, Instr* ins, ValueName s1, ValueName s2, int avoid_wr) {
     C251GenContext *ctx = isel->ctx;
     int r1 = isel_value_reg(ctx, s1);
     if (r1 < 0) {
@@ -261,6 +266,12 @@ static void emit_cmp(ISelContext* isel, ValueName s1, ValueName s2, int avoid_wr
             return;
         }
     }
+    /* ssa_pass pass_binop_const_inline 约定：常量 def 被内联删除后值在 ins->imm.ival */
+    if (has_imm_label(ins)) {
+        char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
+        isel_emit(isel, "CMP", r1buf, imm);
+        return;
+    }
     fprintf(stderr, "c251 isel: CMP rhs 无来源 (v%d)\n", s2);
     isel_emit(isel, "CMP", r1buf, "#0");
 }
@@ -271,7 +282,7 @@ static void emit_compare_result(ISelContext* isel, Instr* ins, const char* jcc) 
     C251GenContext *ctx = isel->ctx;
     ValueName s1 = src1_of(ins), s2 = src2_of(ins);
     int wr = isel_alloc_wr(isel, ins->dest);
-    emit_cmp(isel, s1, s2, wr);
+    emit_cmp(isel, ins, s1, s2, wr);
     char *lbl = isel_new_label(isel, "?C");
     if (wr >= 0) {
         char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
