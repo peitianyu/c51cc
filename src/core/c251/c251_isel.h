@@ -28,12 +28,19 @@ typedef struct ISelContext {
     Dict* block_map;
 
     /* Keil C251 ABI 参数寄存器分配状态（每函数重置）：
-     * 被调函数侧: PARAM 指令按声明序消费 ABI 寄存器（param_used 位图跟踪占用）；
-     * 调用方侧: 实参装载同样用 abi_param_reg 计算目标寄存器（每次 CALL 重置）。 */
+     * 被调函数侧: isel_function 预计算全部参数的 ABI 寄存器表（param_abi_*），
+     *   PARAM 指令按声明序查表消费；物化目标避开其他参数的 ABI 槽（防覆写）。
+     * 调用方侧: 实参装载用 abi_param_reg 计算目标寄存器（每次 CALL 重置）。 */
     int param_counter;      /* 被调函数已消费的参数个数 */
     int param_used[16];     /* 字节寄存器占用位图 (0-15) */
     int param_u8i;          /* u8 候选序列游标 {11,7,6,5,4} */
     int param_u16i;         /* u16 候选序列游标 {6,4,2,0} */
+    /* 参数 ABI 预计算表（isel_function 建立；PARAM 查表消费，避免重复分配） */
+    int param_abi_reg[16];  /* 参数 i → ABI 寄存器 (u8: 字节号 / u16: WR 索引), -2 宽度不支持, -1 不足 */
+    int param_abi_sz[16];   /* 参数 i → 宽度 (1/2) */
+    int param_abi_count;    /* 参数总数 */
+    int param_abi_bytes[32]; /* 全部参数 ABI 字节槽集（物化冲突检查用） */
+    int param_abi_nbytes;   /* param_abi_bytes 长度 */
 } ISelContext;
 
 /* 指令选择主入口 */

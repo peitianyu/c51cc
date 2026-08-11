@@ -157,6 +157,42 @@ int isel_alloc_wr(ISelContext* isel, ValueName val) {
     return w;
 }
 
+/* WR w 覆盖的字节 (w, w+1) 是否命中 abi_bytes 中任一字节（大端 16 位布局: w=高字节） */
+static int wr_conflicts_abi(int w, const int *bytes, int n) {
+    for (int j = 0; j < n; j++)
+        if (bytes[j] == w || bytes[j] == w + 1) return 1;
+    return 0;
+}
+
+/* 分配 WR 目标，避开 abi_bytes（其他参数的 ABI 槽，防覆写未消费参数）；
+ * 逻辑同 isel_alloc_wr（空闲优先 → 块内死值释放），多一层字节冲突检查。 */
+static int isel_alloc_wr_avoid(ISelContext* isel, ValueName val, const int *bytes, int n) {
+    C251GenContext *ctx = isel->ctx;
+    char *key = c251_key(val);
+    int *exist = (int*)dict_get(ctx->value_to_reg, key);
+    if (exist) { free(key); return *exist; }
+    int pos = isel->block_instr_pos;
+    int w = -1;
+    for (int i = 0; i < 4; i++) {
+        int ww = i * 2;
+        if (isel->reg_val[i] >= 0) continue;
+        if (wr_conflicts_abi(ww, bytes, n)) continue;
+        w = ww; break;
+    }
+    if (w < 0) for (int i = 0; i < 4; i++) {
+        int ww = i * 2;
+        ValueName rv = isel->reg_val[i];
+        if (rv < 0 || value_still_used(isel, rv, pos)) continue;
+        if (wr_conflicts_abi(ww, bytes, n)) continue;
+        w = ww; break;
+    }
+    if (w < 0) { free(key); return -1; }
+    isel->reg_val[w/2] = val;
+    int *slot = malloc(sizeof(int)); *slot = w;
+    dict_put(ctx->value_to_reg, key, slot);
+    return w;
+}
+
 /* 把值 v 加载到寄存器 w：v 已在 w 跳过；否则按 寄存器/常量/溢出槽 顺序 */
 static int load_value_to_wr(ISelContext* isel, ValueName v, int w) {
     C251GenContext *ctx = isel->ctx;
@@ -291,7 +327,16 @@ static void load_u8_to_r(ISelContext* isel, ValueName v, int r) {
         return;
     }
     char *sp = c251_value_spill(ctx, v);
-    if (sp) { isel_emit(isel, "MOV", rn, sp); return; }
+    if (sp) {
+        /* u8 值以 16 位形式存槽（大端：槽[0]=高字节=0, 槽[1]=低字节=u8）→
+         * 16 位读槽后取低字节寄存器 R(t+1) */
+        int t = isel_temp_wr(isel, -1, -1);
+        char tbuf[16]; wr_name(tbuf, sizeof(tbuf), t);
+        isel_emit(isel, "MOV", tbuf, sp);
+        char lo[16]; snprintf(lo, sizeof(lo), "R%d", t + 1);
+        isel_emit(isel, "MOV", rn, lo);
+        return;
+    }
     fprintf(stderr, "c251 isel: u8 实参 %d 无来源\n", v);
     isel_emit(isel, "MOV", rn, "#0");
 }
@@ -569,20 +614,26 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_PARAM: {
-        /* 被调函数参数：按声明序从 ABI 寄存器装载（Keil C251） */
+        /* 被调函数参数：按声明序从 ABI 寄存器装载（Keil C251，查预计算表） */
         int idx = isel->param_counter++;
-        Func *f = ctx->current_func;
-        int sz = 2;
-        if (f && f->param_types && idx < (int)list_len(f->param_types)) {
-            Ctype *pt = (Ctype*)list_get(f->param_types, idx);
-            sz = pt ? (pt->size > 1 ? 2 : 1) : 2;
+        if (idx >= isel->param_abi_count) {
+            fprintf(stderr, "c251 isel: 参数 %d 超出预计算表\n", idx);
+            break;
         }
-        int reg = abi_param_reg(isel->param_used, sz, &isel->param_u8i, &isel->param_u16i);
+        int sz = isel->param_abi_sz[idx];
+        int reg = isel->param_abi_reg[idx];
         if (reg == -2) { fprintf(stderr, "c251 isel: 参数 %d 宽度>16位 M3 支持\n", idx); break; }
         if (reg < 0) { fprintf(stderr, "c251 isel: 参数 %d 寄存器不足 (M3 栈传参)\n", idx); break; }
+        /* 其他参数的 ABI 字节槽（物化目标必须避开，防覆写未消费参数） */
+        int avoid[32]; int navoid = 0;
+        for (int j = 0; j < isel->param_abi_nbytes; j++) {
+            int b = isel->param_abi_bytes[j];
+            int mine = (sz <= 1) ? (b == reg) : (b == reg || b == reg + 1);
+            if (!mine) avoid[navoid++] = b;
+        }
         if (sz <= 1) {
-            /* u8 参数在字节寄存器 → MOVZ WRj,Rr（零扩展物化到值寄存器） */
-            int wr = isel_alloc_wr(isel, ins->dest);
+            /* u8 参数在字节寄存器 → MOVZ WRj,Rr（零扩展物化；目标避开其他 ABI 槽） */
+            int wr = isel_alloc_wr_avoid(isel, ins->dest, avoid, navoid);
             if (wr >= 0) {
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
                 isel_emit(isel, "MOVZ", wbuf, reg_name(reg));
@@ -594,23 +645,31 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 isel_emit(isel, "MOV", sp, tbuf);
             }
         } else {
-            /* u16 参数已在 WRreg → 物化到值寄存器/槽 */
-            int wr = isel_alloc_wr(isel, ins->dest);
-            if (wr >= 0) {
-                if (wr != reg) {
+            /* u16 参数已在 WRreg：优先直接绑定 ABI 槽为值寄存器（零 MOV，天然不冲突）；
+             * 槽被占用则物化到避开其他 ABI 槽的寄存器 */
+            char *key = c251_key(ins->dest);
+            int *exist = (int*)dict_get(ctx->value_to_reg, key);
+            if (!exist && isel->reg_val[reg/2] < 0) {
+                int *slot = malloc(sizeof(int)); *slot = reg;
+                dict_put(ctx->value_to_reg, key, slot);
+                isel->reg_val[reg/2] = ins->dest;
+            } else {
+                free(key);
+                int wr = isel_alloc_wr_avoid(isel, ins->dest, avoid, navoid);
+                if (wr >= 0) {
                     char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
                     char rbuf[16]; wr_name(rbuf, sizeof(rbuf), reg);
                     isel_emit(isel, "MOV", wbuf, rbuf);
+                } else {
+                    int tmp = isel_temp_wr(isel, -1, -1);
+                    char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+                    if (tmp != reg) {
+                        char rbuf[16]; wr_name(rbuf, sizeof(rbuf), reg);
+                        isel_emit(isel, "MOV", tbuf, rbuf);
+                    }
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, tbuf);
                 }
-            } else {
-                int tmp = isel_temp_wr(isel, -1, -1);
-                char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
-                if (tmp != reg) {
-                    char rbuf[16]; wr_name(rbuf, sizeof(rbuf), reg);
-                    isel_emit(isel, "MOV", tbuf, rbuf);
-                }
-                char *sp = c251_alloc_spill(ctx, ins->dest);
-                isel_emit(isel, "MOV", sp, tbuf);
             }
         }
         break;
@@ -696,16 +755,45 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         int nargs = ins->args ? (int)list_len(ins->args) : 0;
         /* ① 活值压栈（递归安全：内层调用覆盖寄存器后，外层经 POP 恢复） */
         save_live_regs_stack(isel);
-        /* ② 逆序装载实参（防先装载的实参被后装载覆盖） */
+        /* ② 实参 → ABI 寄存器：先按声明序预计算（与被调方 PARAM 消费序一致）；
+         *    源值寄存器命中其他实参的 ABI 目标时预转存（防逆序装载互相覆盖）；
+         *    再逆序装载 */
         int used[16] = { 0 };
         int u8i = 0, u16i = 0;
         int fail = 0;
-        for (int i = nargs - 1; i >= 0 && !fail; i--) {
+        int abi_regs[32], abi_sz[32], abi_sz8[32];
+        int nabi = 0;
+        for (int i = 0; i < nargs && !fail; i++) {
             ValueName av = *(ValueName*)list_get(ins->args, i);
             int asz = value_size_of(isel, av);
             int reg = abi_param_reg(used, asz, &u8i, &u16i);
             if (reg == -2) { fprintf(stderr, "c251 isel: %s 实参 %d 宽度>16位 M3 支持\n", fname, i); fail = 1; break; }
             if (reg < 0) { fprintf(stderr, "c251 isel: %s 实参 %d 寄存器不足 (M3 栈传参)\n", fname, i); fail = 1; break; }
+            abi_regs[nabi] = reg;
+            abi_sz[nabi] = asz;
+            nabi++;
+        }
+        /* ②' 预转存：源值寄存器命中其他实参的 ABI 目标 → 溢出到独立槽并解除寄存器绑定
+         *   （装载自动走槽路径，彻底避免逆序装载互相覆盖） */
+        for (int i = 0; i < nargs && !fail; i++) {
+            ValueName av = *(ValueName*)list_get(ins->args, i);
+            int r = isel_value_reg(ctx, av);
+            if (r < 0 || r == abi_regs[i]) continue;  /* 常量/槽 或 已就位 */
+            int hit = 0;
+            for (int j = 0; j < nargs; j++) if (abi_regs[j] == r) { hit = 1; break; }
+            if (!hit) continue;                       /* 源不在 ABI 目标集，直接装载安全 */
+            char *sp = c251_alloc_spill(ctx, av);
+            char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+            isel_emit(isel, "MOV", sp, rbuf);
+            char *k = c251_key(av);
+            dict_remove(ctx->value_to_reg, k); free(k);
+            isel->reg_val[r/2] = -1;
+            /* 解除绑定后 load_* 自动走槽路径 */
+        }
+        /* ③ 逆序装载（源已搬离 ABI 目标集，装载不会互相覆盖） */
+        for (int i = nargs - 1; i >= 0 && !fail; i--) {
+            ValueName av = *(ValueName*)list_get(ins->args, i);
+            int reg = abi_regs[i], asz = abi_sz[i];
             if (asz <= 1) load_u8_to_r(isel, av, reg);
             else           load_value_to_wr(isel, av, reg);
         }
@@ -728,9 +816,13 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 if (r_u8) isel_emit(isel, "MOVZ", wbuf, "A");
                 else isel_emit(isel, "MOV", wbuf, ret_spill);
             } else if (r_u8) {
-                /* dest 溢出：A → dest 槽（字节写高字节位；M2 u8 槽语义） */
+                /* dest 溢出：u8 值在 A → MOVZ WRt,A 零扩展后 16 位写槽
+                 * （大端：槽[0]=高=0, 槽[1]=低=A，与 load_u8_to_r 槽读取一致） */
+                int t = isel_temp_wr(isel, -1, -1);
+                char tbuf[16]; wr_name(tbuf, sizeof(tbuf), t);
+                isel_emit(isel, "MOVZ", tbuf, "A");
                 char *sp = c251_alloc_spill(ctx, ins->dest);
-                isel_emit(isel, "MOV", sp, "A");
+                isel_emit(isel, "MOV", sp, tbuf);
             }
             /* u16 且 dest 溢出：值已在 ret_spill=dest 槽，无需再操作 */
         }
@@ -1062,6 +1154,25 @@ void isel_function(C251GenContext* ctx, Func* func) {
     memset(isel.param_used, 0, sizeof(isel.param_used));
     isel.param_u8i = 0;
     isel.param_u16i = 0;
+    /* 预计算全部参数的 ABI 寄存器表（声明序；PARAM 指令查表消费，保证与调用方装载同序） */
+    isel.param_abi_count = 0;
+    isel.param_abi_nbytes = 0;
+    if (func->param_types) {
+        for (Iter pit = list_iter(func->param_types); !iter_end(pit);) {
+            Ctype *pt = iter_next(&pit);
+            int psz = (pt && pt->size > 1) ? 2 : 1;
+            int preg = abi_param_reg(isel.param_used, psz, &isel.param_u8i, &isel.param_u16i);
+            int idx = isel.param_abi_count;
+            isel.param_abi_reg[idx] = preg;
+            isel.param_abi_sz[idx] = psz;
+            isel.param_abi_count++;
+            if (preg >= 0) {
+                isel.param_abi_bytes[isel.param_abi_nbytes++] = preg;
+                if (psz > 1) isel.param_abi_bytes[isel.param_abi_nbytes++] = preg + 1;
+            }
+            if (isel.param_abi_count >= 16) break;
+        }
+    }
     for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
         Block *blk = iter_next(&bit);
         char key[32]; snprintf(key, sizeof(key), "%d", blk->id);
