@@ -104,11 +104,25 @@ def compare_group(name, files, workdir, limit=None):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    argv = sys.argv[1:]
+    # 先提取 --limit [N] / --limit=N / --limit（默认 20），支持空格形式
     limit = None
-    for a in sys.argv[1:]:
-        if a.startswith('--limit'):
-            limit = int(a.split('=')[1]) if '=' in a else 20
+    filtered = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith('--limit='):
+            limit = int(a.split('=', 1)[1])
+        elif a == '--limit':
+            if i + 1 < len(argv) and argv[i + 1].lstrip('-').isdigit():
+                limit = int(argv[i + 1])
+                i += 1
+            else:
+                limit = 20
+        else:
+            filtered.append(a)
+        i += 1
+    args = [a for a in filtered if not a.startswith('--')]
     which = args[0] if args else 'all'
 
     with tempfile.TemporaryDirectory(prefix='c251ks_') as workdir:

@@ -23,7 +23,7 @@ C251CC = os.environ.get('C251CC', os.path.join(ROOT, 'scripts', 'c251cc.exe'))
 SIM = os.environ.get('MCS251', os.path.join(ROOT, 'sim251', 'mcs251.exe'))
 SRC = os.path.join(ROOT, 'test', 'execute')
 OPT = os.environ.get('C251_OPT', '-O1')
-REPORT = os.path.join(ROOT, 'tmp', 'c251_execute_report.txt')
+REPORT = os.path.join(ROOT, '.tmp', 'c251_execute_report.txt')
 MAX_CYCLES = int(os.environ.get('C251_MAX_CYCLES', '2000000'))
 TIMEOUT = int(os.environ.get('C251_TIMEOUT', '120'))
 
@@ -40,7 +40,7 @@ def run(t, outdir):
         cat = 'ERR'
         if 'c251_encode: unsupported' in err:
             cat = 'ENCODE-UNSUPPORTED'
-        elif 'error:' in err:
+        elif 'error:' in err or 'expected' in err or 'failed' in err:
             cat = 'FRONTEND'
         return 'COMPILE-ERR', cat, (err.splitlines()[-1] if err else '')[:100]
 
@@ -49,6 +49,9 @@ def run(t, outdir):
                         '--cycles', str(MAX_CYCLES)],
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', timeout=TIMEOUT)
+    if p.returncode != 0:
+        why = 'TIMEOUT' if p.returncode == 2 else 'SIM-ERROR(%d)' % p.returncode
+        return 'FAIL', why, 'sim251 非零退出 (死循环/模拟器故障, 非正常返回)'
     regs = {}
     if os.path.exists(dump):
         for line in open(dump, encoding='utf-8', errors='replace'):
@@ -66,8 +69,26 @@ def run(t, outdir):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    flags = [a for a in sys.argv[1:] if a.startswith('--')]
+    argv = sys.argv[1:]
+    # 先提取 --limit [N] / --limit=N / --limit（默认 20），支持空格形式
+    limit = None
+    filtered = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith('--limit='):
+            limit = int(a.split('=', 1)[1])
+        elif a == '--limit':
+            if i + 1 < len(argv) and argv[i + 1].lstrip('-').isdigit():
+                limit = int(argv[i + 1])
+                i += 1
+            else:
+                limit = 20
+        else:
+            filtered.append(a)
+        i += 1
+    args = [a for a in filtered if not a.startswith('--')]
+    flags = [a for a in filtered if a.startswith('--')]
     global OPT
     for f in flags:
         if f == '--O0':
@@ -75,10 +96,6 @@ def main():
         elif f == '--O2':
             OPT = '-O2'
     prefix = ''.join(args)
-    limit = None
-    for f in flags:
-        if f.startswith('--limit'):
-            limit = int(f.split('=')[1]) if '=' in f else 20
     want_report = '--report' in flags
 
     tests = sorted(os.path.basename(f)[:-2]
