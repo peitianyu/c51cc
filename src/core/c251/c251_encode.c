@@ -125,6 +125,13 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
             emit2(st, 0x2D, (unsigned char)(((r1 / 2) << 4) | (r2 / 2)));
         else if (r1 >= 0 && !w1 && r2 >= 0 && !w2)
             emit2(st, 0x2C, (unsigned char)((r1 << 4) | r2));
+        else if (r1 >= 0 && w1 && a2 && a2[0] == '#') {
+            /* ADD WRj,#imm16: 2E (j/2)4 hi lo (reg,op2 imm16 形态, functional.py add_wr_imm) */
+            imm = parse_imm(a2, &ok);
+            if (!ok) return -1;
+            emit4(st, 0x2E, (unsigned char)(((r1 / 2) << 4) | 0x4),
+                  (unsigned char)((imm >> 8) & 0xFF), (unsigned char)(imm & 0xFF));
+        }
         else return -1;
         return 0;
     }
@@ -134,6 +141,13 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
         int r2 = parse_reg(a2, &w2);
         if (r1 >= 0 && w1 && r2 >= 0 && w2)
             emit2(st, 0x9D, (unsigned char)(((r1 / 2) << 4) | (r2 / 2)));
+        else if (r1 >= 0 && w1 && a2 && a2[0] == '#') {
+            /* SUB WRj,#imm16: 9E (j/2)4 hi lo (functional.py sub_wr_imm) */
+            imm = parse_imm(a2, &ok);
+            if (!ok) return -1;
+            emit4(st, 0x9E, (unsigned char)(((r1 / 2) << 4) | 0x4),
+                  (unsigned char)((imm >> 8) & 0xFF), (unsigned char)(imm & 0xFF));
+        }
         else return -1;
         return 0;
     }

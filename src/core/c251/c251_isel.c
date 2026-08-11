@@ -10,10 +10,8 @@ static char* k251_key(int n) {
     return strdup(buf);
 }
 
-static char* wr_name(int wr) {
-    static char buf[16];
-    snprintf(buf, sizeof(buf), "WR%d", wr);
-    return buf;
+static void wr_name(char *buf, size_t n, int wr) {
+    snprintf(buf, n, "WR%d", wr);
 }
 
 void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* arg2) {
@@ -58,6 +56,16 @@ static ValueName src2_of(Instr* ins) {
     return *(ValueName*)list_get(ins->args, 1);
 }
 
+/* ins->labels 含 "imm" 标记 → 常量值在 ins->imm.ival（ssa_pass 约定） */
+static bool has_imm_label(Instr* ins) {
+    if (!ins || !ins->labels) return false;
+    for (Iter it = list_iter(ins->labels); !iter_end(it);) {
+        const char *l = iter_next(&it);
+        if (l && strcmp(l, "imm") == 0) return true;
+    }
+    return false;
+}
+
 void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins) return;
     C251GenContext *ctx = isel->ctx;
@@ -67,13 +75,14 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     case IROP_CONST: {
         int wr = isel_alloc_wr(ctx, ins->dest);
+        char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
         char imm[32];
         int is_byte = ins->type && ins->type->size <= 1;
         if (is_byte)
             snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFF);
         else
             snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
-        isel_emit(isel, "MOV", wr_name(wr), imm);
+        isel_emit(isel, "MOV", wbuf, imm);
         /* 记录常量值（供 ADD #imm 折叠） */
         int64_t *cv = malloc(sizeof(int64_t)); *cv = ins->imm.ival;
         dict_put(ctx->value_to_const, k251_key(ins->dest), cv);
@@ -86,42 +95,68 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     case IROP_MUL: {
         int wr = isel_alloc_wr(ctx, ins->dest);
         const char *opm = (ins->op == IROP_ADD) ? "ADD" : (ins->op == IROP_SUB) ? "SUB" : "MUL";
-        ValueName s1 = src1_of(ins), s2 = src2_of(ins);
-        int r2 = isel_value_reg(ctx, s2);
-        if (r2 >= 0) {
-            isel_emit(isel, opm, wr_name(wr), wr_name(r2));
-        } else {
-            /* s2 未分配寄存器：若为常量，查 value_to_const */
-            char key[32]; snprintf(key, sizeof(key), "%02XH", s2);
-            int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, key);
-            if (cv && ins->op == IROP_ADD) {
-                char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
-                isel_emit(isel, "ADD", wr_name(wr), imm);
-            } else if (cv && ins->op == IROP_SUB) {
-                char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
-                isel_emit(isel, "SUB", wr_name(wr), imm);
-            } else {
-                /* 兜底: 物化 s2 到寄存器 */
-                int wr2 = isel_alloc_wr(ctx, s2);
-                /* M1: 常量已由 ssa_pass 折叠，此处极少到达 */
-                isel_emit(isel, "MOV", wr_name(wr2), "#0");
-                isel_emit(isel, opm, wr_name(wr), wr_name(wr2));
-            }
+        char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+
+        /* 物化 s1 到 dest（dest = s1 op s2） */
+        ValueName s1 = src1_of(ins);
+        int r1 = isel_value_reg(ctx, s1);
+        if (r1 >= 0 && r1 != wr) {
+            char r1buf[16]; wr_name(r1buf, sizeof(r1buf), r1);
+            isel_emit(isel, "MOV", wbuf, r1buf);
         }
-        (void)s1;
+
+        ValueName s2 = src2_of(ins);
+        if (s2 >= 0) {
+            int r2 = isel_value_reg(ctx, s2);
+            if (r2 >= 0) {
+                char r2buf[16]; wr_name(r2buf, sizeof(r2buf), r2);
+                isel_emit(isel, opm, wbuf, r2buf);
+            } else {
+                /* s2 无寄存器：查 value_to_const（CONST 已物化但被跳过的兜底） */
+                int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k251_key(s2));
+                if (cv) {
+                    char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
+                    isel_emit(isel, opm, wbuf, imm);
+                } else {
+                    /* 罕见兜底: 未知 s2 → 物化 #0（M2 完整处理） */
+                    char w2buf[16]; wr_name(w2buf, sizeof(w2buf), 0);
+                    isel_emit(isel, "MOV", w2buf, "#0");
+                    isel_emit(isel, opm, wbuf, w2buf);
+                }
+            }
+        } else if (has_imm_label(ins)) {
+            /* ssa_pass 常量内联: args=[lhs], labels=["imm"], imm.ival=常量 */
+            char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
+            isel_emit(isel, opm, wbuf, imm);
+        } else {
+            /* 单操作数无 imm（TRUNC 语义不应到 ADD）: 兜底 */
+            char w2buf[16]; wr_name(w2buf, sizeof(w2buf), 0);
+            isel_emit(isel, "MOV", w2buf, "#0");
+            isel_emit(isel, opm, wbuf, w2buf);
+        }
         break;
     }
     case IROP_RET: {
         ValueName v = src1_of(ins);
-        int r = isel_value_reg(ctx, v);
-        if (r >= 0 && r != 6) isel_emit(isel, "MOV", "WR6", wr_name(r));
+        if (v >= 0) {
+            int r = isel_value_reg(ctx, v);
+            if (r >= 0 && r != 6) {
+                char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+                isel_emit(isel, "MOV", "WR6", rbuf);
+            }
+        } else if (has_imm_label(ins)) {
+            /* ret const → 常量直接进 WR6 */
+            char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
+            isel_emit(isel, "MOV", "WR6", imm);
+        }
         isel_emit(isel, "RET", NULL, NULL);
         break;
     }
     case IROP_LOAD: {
         /* M1: 占位（真实寻址 M2；当前产生占位 MOV 防值无定义） */
         int wr = isel_alloc_wr(ctx, ins->dest);
-        isel_emit(isel, "MOV", wr_name(wr), "#0");
+        char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+        isel_emit(isel, "MOV", wbuf, "#0");
         break;
     }
     case IROP_STORE:
