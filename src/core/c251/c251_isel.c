@@ -228,6 +228,9 @@ static int isel_alloc_wr_avoid(ISelContext* isel, ValueName val, const int *byte
     return w;
 }
 
+/* 查 ADDR 产物指向的全局符号名（无则 NULL） */
+static char* value_to_addr_lookup(C251GenContext* ctx, ValueName val);
+
 /* 把值 v 加载到寄存器 w：v 已在 w 跳过；否则按 寄存器/常量/溢出槽 顺序 */
 static int load_value_to_wr(ISelContext* isel, ValueName v, int w) {
     C251GenContext *ctx = isel->ctx;
@@ -241,6 +244,13 @@ static int load_value_to_wr(ISelContext* isel, ValueName v, int w) {
     if (cv) {
         char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
         isel_emit(isel, "MOV", wbuf, imm);
+        return 0;
+    }
+    /* ADDR 产物作为值（指针变量/传参/比较）：物化符号地址 → MOV WRj,#sym */
+    char *asym = value_to_addr_lookup(ctx, v);
+    if (asym) {
+        char saddr[64]; snprintf(saddr, sizeof(saddr), "#%s", asym);
+        isel_emit(isel, "MOV", wbuf, saddr);
         return 0;
     }
     char *sp = c251_value_spill(ctx, v);
@@ -1157,15 +1167,44 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 isel_emit(isel, "MOV", sp, tbuf);
             }
         } else {
-            /* 指针变量/数组元素 → M2.5 支持 */
-            fprintf(stderr, "c251 isel: LOAD 指针寻址 M2.5 支持 (v%d)\n", ptr);
-            if (wr >= 0) {
+            /* 指针间接读: ptr 值 → WRk（16 位 EDATA 地址）→ MOV WRj,@WRk */
+            int addr_wr = isel_temp_wr(isel, wr, -1);
+            if (load_value_to_wr(isel, ptr, addr_wr) < 0) {
+                /* ptr 未物化（如 OFFSET 产物，任务 2 实现）：兜底 dest=0，不产生未定义值 */
+                if (wr >= 0) {
+                    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+                    isel_emit(isel, "MOV", wbuf, "#0");
+                } else {
+                    int tmp = isel_temp_wr(isel, -1, -1);
+                    char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+                    isel_emit(isel, "MOV", tbuf, "#0");
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, tbuf);
+                }
+                break;
+            }
+            char abuf[16]; wr_name(abuf, sizeof(abuf), addr_wr);
+            char ind[32]; snprintf(ind, sizeof(ind), "@%s", abuf);
+            if (dsz <= 1) {
+                int lo = (wr >= 0) ? wr : isel_temp_wr(isel, addr_wr, -1);
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);
+                char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", lo + 1);
+                isel_emit(isel, "MOV", rbuf, ind);   /* 8 位间接读 */
+                if (value_decl_unsigned(ctx, ins->dest))
+                    isel_emit(isel, "MOVZ", wbuf, rbuf);
+                else
+                    isel_emit(isel, "MOVS", wbuf, rbuf);
+                if (wr < 0) {
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, wbuf);
+                }
+            } else if (wr >= 0) {
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
-                isel_emit(isel, "MOV", wbuf, "#0");
+                isel_emit(isel, "MOV", wbuf, ind);    /* 16 位间接读 */
             } else {
-                int tmp = isel_temp_wr(isel, -1, -1);
+                int tmp = isel_temp_wr(isel, addr_wr, -1);
                 char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
-                isel_emit(isel, "MOV", tbuf, "#0");
+                isel_emit(isel, "MOV", tbuf, ind);
                 char *sp = c251_alloc_spill(ctx, ins->dest);
                 isel_emit(isel, "MOV", sp, tbuf);
             }
@@ -1199,7 +1238,41 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         ValueName ptr = src1_of(ins), val = src2_of(ins);
         char *sym = value_to_addr_lookup(ctx, ptr);
         if (!sym) {
-            fprintf(stderr, "c251 isel: STORE 指针寻址 M2.5 支持 (v%d)\n", ptr);
+            /* 指针间接写: ptr 值 → WRk（16 位 EDATA 地址）→ 值 → MOV @WRk,WRj */
+            int addr_wr = isel_temp_wr(isel, -1, -1);
+            if (load_value_to_wr(isel, ptr, addr_wr) < 0) {
+                fprintf(stderr, "c251 isel: STORE 指针值无法装载 (v%d)\n", ptr);
+                break;
+            }
+            char abuf[16]; wr_name(abuf, sizeof(abuf), addr_wr);
+            char ind[32]; snprintf(ind, sizeof(ind), "@%s", abuf);
+            int r = isel_value_reg(ctx, val);
+            int vsz = value_size_of_ctx(ctx, val);
+            if (r >= 0) {
+                if (vsz <= 1) {
+                    int t = isel_temp_wr(isel, r, addr_wr);
+                    char tlo[16]; snprintf(tlo, sizeof(tlo), "R%d", t + 1);
+                    char rlo[16]; snprintf(rlo, sizeof(rlo), "R%d", r + 1);
+                    isel_emit(isel, "MOV", tlo, rlo);
+                    isel_emit(isel, "MOV", ind, tlo);   /* 8 位间接写 */
+                } else {
+                    char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+                    isel_emit(isel, "MOV", ind, rbuf);  /* 16 位间接写 */
+                }
+            } else {
+                int tmp = isel_temp_wr(isel, addr_wr, -1);
+                char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+                if (load_value_to_wr(isel, val, tmp) == 0) {
+                    if (vsz <= 1) {
+                        char tlo[16]; snprintf(tlo, sizeof(tlo), "R%d", tmp + 1);
+                        isel_emit(isel, "MOV", ind, tlo);
+                    } else {
+                        isel_emit(isel, "MOV", ind, tbuf);
+                    }
+                } else {
+                    fprintf(stderr, "c251 isel: STORE 值未物化 (v%d)\n", val);
+                }
+            }
             break;
         }
         int ssz = sym_size_of(ctx, sym);

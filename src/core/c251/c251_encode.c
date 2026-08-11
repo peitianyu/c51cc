@@ -86,6 +86,14 @@ static int parse_reg(const char *s, int *is_word) {
     return -1;
 }
 
+/* @WRn → WR 索引（16 位间接地址寄存器），失败返回 -1 */
+static int parse_indirect_wr(const char *s) {
+    if (!s || s[0] != '@' || s[1] != 'W' || s[2] != 'R') return -1;
+    char *end; long v = strtol(s + 3, &end, 10);
+    if (*end != '\0' || v < 0 || v > 30 || (v % 2) != 0) return -1;
+    return (int)v;
+}
+
 /* #imm / #0xHH 解析；base 0 失败（如 isel 硬编码的 #FFFF 无 0x 前缀）→ base 16 重试。
  * 失败返回 0 且 *ok=0 */
 static long parse_imm(const char *s, int *ok) {
@@ -266,14 +274,58 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     }
 
     if (!strcmp(op, "MOV")) {
+        /* @WRj 间接目标: MOV @WRk,src (7A (k/2)A (src/2)0, decode_impl.inc case 0x9/0xA) */
+        int ind1 = parse_indirect_wr(a1);
+        if (ind1 >= 0) {
+            int r2 = parse_reg(a2, &w2);
+            if (r2 >= 0 && w2) {
+                emit3(st, 0x7A, (unsigned char)(((ind1 / 2) << 4) | 0xA),
+                      (unsigned char)((r2 / 2) << 4));
+                return 0;
+            }
+            if (r2 >= 0 && !w2) {
+                emit3(st, 0x7A, (unsigned char)(((ind1 / 2) << 4) | 0x9),
+                      (unsigned char)(r2 << 4));
+                return 0;
+            }
+            return -1;
+        }
+        /* @WRj 间接源: MOV dst,@WRk。
+         * 读形态 (decode case 0xA/0x9): b1 高半字节=目标, b2 高半字节=地址寄存器。
+         * MOV WRj,@WRk = 7E ((j/2)4|A) ((k/2)4|0); MOV Rm,@WRk = 7E ((m)4|9) ((k/2)4|0) */
+        int ind2 = parse_indirect_wr(a2);
+        if (ind2 >= 0) {
+            int r1b = parse_reg(a1, &w1);
+            if (r1b >= 0 && w1) {
+                emit3(st, 0x7E, (unsigned char)(((r1b / 2) << 4) | 0xA),
+                      (unsigned char)((ind2 / 2) << 4));
+                return 0;
+            }
+            if (r1b >= 0 && !w1) {
+                /* 8 位读 (decode case 0x9: Rm,@WRj): 地址在 b1, 目标在 b2 */
+                emit3(st, 0x7E, (unsigned char)(((ind2 / 2) << 4) | 0x9),
+                      (unsigned char)(r1b << 4));
+                return 0;
+            }
+            return -1;
+        }
         int r1 = parse_reg(a1, &w1);
         if (r1 >= 0 && w1) { /* WRj 目标 */
             if (a2 && a2[0] == '#') {
                 imm = parse_imm(a2, &ok);
-                if (!ok) return -1;
-                emit4(st, 0x7E, (unsigned char)(((r1 / 2) << 4) | 0x4),
-                      (unsigned char)((imm >> 8) & 0xFF), (unsigned char)(imm & 0xFF));
-                return 0;
+                if (ok) {
+                    emit4(st, 0x7E, (unsigned char)(((r1 / 2) << 4) | 0x4),
+                          (unsigned char)((imm >> 8) & 0xFF), (unsigned char)(imm & 0xFF));
+                    return 0;
+                }
+                /* #SYM：符号地址立即数（ADDR 产物物化，如 MOV WRj,#g_x） */
+                if (a2[1] != '\0' && is_symbol_arg(a2 + 1)) {
+                    unsigned addr = symbol_addr(st, a2 + 1);
+                    emit4(st, 0x7E, (unsigned char)(((r1 / 2) << 4) | 0x4),
+                          (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
+                    return 0;
+                }
+                return -1;
             }
             int r2 = parse_reg(a2, &w2);
             if (r2 >= 0 && w2) { emit2(st, 0x7D, (unsigned char)(((r1 / 2) << 4) | (r2 / 2))); return 0; }
