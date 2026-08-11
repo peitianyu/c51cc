@@ -25,7 +25,8 @@ from sim8051 import load_hex, CPU8051
 SDCC_ONLY = re.compile(
     r"(__sfr|__sbit|__bit|__at\b|__critical|__endasm|\bsfr\b|\bsbit\b|__sdcc|__bit32|"
     r"__xdata_at|#pragma|__reentrant|__naked|__signed__|__unsigned__|__fixed|__accum|__memory_model|"
-    r"__SFR|__SFRX|__SFR16|__SFR32|__xdata\s+\w+\s*=|__code\s+\w+\s*=|__near|__far)", re.S)
+    r"__SFR|__SFRX|__SFR16|__SFR32|__xdata\s+\w+\s*=|__code\s+\w+\s*=|__near|__far|"
+    r"__SDCC_mcs51|__SDCC_pdk14|__SDCC_pdk15)", re.S)
 NO_MAIN_DEPS = re.compile(r"#include\s*<(std|string|stdlib|stdio|limits|math|setjmp|time|assert|ctype|stdbool|stdint|float|errno|signal|locale)")
 
 def has_main_like(fn):

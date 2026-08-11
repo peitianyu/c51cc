@@ -822,8 +822,11 @@ static bool pass_phi(Func *f, Stats *s) {
         for (Iter kt = list_iter(b->phis); !iter_end(kt);) {
             Instr *p = iter_next(&kt);
             if (phi_prune_dead_edges(b, p, f)) changed = true;
-            if (phi_simplify_value(p, f, s)) changed = true;
             if (phi_dedup_edges(p)) changed = true;
+            /* dedup 可能把多 arm 变单 arm (重复 label), 必须在 filter 之前
+             * simplify, 否则单 arm phi 被 phi_pred 当 trivial 删除而 dest
+             * 仍被引用 -> 悬空 (bug-2458). */
+            if (phi_simplify_value(p, f, s)) changed = true;
         }
         List *keep = filter_list(b->phis, phi_pred, f);
         s->phi_rm += b->phis->len - keep->len;
@@ -2773,6 +2776,11 @@ static bool pass_block_merge(Func *f, Stats *s) {
     rebuild_preds(f);
     if (getenv("C51CC_MERGE_DEBUG")) {
         fprintf(stderr, "[merge] start func=%s\n", f->name ? f->name : "?");
+        for (Iter _pit = list_iter(f->blocks); !iter_end(_pit);) {
+            Block *_pb = iter_next(&_pit);
+            if (_pb && _pb->phis && _pb->phis->len)
+                fprintf(stderr, "[merge]   b%ld phis=%d\n", (long)_pb->id, _pb->phis->len);
+        }
     }
 
 
@@ -2804,9 +2812,10 @@ static bool pass_block_merge(Func *f, Stats *s) {
             b->instrs = nb;
         }
         if (getenv("C51CC_MERGE_DEBUG"))
-            fprintf(stderr, "[merge] func=%s b%ld + t%ld (t->preds=%d)\n",
+            fprintf(stderr, "[merge] func=%s b%ld + t%ld (t->preds=%d t->phis=%d t->instrs=%d)\n",
                     f->name ? f->name : "?", (long)b->id, (long)t->id,
-                    t->preds ? t->preds->len : -1);
+                    t->preds ? t->preds->len : -1, t->phis ? t->phis->len : -1,
+                    t->instrs ? t->instrs->len : -1);
         for (Iter jt = list_iter(t->instrs); !iter_end(jt);) list_push(b->instrs, iter_next(&jt));
 
         if (t->instrs && t->instrs->len > 0) {
@@ -3580,7 +3589,37 @@ static void dump_pass_ssa(Func *f, const char *name) {
     if (!want || !*want) return;
     if (strcmp(want, "*") != 0 && strstr(name, want) == NULL) return;
     fprintf(stderr, "\n===== after %s (func %s) =====\n", name, f->name ? f->name : "?");
-    ssa_print_func(f, stderr);
+    if (!f->blocks) return;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        fprintf(stderr, "  b%ld:", (long)b->id);
+        if (b->phis && b->phis->len) {
+            fprintf(stderr, " phi[");
+            for (Iter pit = list_iter(b->phis); !iter_end(pit);) {
+                Instr *p = iter_next(&pit);
+                if (!p) continue;
+                fprintf(stderr, " v%ld", (long)p->dest);
+            }
+            fprintf(stderr, "]");
+        }
+        if (b->instrs) {
+            fprintf(stderr, " [");
+            for (Iter iit = list_iter(b->instrs); !iter_end(iit);) {
+                Instr *i = iter_next(&iit);
+                if (!i) continue;
+                fprintf(stderr, " %d(", (int)i->op);
+                if (i->dest) fprintf(stderr, "v%d", (int)i->dest);
+                if (i->labels) for (Iter lit = list_iter(i->labels); !iter_end(lit);) {
+                    char *l = iter_next(&lit);
+                    fprintf(stderr, "%s%s", (i->dest ? "," : ""), l ? l : "?");
+                }
+                fprintf(stderr, ")");
+            }
+            fprintf(stderr, "]");
+        }
+        fprintf(stderr, "\n");
+    }
 }
 
 void ssa_optimize_func(Func *f, int level) {
