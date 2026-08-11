@@ -1,0 +1,49 @@
+C251 COMPILER V5.60.0,  0018-structptr                                                     10/08/26  14:44:54  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0018-structptr
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0018-structptr.c MODSRC OPTIMIZE(9,S
+                    -IZE) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          
+    3          int
+    4          main()
+    5          {
+    6   1      
+    7   1              struct S { int x; int y; } s;
+    8   1              struct S *p;
+    9   1      
+   10   1              p = &s; 
+   11   1              s.x = 1;
+   12   1              p->y = 2;
+   13   1              return p->y + p->x - 3; 
+   14   1      }
+   15          
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =        33     ------
+  ecode size           =    ------     ------
+  data size            =    ------          4
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

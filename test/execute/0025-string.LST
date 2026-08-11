@@ -1,0 +1,45 @@
+C251 COMPILER V5.60.0,  0025-string                                                        10/08/26  14:44:56  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0025-string
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0025-string.c MODSRC OPTIMIZE(9,SIZE
+                    -) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          int strlen(char *);
+    3          
+    4          int
+    5          main()
+    6          {
+    7   1              char *p;
+    8   1              
+    9   1              p = "hello";
+   10   1              return strlen(p) - 5;
+   11   1      }
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =        12     ------
+  ecode size           =    ------     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =         6     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

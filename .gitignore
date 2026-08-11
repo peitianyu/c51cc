@@ -18,3 +18,6 @@ sim251/obj/
 sim251/*.exe
 __pycache__/
 *.pyc
+test/stc32g/**/list/
+*.LIB
+sim251/tests/periph/report.txt

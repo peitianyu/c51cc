@@ -1,0 +1,51 @@
+C251 COMPILER V5.60.0,  0047-anonexport                                                    10/08/26  14:45:01  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0047-anonexport
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0047-anonexport.c MODSRC OPTIMIZE(9,
+                    -SIZE) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          typedef struct {
+    3                  int a;
+    4                  union {
+    5                          int b1;
+    6                          int b2;
+    7                  };
+    8                  struct { union { struct { int c; }; struct {}; }; };
+*** ERROR C25 IN LINE 8 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '}'
+*** ERROR C25 IN LINE 8 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '}'
+*** ERROR C25 IN LINE 8 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '}'
+    9                  struct {};
+   10                  struct {
+   11                          int d;
+   12                  };
+   13          } s;
+*** ERROR C25 IN LINE 13 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '}'
+*** WARNING C34 IN LINE 13 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: 's': missing declaration specifiers
+   14          
+   15          int
+   16          main()
+   17          {
+   18   1              s v;
+*** ERROR C25 IN LINE 18 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near 'v'
+*** WARNING C34 IN LINE 18 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: 'v': missing declaration specifiers
+   19   1              
+   20   1              v.a = 1;
+*** ERROR C25 IN LINE 20 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '.'
+   21   1              v.b1 = 2;
+*** ERROR C25 IN LINE 21 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '.'
+   22   1              v.c = 3;
+*** ERROR C25 IN LINE 22 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '.'
+   23   1              v.d = 4;
+*** ERROR C25 IN LINE 23 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '.'
+   24   1              
+   25   1              if (v.a != 1)
+*** ERROR C25 IN LINE 25 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near 'if'
+*** ERROR C25 IN LINE 25 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: syntax error near '.'
+*** ERROR C7 IN LINE 25 OF D:\work\tinycc_c251\tests\execute\0047-anonexport.c: compilation aborted
+
+C251 COMPILATION COMPLETE.  2 WARNING(S),  12 ERROR(S)

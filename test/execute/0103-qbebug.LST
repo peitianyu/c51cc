@@ -1,0 +1,45 @@
+C251 COMPILER V5.60.0,  0103-qbebug                                                        10/08/26  14:45:12  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0103-qbebug
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0103-qbebug.c MODSRC OPTIMIZE(9,SIZE
+                    -) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          int
+    3          main()
+    4          {
+    5   1        int c;
+    6   1        c = 0;
+    7   1        do
+    8   1          ;
+    9   1        while (0);
+   10   1        return c;
+   11   1      }
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =         3     ------
+  ecode size           =    ------     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

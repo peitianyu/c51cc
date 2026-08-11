@@ -1,0 +1,75 @@
+C251 COMPILER V5.60.0,  0052-switch                                                        10/08/26  14:45:02  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0052-switch
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0052-switch.c MODSRC OPTIMIZE(9,SIZE
+                    -) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          int x = 0;
+    2          
+    3          int
+    4          main()
+    5          {
+    6   1              switch(x)
+    7   1                      case 0:
+    8   1                              ;
+    9   1              switch(x)
+   10   1                      case 0:
+   11   1                              switch(x) {
+   12   2                                      case 0:
+   13   2                                              goto next;
+   14   2                                      default:
+   15   2                                              return 1;
+   16   2                              }
+   17   1              return 1;
+   18   1              next:
+   19   1              switch(x)
+   20   1                      case 1:
+   21   1                              return 1;
+   22   1              switch(x) {
+   23   2                      {
+   24   3                              x = 1 + 1;
+   25   3                              foo:
+   26   3                              case 1:
+   27   3                                      return 1;
+   28   3                      }
+   29   2              }
+   30   1              switch(x) {
+   31   2                      case 0:
+   32   2                              return x;
+   33   2                      case 1:
+   34   2                              return 1;
+   35   2                      default:
+   36   2                              return 1;
+   37   2              }
+   38   1      }
+*** WARNING C47 IN LINE 25 OF D:\work\tinycc_c251\tests\execute\0052-switch.c: 'foo': unreferenced label
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =        67     ------
+  ecode size           =    ------     ------
+  data size            =         2     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+C251 COMPILER V5.60.0,  0052-switch                                                        10/08/26  14:45:02  PAGE 2   
+
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  1 WARNING(S),  0 ERROR(S)

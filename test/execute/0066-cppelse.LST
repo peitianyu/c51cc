@@ -1,0 +1,54 @@
+C251 COMPILER V5.60.0,  0066-cppelse                                                       10/08/26  14:45:05  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0066-cppelse
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0066-cppelse.c MODSRC OPTIMIZE(9,SIZ
+                    -E) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          #define BAR 0
+    2          #ifdef BAR
+    3                  #ifdef FOO
+                               XXX
+                               #ifdef FOO
+                                       XXX
+                               #endif
+                       #else
+    9                          #define FOO
+   10                          #ifdef FOO
+   11                                  int x = BAR;
+   12                          #endif
+   13                  #endif
+   14          #endif
+   15          
+   16          int
+   17          main()
+   18          {
+   19   1              return BAR;
+   20   1      }
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =         9     ------
+  ecode size           =    ------     ------
+  data size            =         2     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

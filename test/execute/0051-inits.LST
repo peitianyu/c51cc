@@ -1,0 +1,49 @@
+C251 COMPILER V5.60.0,  0051-inits                                                         10/08/26  14:45:02  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0051-inits
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0051-inits.c MODSRC OPTIMIZE(9,SIZE)
+                    - OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          struct S1 {
+    3                  int a;
+    4                  int b;
+    5          };
+    6          
+    7          struct S2 {
+    8                  int a;
+    9                  int b;
+   10                  union {
+   11                          int c;
+   12                          int d;
+   13                  };
+   14                  struct S1 s;
+   15          };
+   16          
+   17          struct S2 v = {1, 2, 3, {4, 5}};
+*** WARNING C141 IN LINE 17 OF D:\work\tinycc_c251\tests\execute\0051-inits.c: 'struct': too many initializers
+*** ERROR C141 IN LINE 17 OF D:\work\tinycc_c251\tests\execute\0051-inits.c: 'struct': too many initializers
+   18          
+   19          int
+   20          main()
+   21          {
+   22   1              if(v.a != 1)
+   23   1                      return 1;
+   24   1              if(v.b != 2)
+   25   1                      return 2;
+   26   1              if(v.c != 3 || v.d != 3)
+*** ERROR C70 IN LINE 26 OF D:\work\tinycc_c251\tests\execute\0051-inits.c: c: undefined member
+   27   1                      return 3;
+   28   1              if(v.s.a != 4)
+   29   1                      return 4;
+   30   1              if(v.s.b != 5)
+   31   1                      return 5;
+   32   1              
+   33   1              return 0;
+   34   1      }
+
+C251 COMPILATION COMPLETE.  1 WARNING(S),  2 ERROR(S)

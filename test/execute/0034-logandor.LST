@@ -1,0 +1,82 @@
+C251 COMPILER V5.60.0,  0034-logandor                                                      10/08/26  14:44:58  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0034-logandor
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0034-logandor.c MODSRC OPTIMIZE(9,SI
+                    -ZE) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          int g;
+    3          
+    4          int
+    5          effect()
+    6          {
+    7   1              g = 1;
+    8   1              return 1;
+    9   1      }
+   10          
+   11          int
+   12          main()
+   13          {
+   14   1          int x;
+   15   1          
+   16   1          g = 0;
+   17   1          x = 0;
+   18   1          if(x && effect())
+   19   1              return 1;
+   20   1          if(g)
+   21   1              return 2;
+   22   1          x = 1;
+   23   1          if(x && effect()) {
+   24   2              if(g != 1)
+   25   2                      return 3;
+   26   2          } else {
+   27   2              return 4;
+   28   2          }
+   29   1          g = 0;
+   30   1          x = 1;
+   31   1          if(x || effect()) {
+   32   2              if(g)
+   33   2                      return 5;
+   34   2          } else {
+   35   2              return 6;
+   36   2          }
+   37   1          x = 0;
+   38   1          if(x || effect()) {
+   39   2              if(g != 1)
+   40   2                      return 7;
+   41   2          } else {
+   42   2              return 8;
+   43   2          } 
+   44   1          return 0;
+   45   1      }
+   46          
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =        71     ------
+  ecode size           =    ------     ------
+  data size            =         2     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+C251 COMPILER V5.60.0,  0034-logandor                                                      10/08/26  14:44:58  PAGE 2   
+
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,25 @@
+C251 COMPILER V5.60.0,  0084-ulonglong                                                     10/08/26  14:45:09  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0084-ulonglong
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0084-ulonglong.c MODSRC OPTIMIZE(9,S
+                    -IZE) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          int
+    3          main()
+    4          {
+    5   1              unsigned long long x;
+*** ERROR C27 IN LINE 5 OF D:\work\tinycc_c251\tests\execute\0084-ulonglong.c: illegal type specifier
+    6   1              
+    7   1              x = 0;
+    8   1              x = x + 1;
+    9   1              if (x != 1)
+   10   1                      return 1;
+   11   1              return 0;
+   12   1      }
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  1 ERROR(S)

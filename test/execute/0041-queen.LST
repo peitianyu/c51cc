@@ -1,0 +1,95 @@
+C251 COMPILER V5.60.0,  0041-queen                                                         10/08/26  14:45:00  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0041-queen
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0041-queen.c MODSRC OPTIMIZE(9,SIZE)
+                    - OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          int *calloc(int, int);
+    3          
+    4          int N;
+    5          int *t;
+    6          
+    7          int
+    8          chk(int x, int y)
+    9          {
+   10   1              int i;
+   11   1              int r;
+   12   1      
+   13   1              for (r=i=0; i<8; i++) {
+   14   2                      r = r + t[x + 8*i];
+   15   2                      r = r + t[i + 8*y];
+   16   2                      if (x+i < 8 & y+i < 8)
+   17   2                              r = r + t[x+i + 8*(y+i)];
+   18   2                      if (x+i < 8 & y-i >= 0)
+   19   2                              r = r + t[x+i + 8*(y-i)];
+   20   2                      if (x-i >= 0 & y+i < 8)
+   21   2                              r = r + t[x-i + 8*(y+i)];
+   22   2                      if (x-i >= 0 & y-i >= 0)
+   23   2                              r = r + t[x-i + 8*(y-i)];
+   24   2              }
+   25   1              return r;
+   26   1      }
+   27          
+   28          int
+   29          go(int n, int x, int y)
+   30          {
+   31   1              if (n == 8) {
+   32   2                      N++;
+   33   2                      return 0;
+   34   2              }
+   35   1              for (; y<8; y++) {
+   36   2                      for (; x<8; x++)
+   37   2                              if (chk(x, y) == 0) {
+   38   3                                      t[x + 8*y]++;
+   39   3                                      go(n+1, x, y);
+*** WARNING C190 IN LINE 39 OF D:\work\tinycc_c251\tests\execute\0041-queen.c: 'go': recursive call to non-reentrant fun
+             -ction
+   40   3                                      t[x + 8*y]--;
+   41   3                              }
+   42   2                      x = 0;
+   43   2              }
+   44   1      }
+   45          
+   46          int
+   47          main()
+   48          {
+   49   1              t = calloc(64, sizeof(int));
+   50   1              go(0, 0, 0);
+   51   1              if(N != 92)
+   52   1                      return 1;
+   53   1              return 0;
+   54   1      }
+   55          
+*** WARNING C180 IN LINE 44 OF D:\work\tinycc_c251\tests\execute\0041-queen.c: 'go': not every path returns a value
+C251 COMPILER V5.60.0,  0041-queen                                                         10/08/26  14:45:00  PAGE 2   
+
+*** WARNING C180 IN LINE 44 OF D:\work\tinycc_c251\tests\execute\0041-queen.c: 'go': not every path returns a value
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =       439     ------
+  ecode size           =    ------     ------
+  data size            =         4          2
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  3 WARNING(S),  0 ERROR(S)

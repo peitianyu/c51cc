@@ -1,0 +1,31 @@
+C251 COMPILER V5.60.0,  0101-bug                                                           10/08/26  14:45:12  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0101-bug
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0101-bug.c MODSRC OPTIMIZE(9,SIZE) O
+                    -BJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          // This wouldn't compile
+    2          
+    3          typedef struct  { } Vec;
+*** ERROR C25 IN LINE 3 OF D:\work\tinycc_c251\tests\execute\0101-bug.c: syntax error near '}'
+*** WARNING C34 IN LINE 3 OF D:\work\tinycc_c251\tests\execute\0101-bug.c: 'Vec': missing declaration specifiers
+    4          
+    5          static void
+    6          vecresize(Vec *v, int cap)
+*** ERROR C25 IN LINE 6 OF D:\work\tinycc_c251\tests\execute\0101-bug.c: syntax error near '*'
+    7          {
+*** WARNING C35 IN LINE 7 OF D:\work\tinycc_c251\tests\execute\0101-bug.c: 'vecresize': uses old-style declarator
+    8   1              return;
+    9   1      }
+*** WARNING C47 IN LINE 6 OF D:\work\tinycc_c251\tests\execute\0101-bug.c: 'Vec': unreferenced parameter
+   10          
+   11          int main()
+   12          {
+   13   1              return 0;
+   14   1      }
+
+C251 COMPILATION COMPLETE.  3 WARNING(S),  2 ERROR(S)

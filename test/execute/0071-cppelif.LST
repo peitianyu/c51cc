@@ -1,0 +1,48 @@
+C251 COMPILER V5.60.0,  0071-cppelif                                                       10/08/26  14:45:06  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0071-cppelif
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0071-cppelif.c MODSRC OPTIMIZE(9,SIZ
+                    -E) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          #if 0
+               X
+               #elif 1
+    5          int x = 0;
+    6          #else
+               X
+               #endif
+    9          
+   10          int
+   11          main()
+   12          {
+   13   1              return x;
+   14   1      }
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =        10     ------
+  ecode size           =    ------     ------
+  data size            =         2     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

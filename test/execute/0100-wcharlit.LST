@@ -1,0 +1,20 @@
+C251 COMPILER V5.60.0,  0100-wcharlit                                                      10/08/26  14:45:12  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0100-wcharlit
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0100-wcharlit.c MODSRC OPTIMIZE(9,SI
+                    -ZE) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          int
+    3          main()
+    4          {
+    5   1              return L'\0';
+*** ERROR C67 IN LINE 5 OF D:\work\tinycc_c251\tests\execute\0100-wcharlit.c: 'L': undefined identifier
+*** ERROR C25 IN LINE 5 OF D:\work\tinycc_c251\tests\execute\0100-wcharlit.c: syntax error near ''\'''
+    6   1      }
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  2 ERROR(S)

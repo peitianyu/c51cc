@@ -1,0 +1,51 @@
+C251 COMPILER V5.60.0,  0037-assignop                                                      10/08/26  14:44:59  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0037-assignop
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0037-assignop.c MODSRC OPTIMIZE(9,SI
+                    -ZE) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          int
+    3          main()
+    4          {
+    5   1              int x;
+    6   1              
+    7   1              x = 0;
+    8   1              x += 2;
+    9   1              x += 2;
+   10   1              if (x != 4)
+   11   1                      return 1;
+   12   1              x -= 3;
+   13   1              if (x != 1)
+   14   1                      return 2;
+   15   1                      
+   16   1              return 0;
+   17   1      }
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =         3     ------
+  ecode size           =    ------     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

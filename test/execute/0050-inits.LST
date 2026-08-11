@@ -1,0 +1,29 @@
+C251 COMPILER V5.60.0,  0050-inits                                                         10/08/26  14:45:01  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0050-inits
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0050-inits.c MODSRC OPTIMIZE(9,SIZE)
+                    - OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          
+    3          int x = 10;
+    4          
+    5          struct S {int a; int *p;};
+    6          struct S s = { .p = &x, .a = 1};
+*** ERROR C25 IN LINE 6 OF D:\work\tinycc_c251\tests\execute\0050-inits.c: syntax error near '.'
+    7          
+    8          int
+    9          main()
+   10          {
+   11   1              if(s.a != 1)
+   12   1                      return 1;
+   13   1              if(*s.p != 10)
+   14   1                      return 2;
+   15   1              return 0;
+   16   1      }
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  1 ERROR(S)

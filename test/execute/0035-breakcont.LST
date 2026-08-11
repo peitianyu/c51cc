@@ -1,0 +1,67 @@
+C251 COMPILER V5.60.0,  0035-breakcont                                                     10/08/26  14:44:58  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE 0035-breakcont
+OBJECT MODULE PLACED IN D:\work\tinycc_c251\tmp\hexcmp\tmp.obj
+COMPILER INVOKED BY: C:\Keil_v5\C251\BIN\C251.EXE D:\work\tinycc_c251\tests\execute\0035-breakcont.c MODSRC OPTIMIZE(9,S
+                    -IZE) OBJECT(D:\work\tinycc_c251\tmp\hexcmp\tmp.obj) 
+
+stmt  level    source
+
+    1          
+    2          int
+    3          main()
+    4          {
+    5   1              int x;
+    6   1              
+    7   1              x = 0;
+    8   1              while(1)
+    9   1                      break;
+   10   1              while(1) {
+   11   2                      if (x == 5) {
+   12   3                              break;
+   13   3                      }
+   14   2                      x = x + 1;
+   15   2                      continue;
+   16   2              }
+   17   1              for (;;) {
+   18   2                      if (x == 10) {
+   19   3                              break;
+   20   3                      }
+   21   2                      x = x + 1;
+   22   2                      continue;
+   23   2              }
+   24   1              do {
+   25   2                      if (x == 15) {
+   26   3                              break;
+   27   3                      }
+   28   2                      x = x + 1;
+   29   2                      continue;
+   30   2              } while(1);
+   31   1              return x - 15;
+   32   1      }
+   33          
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =        37     ------
+  ecode size           =    ------     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
