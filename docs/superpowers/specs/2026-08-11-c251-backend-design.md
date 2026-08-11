@@ -28,6 +28,7 @@ c51cc 是自研 C 编译器（SSA 中端：`pp.c → parser.c → ssa.c → ssa_
 | D7 | 构建 | 使用 **tcc.exe** 构建（唯一构建方式，同 c51cc 现有 `build_compiler.bat` 模式），产出 `c251cc.exe` |
 | D8 | 仓库精简 | **保持代码仓库精简**：复用优先、只提取最小必要资产，禁止整文件复制膨胀（c51 后端不复制、tinycc_c251 资产只摘取编码表/ABI/例程序段） |
 | D9 | 指令集 | **只支持 Source Mode**：c251cc 仅生成 Source Mode 指令（251 扩展指令 + Source Mode 下可用的 8051 兼容子集），不做 BINARY 模式支持；与 sim251（Source Mode 模拟器）完全对齐，🔴BINARY 专用指令一律不生成 |
+| D10 | 数据布局 | **全大端模式**：所有数据布局一律大端——EDATA 内存（offset=高字节, offset+1=低字节）、dir16 访问、WRj/DRk 寄存器、全局变量初始化字节序、参数传递。依据：sim251 mem.c mcs251_ld_iram16 "STC32 大端: addr 处 = 高字节"。任何小端假设都是 bug |
 
 ## 3. 架构设计
 
