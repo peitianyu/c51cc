@@ -196,6 +196,70 @@ static ValueName src2_of(Instr* ins) {
     if (!ins->args || list_len(ins->args) < 2) return -1;
     return *(ValueName*)list_get(ins->args, 1);
 }
+static ValueName src3_of(Instr* ins) {
+    if (!ins->args || list_len(ins->args) < 3) return -1;
+    return *(ValueName*)list_get(ins->args, 2);
+}
+
+/* "block<id>" → <id>；无匹配返回 -1 */
+static int parse_block_id(const char* lbl) {
+    if (!lbl || strncmp(lbl, "block", 5) != 0) return -1;
+    char *end;
+    long id = strtol(lbl + 5, &end, 10);
+    if (*end != '\0' || end == lbl + 5) return -1;
+    return (int)id;
+}
+
+/* 块 id → Block*（block_map 查找） */
+static Block* find_block_by_id(ISelContext* isel, int id) {
+    if (!isel->block_map) return NULL;
+    char key[32]; snprintf(key, sizeof(key), "%d", id);
+    return (Block*)dict_get(isel->block_map, key);
+}
+
+/* 跳转目标标签名（无冒号）：L<id> */
+static void block_label_name(char* out, size_t n, int id) {
+    snprintf(out, n, "L%d", id);
+}
+
+/* 边缘 phi 拷贝：为跳转到 succ_id 的边发射 MOV __spill_phiN, param
+ * （phi dest 在 isel_block 块首分配 EDATA 槽；参数按来源块选择） */
+static void emit_phi_copies(ISelContext* isel, int succ_id) {
+    C251GenContext *ctx = isel->ctx;
+    Block *succ = find_block_by_id(isel, succ_id);
+    if (!succ || !succ->phis) return;
+    char pred_label[32];
+    snprintf(pred_label, sizeof(pred_label), "block%d", isel->current_block_id);
+    for (Iter pit = list_iter(succ->phis); !iter_end(pit);) {
+        Instr *phi = iter_next(&pit);
+        if (!phi || phi->op != IROP_PHI || !phi->args || !phi->labels) continue;
+        int idx = -1;
+        for (int i = 0; i < (int)list_len(phi->labels); i++) {
+            const char *l = (const char*)list_get(phi->labels, i);
+            if (l && strcmp(l, pred_label) == 0) { idx = i; break; }
+        }
+        if (idx < 0 || idx >= (int)list_len(phi->args)) continue;
+        ValueName src = *(ValueName*)list_get(phi->args, idx);
+        char *sp = c251_value_spill(ctx, phi->dest);
+        if (!sp) { /* 块首未分配（不应发生） */
+            sp = c251_alloc_spill(ctx, phi->dest);
+        }
+        int r = isel_value_reg(ctx, src);
+        if (r >= 0) {
+            char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+            isel_emit(isel, "MOV", sp, rbuf);
+        } else {
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            if (load_value_to_wr(isel, src, tmp) == 0) {
+                isel_emit(isel, "MOV", sp, tbuf);
+            } else {
+                fprintf(stderr, "c251 isel: phi 参数无法物化 (v%d)", src);
+            }
+        }
+    }
+}
+
 
 /* 生成内部标签名（无冒号）；发射时用 isel_emit_label */
 static char* isel_new_label(ISelContext* isel, const char* prefix) {
@@ -526,6 +590,138 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         break;
     }
+    case IROP_ZEXT: case IROP_SEXT: case IROP_TRUNC: {
+        /* M2：宽度转换按拷贝处理（16 位值域内 zext/sext/trunc 无操作）；
+         * dest 独立寄存器/槽，避免与 src 共享寄存器导致死值释放冲突 */
+        ValueName s = src1_of(ins);
+        if (s < 0) break;
+        int wr = isel_alloc_wr(isel, ins->dest);
+        if (wr >= 0) {
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            load_value_to_wr(isel, s, wr);
+        } else {
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            if (load_value_to_wr(isel, s, tmp) == 0) {
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                isel_emit(isel, "MOV", sp, tbuf);
+            }
+        }
+        break;
+    }
+    case IROP_JMP: {
+        /* labels[0] = "block<id>"（无条件跳转目标） */
+        const char *lbl = (ins->labels && list_len(ins->labels) > 0)
+            ? (const char*)list_get(ins->labels, 0) : NULL;
+        int tid = parse_block_id(lbl);
+        if (tid < 0) { fprintf(stderr, "c251 isel: JMP 目标无法解析: %s\n", lbl ? lbl : "?"); break; }
+        emit_phi_copies(isel, tid);
+        char t[32]; block_label_name(t, sizeof(t), tid);
+        isel_emit(isel, "SJMP", t, NULL);
+        break;
+    }
+    case IROP_BR: {
+        /* args[0] = 条件值; labels[0] = 真跳转, labels[1] = 假跳转 */
+        ValueName cond = src1_of(ins);
+        const char *tl = (ins->labels && list_len(ins->labels) > 0)
+            ? (const char*)list_get(ins->labels, 0) : NULL;
+        const char *fl = (ins->labels && list_len(ins->labels) > 1)
+            ? (const char*)list_get(ins->labels, 1) : NULL;
+        int tid = parse_block_id(tl), fid = parse_block_id(fl);
+        if (tid < 0 || fid < 0) {
+            fprintf(stderr, "c251 isel: BR 目标无法解析: %s / %s\n", tl ? tl : "?", fl ? fl : "?");
+            break;
+        }
+        /* 条件为常量 → 直接单边跳转（suite 10/11/12 常量折叠后大量触发） */
+        int64_t cv = 0; bool cond_const = false;
+        if (cond >= 0) {
+            char *k = c251_key(cond);
+            int64_t *cp = (int64_t*)dict_get(ctx->value_to_const, k);
+            free(k);
+            if (cp) { cv = *cp; cond_const = true; }
+        } else if (has_imm_label(ins)) {
+            cv = ins->imm.ival; cond_const = true;
+        }
+        if (cond_const) {
+            int go_t = (cv != 0);
+            emit_phi_copies(isel, go_t ? tid : fid);
+            char t[32]; block_label_name(t, sizeof(t), go_t ? tid : fid);
+            isel_emit(isel, "SJMP", t, NULL);
+            break;
+        }
+        /* 物化条件 → CMP #0 → JNE 真; SJMP 假 */
+        int r = isel_value_reg(ctx, cond);
+        if (r < 0) {
+            r = isel_temp_wr(isel, -1, -1);
+            if (load_value_to_wr(isel, cond, r) < 0) {
+                fprintf(stderr, "c251 isel: BR 条件无法物化 (v%d)\n", cond);
+                break;
+            }
+        }
+        char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+        isel_emit(isel, "CMP", rbuf, "#0");
+        emit_phi_copies(isel, tid);
+        char t[32]; block_label_name(t, sizeof(t), tid);
+        isel_emit(isel, "JNE", t, NULL);
+        emit_phi_copies(isel, fid);
+        char f[32]; block_label_name(f, sizeof(f), fid);
+        isel_emit(isel, "SJMP", f, NULL);
+        break;
+    }
+    case IROP_SELECT: {
+        /* args = [cond, v_true, v_false]；常量参数被 ssa_pass 内联到 labels:
+         * "imm1=<val>" / "imm2=<val>"（args 对应位置已替换为 0） */
+        ValueName cond = src1_of(ins), v_true = src2_of(ins), v_false = src3_of(ins);
+        long long t_imm = 0, f_imm = 0; bool t_is_imm = false, f_is_imm = false;
+        if (ins->labels) {
+            for (Iter lit = list_iter(ins->labels); !iter_end(lit);) {
+                const char *l = iter_next(&lit);
+                if (l && strncmp(l, "imm1=", 5) == 0) { t_imm = atoll(l + 5); t_is_imm = true; }
+                if (l && strncmp(l, "imm2=", 5) == 0) { f_imm = atoll(l + 5); f_is_imm = true; }
+            }
+        }
+        int wr = isel_alloc_wr(isel, ins->dest);
+        char *lbl1 = isel_new_label(isel, "?S"), *lbl2 = isel_new_label(isel, "?S");
+        int r = isel_value_reg(ctx, cond);
+        if (r < 0) {
+            r = isel_temp_wr(isel, -1, -1);
+            load_value_to_wr(isel, cond, r);
+        }
+        char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+        isel_emit(isel, "CMP", rbuf, "#0");
+        isel_emit(isel, "JNE", lbl1, NULL);
+        /* 假分支: dest = v_false（或 imm2） */
+        if (wr >= 0) {
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            if (f_is_imm) { char imm[32]; snprintf(imm, sizeof(imm), "#%lld", f_imm & 0xFFFF); isel_emit(isel, "MOV", wbuf, imm); }
+            else load_value_to_wr(isel, v_false, wr);
+        } else {
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            if (f_is_imm) { char imm[32]; snprintf(imm, sizeof(imm), "#%lld", f_imm & 0xFFFF); isel_emit(isel, "MOV", tbuf, imm); }
+            else load_value_to_wr(isel, v_false, tmp);
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", sp, tbuf);
+        }
+        isel_emit(isel, "SJMP", lbl2, NULL);
+        isel_emit_label(isel, lbl1);
+        /* 真分支: dest = v_true（或 imm1） */
+        if (wr >= 0) {
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            if (t_is_imm) { char imm[32]; snprintf(imm, sizeof(imm), "#%lld", t_imm & 0xFFFF); isel_emit(isel, "MOV", wbuf, imm); }
+            else load_value_to_wr(isel, v_true, wr);
+        } else {
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            if (t_is_imm) { char imm[32]; snprintf(imm, sizeof(imm), "#%lld", t_imm & 0xFFFF); isel_emit(isel, "MOV", tbuf, imm); }
+            else load_value_to_wr(isel, v_true, tmp);
+            char *sp = c251_value_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", sp, tbuf);
+        }
+        isel_emit_label(isel, lbl2);
+        free(lbl1); free(lbl2);
+        break;
+    }
     default:
         break; /* M2 扩展 */
     }
@@ -533,6 +729,23 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
 
 void isel_block(ISelContext* isel, Block* block) {
     if (!isel || !block) return;
+    isel->current_block_id = block->id;
+
+    /* 块标签：L<id>: */
+    char lbl[32];
+    block_label_name(lbl, sizeof(lbl), block->id);
+    isel_emit_label(isel, lbl);
+
+    /* PHI：块首为每个 phi dest 分配 EDATA 槽（边缘拷贝目标）；值在使用处从槽加载 */
+    if (block->phis) {
+        for (Iter pit = list_iter(block->phis); !iter_end(pit);) {
+            Instr *phi = iter_next(&pit);
+            if (phi && phi->op == IROP_PHI && phi->dest >= 0) {
+                c251_alloc_spill(isel->ctx, phi->dest);
+            }
+        }
+    }
+
     /* 构建块指令视图（alloc_wr/死值扫描需要） */
     int n = list_len(block->instrs);
     Instr **arr = malloc(sizeof(Instr*) * (n > 0 ? n : 1));
@@ -544,7 +757,6 @@ void isel_block(ISelContext* isel, Block* block) {
     isel->block_instr_count = idx;
     for (int i = 0; i < idx; i++) {
         isel->block_instr_pos = i;
-        /* M1: 无前瞻（isel_instr 的 next 参数暂未使用，M2 引入） */
         isel_instr(isel, arr[i], NULL);
     }
     isel->block_instrs = NULL;
@@ -568,6 +780,22 @@ void isel_function(C251GenContext* ctx, Func* func) {
     obj_add_symbol(ctx->obj, func->name, SYM_FUNC, sec_idx, sec->size, 0, flags);
     ctx->current_func = func;
 
+    /* 预扫描常量（phi 参数可能是 BR 后死代码位置的 CONST，指令处理顺序不可靠） */
+    for (Iter pbit = list_iter(func->blocks); !iter_end(pbit);) {
+        Block *pb = iter_next(&pbit);
+        if (!pb) continue;
+        for (Iter piit = list_iter(pb->instrs); !iter_end(piit);) {
+            Instr *pi = iter_next(&piit);
+            if (pi && pi->op == IROP_CONST && pi->dest >= 0) {
+                char *pk = c251_key(pi->dest);
+                if (!dict_get(ctx->value_to_const, pk)) {
+                    int64_t *cv = malloc(sizeof(int64_t)); *cv = pi->imm.ival;
+                    dict_put(ctx->value_to_const, pk, cv);
+                } else { free(pk); }
+            }
+        }
+    }
+
     ISelContext isel = {0};
     isel.ctx = ctx;
     isel.sec = sec;
@@ -575,6 +803,12 @@ void isel_function(C251GenContext* ctx, Func* func) {
     isel.next_wr = 0;
     for (int i = 0; i < 4; i++) isel.reg_val[i] = -1;
     isel.global_live = global_live;
+    isel.block_map = make_dict(NULL);
+    for (Iter bit = list_iter(func->blocks); !iter_end(bit);) {
+        Block *blk = iter_next(&bit);
+        char key[32]; snprintf(key, sizeof(key), "%d", blk->id);
+        dict_put(isel.block_map, strdup(key), blk);  /* dict_put 不复制 key，必须 strdup */
+    }
 
     /* 函数标签 */
     char label[256];
@@ -586,5 +820,6 @@ void isel_function(C251GenContext* ctx, Func* func) {
         isel_block(&isel, block);
     }
 
+    dict_free(isel.block_map, NULL);
     dict_free(global_live, free);
 }

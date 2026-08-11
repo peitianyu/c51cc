@@ -20,6 +20,12 @@ typedef struct ISelContext {
 
     /* 跨块活值集合（isel_function 预扫描）：value -> int* (块计数)；>=2 块或 PHI 参数 → 永不释放 */
     Dict* global_live;
+
+    /* 当前块 id（phi 拷贝需要知道来源块） */
+    int current_block_id;
+
+    /* 块 id → Block* 映射（phi 拷贝查找目标块，isel_function 建立） */
+    Dict* block_map;
 } ISelContext;
 
 /* 指令选择主入口 */
