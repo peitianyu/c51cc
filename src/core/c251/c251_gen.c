@@ -13,6 +13,8 @@ C251GenContext* c251_ctx_new(void) {
     ctx->value_type = make_dict(NULL);
     ctx->value_to_const = make_dict(NULL);
     ctx->value_to_addr = make_dict(NULL);
+    ctx->value_to_spill = make_dict(NULL);
+    ctx->next_spill_id = 0;
     ctx->temp_values = make_list();
     return ctx;
 }
@@ -23,8 +25,42 @@ void c251_ctx_free(C251GenContext* ctx) {
     if (ctx->value_type)    { dict_free(ctx->value_type, NULL); }
     if (ctx->value_to_const){ dict_free(ctx->value_to_const, free); }
     if (ctx->value_to_addr) { dict_free(ctx->value_to_addr, free); }
+    if (ctx->value_to_spill){ dict_free(ctx->value_to_spill, free); }
     if (ctx->temp_values)   { list_free(ctx->temp_values); }
     free(ctx);
+}
+
+char* c251_key(int n) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02XH", n);
+    return strdup(buf);
+}
+
+char* c251_value_spill(C251GenContext* ctx, ValueName val) {
+    if (!ctx || !ctx->value_to_spill) return NULL;
+    return (char*)dict_get(ctx->value_to_spill, c251_key(val));
+}
+
+char* c251_alloc_spill(C251GenContext* ctx, ValueName val) {
+    if (!ctx) return NULL;
+    char *key = c251_key(val);
+    char *exist = (char*)dict_get(ctx->value_to_spill, key);
+    if (exist) { free(key); return exist; }
+    /* EDATA 段追加 2 字节槽 + 符号（与全局变量同段；无全局变量时首次预留 0x80） */
+    int sec_idx = obj_find_or_add_section(ctx->obj, "?ED?", SEC_EDATA, 1);
+    Section *sec = obj_get_section(ctx->obj, sec_idx);
+    if (sec->bytes_len == 0) {
+        section_append_zeros(sec, C251_EDATA_BASE);
+    }
+    int offset = sec->bytes_len;
+    section_append_zeros(sec, 2);
+    char sym[64];
+    snprintf(sym, sizeof(sym), "__spill_%d", ctx->next_spill_id);
+    ctx->next_spill_id++;
+    obj_add_symbol(ctx->obj, sym, SYM_DATA, sec_idx, offset, 2, SYM_FLAG_LOCAL);
+    char *symdup = strdup(sym);
+    dict_put(ctx->value_to_spill, key, symdup);
+    return symdup;
 }
 
 /* M1: 整数全局变量 → SEC_EDATA + 符号 + 初始化字节 */
@@ -35,10 +71,10 @@ static void process_global_var(C251GenContext *ctx, GlobalVar *g) {
     if (size < 1) size = 1;
     int sec_idx = obj_find_or_add_section(ctx->obj, "?ED?", SEC_EDATA, 1);
     Section *sec = obj_get_section(ctx->obj, sec_idx);
-    /* 首次创建时预留 0x80 字节：避开 IRAM 0x00-0x7F（寄存器文件 R0-R7/位区/数据区），
+    /* 首次创建时预留 C251_EDATA_BASE 字节：避开 IRAM 0x00-0x7F（寄存器文件 R0-R7/位区/数据区），
      * 变量从 0x80 起布局，与 hex 输出 (type-04 0x0000 + off) 一致 */
     if (sec->bytes_len == 0) {
-        section_append_zeros(sec, 0x80);
+        section_append_zeros(sec, C251_EDATA_BASE);
     }
     int offset = sec->bytes_len;
     obj_add_symbol(ctx->obj, g->name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_GLOBAL);

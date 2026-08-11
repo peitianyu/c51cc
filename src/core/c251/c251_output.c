@@ -81,8 +81,8 @@ int c251_write_hex(FILE *fp, const ObjFile *obj) {
         Section *sec = iter_next(&sit);
         if (!sec || sec->kind != SEC_EDATA || sec->bytes_len <= 0) continue;
         fprintf(fp, ":020000040000FA\n");  /* type-04, base=0x0000 → 后续数据路由 IRAM; cksum = 0x100-(02+00+00+04+00+00)=0xFA */
-        /* 变量从 0x80 起布局（EDATA 首 0x80 为寄存器预留区，reset 默认零，不输出） */
-        int off = 0x80;
+        /* 变量从 C251_EDATA_BASE 起布局（EDATA 首 0x80 为寄存器预留区，reset 默认零，不输出） */
+        int off = C251_EDATA_BASE;
         while (off < sec->bytes_len) {
             int n = sec->bytes_len - off; if (n > 16) n = 16;
             hex_emit_line(fp, off, sec->bytes + off, n);
