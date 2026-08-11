@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include "list.h"
 
-typedef enum { SEC_CODE, SEC_DATA, SEC_IDATA, SEC_XDATA, SEC_BIT, SEC_BDATA, SEC_PDATA } SectionKind;
+typedef enum { SEC_CODE, SEC_DATA, SEC_IDATA, SEC_XDATA, SEC_BIT, SEC_BDATA, SEC_PDATA, SEC_EDATA } SectionKind;
 typedef enum { SYM_FUNC, SYM_DATA, SYM_LABEL } SymbolKind;
 typedef enum { RELOC_ABS8, RELOC_ABS16, RELOC_REL8, RELOC_REL16 } RelocKind;
 

@@ -200,9 +200,9 @@ static const char *section_default_name(SectionKind kind)
     static const char *names[] = {
         [SEC_CODE] = ".text", [SEC_DATA] = ".data", [SEC_IDATA] = ".idata",
         [SEC_XDATA] = ".xdata", [SEC_BIT] = ".bit", [SEC_BDATA] = ".bdata",
-        [SEC_PDATA] = ".pdata"
+        [SEC_PDATA] = ".pdata", [SEC_EDATA] = ".edata"
     };
-    return names[kind < 7 ? kind : SEC_CODE];
+    return names[kind < 8 ? kind : SEC_CODE];
 }
 
 static int align_up(int value, int align)
