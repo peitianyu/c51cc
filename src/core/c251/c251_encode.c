@@ -86,11 +86,14 @@ static int parse_reg(const char *s, int *is_word) {
     return -1;
 }
 
-/* #imm / #0xHH 解析；失败返回 0 且 *ok=0 */
+/* #imm / #0xHH 解析；base 0 失败（如 isel 硬编码的 #FFFF 无 0x 前缀）→ base 16 重试。
+ * 失败返回 0 且 *ok=0 */
 static long parse_imm(const char *s, int *ok) {
     *ok = 0;
     if (!s || s[0] != '#') return 0;
     char *end; long v = strtol(s + 1, &end, 0);
+    if (*end == '\0') { *ok = 1; return v; }
+    v = strtol(s + 1, &end, 16);
     if (*end == '\0') { *ok = 1; return v; }
     return 0;
 }
@@ -297,6 +300,14 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
                       (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
                 return 0;
             }
+        } else if (a1 && !strcmp(a1, "SP")) {
+            /* MOV SP,#imm: 75 81 v (8051/251 兼容, 启动代码初始化栈用) */
+            if (a2 && a2[0] == '#') {
+                imm = parse_imm(a2, &ok);
+                if (!ok) return -1;
+                emit3(st, 0x75, 0x81, (unsigned char)(imm & 0xFF));
+                return 0;
+            }
         } else if (is_symbol_arg(a1)) {
             /* 目标是符号：MOV SYM,src */
             int r2 = parse_reg(a2, &w2);
@@ -356,6 +367,63 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
         int r2 = parse_reg(a2, &w2);
         if (r1 >= 0 && w1 && r2 >= 0 && w2)
             emit2(st, 0xAD, (unsigned char)(((r1 / 2) << 4) | (r2 / 2)));
+        else return -1;
+        return 0;
+    }
+
+    if (!strcmp(op, "ANL") || !strcmp(op, "ORL") || !strcmp(op, "XRL")) {
+            /* ANL/ORL/XRL WRj,WRk: 5D/4D/6D (j/2)4|(k/2) (regop2 word)
+         * ANL/ORL/XRL WRj,#imm16: 5E/4E/6E (j/2)4 hi lo (regop2 generic case 0x4)
+         * ANL/ORL/XRL Rm,#data: 5E/4E/6E m0 data (regop2 generic case 0x0) */
+        int base = !strcmp(op, "ANL") ? 0x5D : (!strcmp(op, "ORL") ? 0x4D : 0x6D);
+        int r1 = parse_reg(a1, &w1);
+        int r2 = parse_reg(a2, &w2);
+        if (r1 >= 0 && w1 && r2 >= 0 && w2)
+            emit2(st, (unsigned char)base, (unsigned char)(((r1 / 2) << 4) | (r2 / 2)));
+        else if (r1 >= 0 && !w1 && r2 >= 0 && !w2)
+            emit2(st, (unsigned char)(base - 1), (unsigned char)((r1 << 4) | r2));
+        else if (r1 >= 0 && w1 && a2 && a2[0] == '#') {
+            imm = parse_imm(a2, &ok);
+            if (!ok) return -1;
+            emit4(st, (unsigned char)(base + 1), (unsigned char)(((r1 / 2) << 4) | 0x4),
+                  (unsigned char)((imm >> 8) & 0xFF), (unsigned char)(imm & 0xFF));
+        }
+        else if (r1 >= 0 && !w1 && a2 && a2[0] == '#') {
+            imm = parse_imm(a2, &ok);
+            if (!ok) return -1;
+            emit3(st, (unsigned char)(base + 1), (unsigned char)((r1 << 4) | 0x0), (unsigned char)(imm & 0xFF));
+        }
+        else return -1;
+        return 0;
+    }
+
+    if (!strcmp(op, "SLL") || !strcmp(op, "SRL") || !strcmp(op, "SRA")) {
+        /* 移位 1 位 (shift_single): SLL=3E SRL=1E SRA=0E (j/2)4 (lo=4 表示 WRj!)
+         * 第二字节 = (j/2)<<4 | 0x4，lo=4 才是 word 移位 (lo=0 是 Rm 字节移位) */
+        int r1 = parse_reg(a1, &w1);
+        if (r1 >= 0 && w1) {
+            unsigned char code = !strcmp(op, "SLL") ? 0x3E : (!strcmp(op, "SRL") ? 0x1E : 0x0E);
+            emit2(st, code, (unsigned char)(((r1 / 2) << 4) | 0x4));
+        }
+        else return -1;
+        return 0;
+    }
+
+    if (!strcmp(op, "DIV")) {
+        /* DIV WRj,WRk: 8D (j/2)4|(k/2); 商→WRj, 余数→DR 对另一侧 */
+        int r1 = parse_reg(a1, &w1);
+        int r2 = parse_reg(a2, &w2);
+        if (r1 >= 0 && w1 && r2 >= 0 && w2)
+            emit2(st, 0x8D, (unsigned char)(((r1 / 2) << 4) | (r2 / 2)));
+        else return -1;
+        return 0;
+    }
+
+    if (!strcmp(op, "INC")) {
+        /* INC WRj,#1: 0B (j/2)4 (sel=1 word, ss=0 shortv=1; functional.py inc_wr_1) */
+        int r1 = parse_reg(a1, &w1);
+        if (r1 >= 0 && w1)
+            emit2(st, 0x0B, (unsigned char)(((r1 / 2) << 4) | 0x4));
         else return -1;
         return 0;
     }

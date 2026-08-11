@@ -560,7 +560,7 @@ static bool has_imm_label(Instr* ins) {
 /* 编码器 imm 支持：ADD/SUB 有 WRj,#imm16（2E/9E）；MUL 只支持 WRj,WRk（AD）。
  * MUL 遇 imm 必须物化到寄存器，否则发射不可编码指令（编码器返回 -1、无字节产生）。 */
 static bool op_supports_imm(int op) {
-    return op == IROP_ADD || op == IROP_SUB;
+    return op == IROP_ADD || op == IROP_SUB || op == IROP_AND || op == IROP_OR || op == IROP_XOR;
 }
 
 /* 用立即数发射 op：支持 imm 的 op 直接 op WRj,#imm；否则物化 imm 到临时寄存器再 op */
@@ -728,6 +728,228 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             emit_binop_src2(isel, opm, ins->op, tbuf, tmp, s1, s2, il, ins->imm.ival);
             char *sp = c251_alloc_spill(ctx, ins->dest);
             isel_emit(isel, "MOV", sp, tbuf);
+        }
+        break;
+    }
+    case IROP_AND:
+    case IROP_OR:
+    case IROP_XOR: {
+        /* ANL/ORL/XRL WRj,WRk 或 #imm16 (5D/4D/6D 与 5E/4E/6E 形态)
+         * 复用 ADD 模式：dest 物化 s1 + emit_binop_src2（寄存器/常量/槽/imm-label） */
+        const char *opm = (ins->op == IROP_AND) ? "ANL" : (ins->op == IROP_OR) ? "ORL" : "XRL";
+        ValueName s1 = src1_of(ins), s2 = src2_of(ins);
+        bool il = has_imm_label(ins);
+        int wr = isel_alloc_wr(isel, ins->dest);
+        if (wr >= 0) {
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            load_value_to_wr(isel, s1, wr);
+            emit_binop_src2(isel, opm, ins->op, wbuf, wr, s1, s2, il, ins->imm.ival);
+        } else {
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            load_value_to_wr(isel, s1, tmp);
+            emit_binop_src2(isel, opm, ins->op, tbuf, tmp, s1, s2, il, ins->imm.ival);
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", sp, tbuf);
+        }
+        break;
+    }
+    case IROP_NOT: {
+        /* ~x: XRL WRj,#FFFF（16 位取反；低 8 位结果对 8 位值同样正确） */
+        ValueName s1 = src1_of(ins);
+        int wr = isel_alloc_wr(isel, ins->dest);
+        if (wr >= 0) {
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            load_value_to_wr(isel, s1, wr);
+            isel_emit(isel, "XRL", wbuf, "#FFFF");
+        } else {
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            load_value_to_wr(isel, s1, tmp);
+            isel_emit(isel, "XRL", tbuf, "#FFFF");
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", sp, tbuf);
+        }
+        break;
+    }
+    case IROP_NEG: {
+        /* -x: XRL WRj,#FFFF + INC WRj（补码；251 无 NEG 指令） */
+        ValueName s1 = src1_of(ins);
+        int wr = isel_alloc_wr(isel, ins->dest);
+        if (wr >= 0) {
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            load_value_to_wr(isel, s1, wr);
+            isel_emit(isel, "XRL", wbuf, "#FFFF");
+            isel_emit(isel, "INC", wbuf, NULL);
+        } else {
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            load_value_to_wr(isel, s1, tmp);
+            isel_emit(isel, "XRL", tbuf, "#FFFF");
+            isel_emit(isel, "INC", tbuf, NULL);
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", sp, tbuf);
+        }
+        break;
+    }
+    case IROP_SHL:
+    case IROP_SHR: {
+        /* 移位：251 SLL/SRL/SRA 为移位 1 位指令（regop2_shift, 第二字段忽略）。
+         * M2：常量移位量展开 N 次；有符号右移用 SRA；变量移位量 M2.5。 */
+        ValueName s1 = src1_of(ins), s2 = src2_of(ins);
+        long long amt = 0; bool have_amt = false;
+        if (has_imm_label(ins)) { amt = ins->imm.ival; have_amt = true; }
+        else if (s2 >= 0) {
+            char *k = c251_key(s2);
+            int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k);
+            free(k);
+            if (cv) { amt = *cv; have_amt = true; }
+        }
+        bool is_shr = ins->op == IROP_SHR;
+        bool is_signed_shr = is_shr && !value_is_unsigned(isel, s1);
+        int wr = isel_alloc_wr(isel, ins->dest);
+        int w = wr >= 0 ? wr : isel_temp_wr(isel, -1, -1);
+        char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
+        load_value_to_wr(isel, s1, w);
+        if (!have_amt) {
+            fprintf(stderr, "c251 isel: 变量移位量 M2.5 支持 (v%d)\n", ins->dest);
+        } else {
+            long long n = amt & 0xFFFF;
+            if (n == 0) {
+                /* 移位量 0：无操作（值已在 dest） */
+            } else if (is_signed_shr && n >= 15) {
+                /* SRA 饱和：16 位值算术右移 ≥15 次后符号扩展稳定 */
+                for (int i = 0; i < 15; i++) isel_emit(isel, "SRA", wbuf, NULL);
+            } else if (n >= 16) {
+                /* 16 位逻辑左移/右移 ≥16 位 → 0 */
+                isel_emit(isel, "MOV", wbuf, "#0");
+            } else {
+                const char *opm = is_shr ? (is_signed_shr ? "SRA" : "SRL") : "SLL";
+                for (long long i = 0; i < n; i++) isel_emit(isel, opm, wbuf, NULL);
+            }
+        }
+        if (wr < 0) {
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", sp, wbuf);
+        }
+        break;
+    }
+    case IROP_DIV:
+    case IROP_MOD: {
+        /* 16 位：硬件 DIV WRj,WRk (8D)——商→目标 WRj, 余数→DR 对另一侧。
+         * 无符号：直接 DIV。有符号（C99 截断向零）：符号算法。
+         * 32 位：需运行时库（M3），先报错 + 0 兜底。 */
+        ValueName s1 = src1_of(ins), s2 = src2_of(ins);
+        bool want_mod = ins->op == IROP_MOD;
+        bool us = value_is_unsigned(isel, s1) && value_is_unsigned(isel, s2);
+        int size = ins->type ? ins->type->size : 2;
+        if (size > 2) {
+            fprintf(stderr, "c251 isel: 32 位 DIV/MOD 需运行时库 (M3)\n");
+            int wr = isel_alloc_wr(isel, ins->dest);
+            if (wr >= 0) {
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+                isel_emit(isel, "MOV", wbuf, "#0");
+            } else {
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                isel_emit(isel, "MOV", sp, "#0");
+            }
+            break;
+        }
+        if (us) {
+            /* 无符号：直接 DIV t1,t2 → q=t1, r=partner(t1) */
+            int t1 = isel_temp_wr(isel, -1, -1);
+            int t2 = isel_temp_wr(isel, t1, -1);
+            char b1[16], b2[16]; wr_name(b1, sizeof(b1), t1); wr_name(b2, sizeof(b2), t2);
+            load_value_to_wr(isel, s1, t1);
+            if (has_imm_label(ins)) {
+                char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
+                isel_emit(isel, "MOV", b2, imm);
+            } else {
+                load_value_to_wr(isel, s2, t2);
+            }
+            isel_emit(isel, "DIV", b1, b2);
+            int pr = (t1 & 2) == 0 ? t1 + 2 : t1 - 2;  /* 余数所在 DR 对另一侧 */
+            char pbuf[16]; wr_name(pbuf, sizeof(pbuf), pr);
+            int dw = isel_alloc_wr(isel, ins->dest);
+            if (want_mod) {
+                if (dw >= 0 && dw != pr) { char db[16]; wr_name(db, sizeof(db), dw); isel_emit(isel, "MOV", db, pbuf); }
+                else if (dw < 0) { char *sp = c251_alloc_spill(ctx, ins->dest); isel_emit(isel, "MOV", sp, pbuf); }
+                /* dw == pr：余数已在 dest */
+            } else {
+                if (dw >= 0 && dw != t1) { char db[16]; wr_name(db, sizeof(db), dw); isel_emit(isel, "MOV", db, b1); }
+                else if (dw < 0) { char *sp = c251_alloc_spill(ctx, ins->dest); isel_emit(isel, "MOV", sp, b1); }
+                /* dw == t1：商已在 dest */
+            }
+        } else {
+            /* 有符号除法（截断向零）：
+             *   f1 = (num<0), f2 = (den<0)；anum=|num|, aden=|den|
+             *   DIV → q, r；q 符号 = f1^f2；r 符号 = f1
+             * R0/R1 作标志 → 占 WR0，temp 全部避开 WR0 */
+            int avoid0[1] = { 0 };
+            int t1s = isel_temp_wr_avoid_bytes(isel, -1, -1, avoid0, 1);
+            int t2s = isel_temp_wr_avoid_bytes(isel, t1s, -1, avoid0, 1);
+            char sb1[16], sb2[16];
+            wr_name(sb1, sizeof(sb1), t1s); wr_name(sb2, sizeof(sb2), t2s);
+            load_value_to_wr(isel, s1, t1s);
+            if (has_imm_label(ins)) {
+                char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
+                isel_emit(isel, "MOV", sb2, imm);
+            } else {
+                load_value_to_wr(isel, s2, t2s);
+            }
+            char *l1 = isel_new_label(isel, "?D"), *l2 = isel_new_label(isel, "?D");
+            char *l3 = isel_new_label(isel, "?D"), *l4 = isel_new_label(isel, "?D");
+            /* f1 = num<0（有符号判断: CMP 后 JSGE 有符号>=0 跳过取负） */
+            isel_emit(isel, "MOV", "R0", "#0");
+            isel_emit(isel, "CMP", sb1, "#0");
+            isel_emit(isel, "JSGE", l1, NULL);
+            isel_emit(isel, "XRL", sb1, "#FFFF");
+            isel_emit(isel, "INC", sb1, NULL);
+            isel_emit(isel, "MOV", "R0", "#1");
+            isel_emit_label(isel, l1);
+            /* f2 = den<0 */
+            isel_emit(isel, "MOV", "R1", "#0");
+            isel_emit(isel, "CMP", sb2, "#0");
+            isel_emit(isel, "JSGE", l2, NULL);
+            isel_emit(isel, "XRL", sb2, "#FFFF");
+            isel_emit(isel, "INC", sb2, NULL);
+            isel_emit(isel, "MOV", "R1", "#1");
+            isel_emit_label(isel, l2);
+            /* 无符号除 */
+            isel_emit(isel, "DIV", sb1, sb2);   /* q→t1s, r→prs */
+            int prs = (t1s & 2) == 0 ? t1s + 2 : t1s - 2;
+            char spb[16]; wr_name(spb, sizeof(spb), prs);
+            int dw = isel_alloc_wr(isel, ins->dest);
+            int avoid3[2] = { dw >= 0 ? dw : -1, 0 };
+            int t3 = isel_temp_wr_avoid_bytes(isel, t1s, prs, avoid3, dw >= 0 ? 2 : 1);
+            char b3[16]; wr_name(b3, sizeof(b3), t3);
+            isel_emit(isel, "MOV", b3, spb);    /* t3 = r */
+            /* q 符号: f1^f2 */
+            isel_emit(isel, "MOV", "A", "R0");
+            isel_emit(isel, "XRL", "A", "R1");
+            isel_emit(isel, "JZ", l3, NULL);
+            isel_emit(isel, "XRL", sb1, "#FFFF");
+            isel_emit(isel, "INC", sb1, NULL);
+            isel_emit_label(isel, l3);
+            /* r 符号: f1（余数符号同被除数） */
+            if (want_mod) {
+                isel_emit(isel, "MOV", "A", "R0");
+                isel_emit(isel, "JZ", l4, NULL);
+                isel_emit(isel, "XRL", b3, "#FFFF");
+                isel_emit(isel, "INC", b3, NULL);
+                isel_emit_label(isel, l4);
+            }
+            /* 结果 → dest */
+            if (want_mod) {
+                if (dw >= 0 && dw != t3) { char db[16]; wr_name(db, sizeof(db), dw); isel_emit(isel, "MOV", db, b3); }
+                else if (dw < 0) { char *sp = c251_alloc_spill(ctx, ins->dest); isel_emit(isel, "MOV", sp, b3); }
+                /* dw == t3：余数已在 dest */
+            } else {
+                if (dw >= 0 && dw != t1s) { char db[16]; wr_name(db, sizeof(db), dw); isel_emit(isel, "MOV", db, sb1); }
+                else if (dw < 0) { char *sp = c251_alloc_spill(ctx, ins->dest); isel_emit(isel, "MOV", sp, sb1); }
+                /* dw == t1s：商已在 dest */
+            }
+            free(l1); free(l2); free(l3); free(l4);
         }
         break;
     }
@@ -1220,6 +1442,12 @@ void isel_function(C251GenContext* ctx, Func* func) {
     char label[256];
     snprintf(label, sizeof(label), "_%s:", func->name);
     isel_emit(&isel, label, NULL, NULL);
+
+    /* main: 初始化 SP 到 EDATA 高位 (Keil STARTUP 行为; 避免 RET 弹栈到寄存器区 0x07,
+     * 也避免 WR6/R7 返回值污染 SP=7 的栈导致 sim251 ret_mismatch) */
+    if (func->name && strcmp(func->name, "main") == 0) {
+        isel_emit(&isel, "MOV", "SP", "#0xDF");
+    }
 
     for (Iter it = list_iter(func->blocks); !iter_end(it);) {
         Block* block = iter_next(&it);
