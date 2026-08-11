@@ -474,6 +474,40 @@ static bool value_is_unsigned(ISelContext* isel, ValueName v) {
     return false;
 }
 
+/* 值宽度: 1=字节, 2=字（未知默认 2；LOAD 目标/比较等用）。
+ * 注：334 行已有 value_size_of(ISelContext*,...)，本版本为 C251GenContext* 签名，
+ * 仅 LOAD/STORE 用（此处入参是 ctx）。 */
+static int value_size_of_ctx(C251GenContext *ctx, ValueName v) {
+    if (v >= 0) {
+        char *k = c251_key(v);
+        Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
+        free(k);
+        if (t) return t->size <= 1 ? 1 : 2;
+    }
+    return 2;
+}
+
+/* 按声明判定无符号（char 加载扩展用；与比较的提升规则不同——
+ * unsigned char 加载必须零扩展为 0-255，signed char 符号扩展） */
+static bool value_decl_unsigned(C251GenContext *ctx, ValueName v) {
+    if (v >= 0) {
+        char *k = c251_key(v);
+        Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
+        free(k);
+        if (t) return get_attr(t->attr).ctype_unsigned;
+    }
+    return false;
+}
+
+/* 全局符号字节数（sym_size dict；未知默认 2——spill 槽即 2B） */
+static int sym_size_of(C251GenContext *ctx, const char *sym) {
+    if (sym && ctx->sym_size) {
+        int *s = (int*)dict_get(ctx->sym_size, (char*)sym);
+        if (s) return *s <= 1 ? 1 : 2;
+    }
+    return 2;
+}
+
 /* CMP lhs,rhs：lhs 必须物化在寄存器（比较方向不可交换）；rhs 可为寄存器/常量/槽/imm-label */
 static void emit_cmp(ISelContext* isel, Instr* ins, ValueName s1, ValueName s2, int avoid_wr) {
     C251GenContext *ctx = isel->ctx;
@@ -1090,12 +1124,29 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_LOAD: {
-        /* 真实寻址：ptr 是 ADDR 产物 → 查 value_to_addr 得符号名 → MOV WRj,SYMBOL */
+        /* 真实寻址：ptr 是 ADDR 产物 → 查 value_to_addr 得符号名。
+         * 宽度感知（D10 全大端）：char 目标 → 8 位读 Rm + MOVZ/MOVS 扩展；
+         * int 目标 → 16 位 MOV WRj,SYM。 */
         ValueName ptr = src1_of(ins);
         char *sym = value_to_addr_lookup(ctx, ptr);
         int wr = isel_alloc_wr(isel, ins->dest);
+        int dsz = value_size_of_ctx(ctx, ins->dest);
         if (sym) {
-            if (wr >= 0) {
+            if (dsz <= 1) {
+                /* char: MOV R(lo+1),SYM (8 位读) → MOVZ/MOVS WRlo,R(lo+1) */
+                int lo = (wr >= 0) ? wr : isel_temp_wr(isel, -1, -1);
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);
+                char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", lo + 1);
+                isel_emit(isel, "MOV", rbuf, sym);
+                if (value_decl_unsigned(ctx, ins->dest))
+                    isel_emit(isel, "MOVZ", wbuf, rbuf);
+                else
+                    isel_emit(isel, "MOVS", wbuf, rbuf);
+                if (wr < 0) {
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, wbuf);
+                }
+            } else if (wr >= 0) {
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
                 isel_emit(isel, "MOV", wbuf, sym);
             } else {
@@ -1122,36 +1173,60 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_STORE: {
-        /* ssa_pass 优化格式: labels[0]="@sym", 值在 imm.ival（无 args）——store @g, const 30 */
+        /* ssa_pass 优化格式: labels[0]="@sym", 值在 imm.ival（无 args）——store @g, const。
+         * 宽度按目标符号 size：char → 8 位写，int → 16 位写（防破坏邻居）。 */
         if (ins->labels && list_len(ins->labels) > 0) {
             const char *lab = (const char*)list_get(ins->labels, 0);
             if (lab && lab[0] == '@') {
                 const char *sym = lab + 1;
+                int ssz = sym_size_of(ctx, sym);
                 int tmp = isel_temp_wr(isel, -1, -1);
                 char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
-                char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
-                isel_emit(isel, "MOV", tbuf, imm);
-                isel_emit(isel, "MOV", sym, tbuf);
+                if (ssz <= 1) {
+                    char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", tmp + 1);
+                    char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFF);
+                    isel_emit(isel, "MOV", rbuf, imm);
+                    isel_emit(isel, "MOV", sym, rbuf);
+                } else {
+                    char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFFFF);
+                    isel_emit(isel, "MOV", tbuf, imm);
+                    isel_emit(isel, "MOV", sym, tbuf);
+                }
                 break;
             }
         }
-        /* store ptr, val → MOV SYMBOL,WRj（编码器 dir16 写形态） */
+        /* store ptr, val → MOV SYMBOL,WRj（宽度按目标符号 size） */
         ValueName ptr = src1_of(ins), val = src2_of(ins);
         char *sym = value_to_addr_lookup(ctx, ptr);
         if (!sym) {
             fprintf(stderr, "c251 isel: STORE 指针寻址 M2.5 支持 (v%d)\n", ptr);
             break;
         }
+        int ssz = sym_size_of(ctx, sym);
         int r = isel_value_reg(ctx, val);
         if (r >= 0) {
             char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
-            isel_emit(isel, "MOV", sym, rbuf);
+            if (ssz <= 1) {
+                /* 8 位写：值低字节 R(r+1)（WR 大端）→ 临时低字节 → MOV SYM,R */
+                int t = isel_temp_wr(isel, r, -1);
+                char tlo[16]; snprintf(tlo, sizeof(tlo), "R%d", t + 1);
+                char rlo[16]; snprintf(rlo, sizeof(rlo), "R%d", r + 1);
+                isel_emit(isel, "MOV", tlo, rlo);
+                isel_emit(isel, "MOV", sym, tlo);
+            } else {
+                isel_emit(isel, "MOV", sym, rbuf);
+            }
         } else {
             /* 值未物化（常量/溢出槽）：加载到临时再存 */
             int tmp = isel_temp_wr(isel, -1, -1);
             char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
             if (load_value_to_wr(isel, val, tmp) == 0) {
-                isel_emit(isel, "MOV", sym, tbuf);
+                if (ssz <= 1) {
+                    char tlo[16]; snprintf(tlo, sizeof(tlo), "R%d", tmp + 1);
+                    isel_emit(isel, "MOV", sym, tlo);
+                } else {
+                    isel_emit(isel, "MOV", sym, tbuf);
+                }
             } else {
                 fprintf(stderr, "c251 isel: STORE 值未物化 (v%d)\n", val);
             }

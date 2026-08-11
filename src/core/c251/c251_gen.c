@@ -14,6 +14,7 @@ C251GenContext* c251_ctx_new(void) {
     ctx->value_to_const = make_dict(NULL);
     ctx->value_to_addr = make_dict(NULL);
     ctx->value_to_spill = make_dict(NULL);
+    ctx->sym_size = make_dict(NULL);
     ctx->next_spill_id = 0;
     ctx->temp_values = make_list();
     return ctx;
@@ -26,6 +27,7 @@ void c251_ctx_free(C251GenContext* ctx) {
     if (ctx->value_to_const){ dict_free(ctx->value_to_const, free); }
     if (ctx->value_to_addr) { dict_free(ctx->value_to_addr, free); }
     if (ctx->value_to_spill){ dict_free(ctx->value_to_spill, free); }
+    if (ctx->sym_size)      { dict_free(ctx->sym_size, free); }
     if (ctx->temp_values)   { list_free(ctx->temp_values); }
     free(ctx);
 }
@@ -81,6 +83,11 @@ static void process_global_var(C251GenContext *ctx, GlobalVar *g) {
     }
     int offset = sec->bytes_len;
     obj_add_symbol(ctx->obj, g->name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_GLOBAL);
+    /* 记录符号字节数（供 isel STORE 宽度判定：char 1B / int 2B） */
+    {
+        int *szp = malloc(sizeof(int)); *szp = size;
+        dict_put(ctx->sym_size, strdup(g->name), szp);
+    }
     section_append_zeros(sec, size);
     /* 初始化字节：blob（小端，SSA 约定）→ 大端内存布局（251 字访问大端，addr 处=高字节）。
      * init_instr blob 优先，否则标量 init_value 同样转大端。 */

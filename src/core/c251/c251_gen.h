@@ -22,6 +22,7 @@ typedef struct C251GenContext {
     Dict* value_to_const;   /* value -> int64_t* (记录常量值) */
     Dict* value_to_addr;    /* ValueName -> char* (ADDR 产物指向的全局符号名) */
     Dict* value_to_spill;   /* ValueName -> char* (__spill_N 符号名) */
+    Dict* sym_size;         /* 全局符号名 -> int* (字节数, 供 STORE 宽度判定) */
     int next_spill_id;      /* 溢出槽编号 */
     int label_counter;
     List* temp_values;
