@@ -1151,8 +1151,10 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         /* ① 活值压栈（递归安全：内层调用覆盖寄存器后，外层经 POP 恢复；
          *    预转存已解除绑定的 WR 不压栈，restore 对称） */
         save_live_regs_stack(isel);
-        /* ② spill 槽压栈（递归安全：静态 EDATA 槽被内层调用覆盖后外层经 POP 恢复） */
-        List *spill_slots = save_spill_slots_stack(isel);
+        /* ② spill 槽压栈（仅自递归调用：避免所有调用都压栈导致超时/栈溢出） */
+        int is_self_recursive = ctx->current_func && ctx->current_func->name
+            && fname && strcmp(ctx->current_func->name, fname) == 0;
+        List *spill_slots = is_self_recursive ? save_spill_slots_stack(isel) : NULL;
         /* ③ 逆序装载（源已搬离 ABI 目标集，装载不会互相覆盖） */
         for (int i = nargs - 1; i >= 0 && !fail; i--) {
             ValueName av = *(ValueName*)list_get(ins->args, i);
