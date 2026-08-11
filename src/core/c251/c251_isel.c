@@ -164,6 +164,41 @@ static int wr_conflicts_abi(int w, const int *bytes, int n) {
     return 0;
 }
 
+/* 选临时寄存器（额外避让 abi 字节）：同 isel_temp_wr（空闲 → 块内死值 → 强制溢出），
+ * 每层多 wr_conflicts_abi 检查，防覆写未消费的 ABI 参数槽。 */
+static int isel_temp_wr_avoid_bytes(ISelContext* isel, int avoid1, int avoid2,
+                                    const int *bytes, int n) {
+    C251GenContext *ctx = isel->ctx;
+    for (int w = 0; w <= 6; w += 2) {
+        if (w == avoid1 || w == avoid2) continue;
+        if (wr_conflicts_abi(w, bytes, n)) continue;
+        if (isel->reg_val[w/2] < 0) return w;
+    }
+    for (int w = 0; w <= 6; w += 2) {
+        if (w == avoid1 || w == avoid2) continue;
+        if (wr_conflicts_abi(w, bytes, n)) continue;
+        ValueName rv = isel->reg_val[w/2];
+        if (rv >= 0 && !value_still_used(isel, rv, isel->block_instr_pos)) return w;
+    }
+    /* 极端兜底：强制溢出第一个非 avoid 且不冲突寄存器中的值 */
+    for (int w = 0; w <= 6; w += 2) {
+        if (w == avoid1 || w == avoid2) continue;
+        if (wr_conflicts_abi(w, bytes, n)) continue;
+        ValueName rv = isel->reg_val[w/2];
+        if (rv >= 0) {
+            char *sp = c251_alloc_spill(ctx, rv);
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
+            isel_emit(isel, "MOV", sp, wbuf);
+            char *k = c251_key(rv);
+            dict_remove(ctx->value_to_reg, k);
+            free(k);
+            isel->reg_val[w/2] = -1;
+            return w;
+        }
+    }
+    return 0; /* 理论不可达 */
+}
+
 /* 分配 WR 目标，避开 abi_bytes（其他参数的 ABI 槽，防覆写未消费参数）；
  * 逻辑同 isel_alloc_wr（空闲优先 → 块内死值释放），多一层字节冲突检查。 */
 static int isel_alloc_wr_avoid(ISelContext* isel, ValueName val, const int *bytes, int n) {
@@ -638,7 +673,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
                 isel_emit(isel, "MOVZ", wbuf, reg_name(reg));
             } else {
-                int tmp = isel_temp_wr(isel, -1, -1);
+                int tmp = isel_temp_wr_avoid_bytes(isel, -1, -1, avoid, navoid);
                 char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
                 isel_emit(isel, "MOVZ", tbuf, reg_name(reg));
                 char *sp = c251_alloc_spill(ctx, ins->dest);
@@ -661,7 +696,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                     char rbuf[16]; wr_name(rbuf, sizeof(rbuf), reg);
                     isel_emit(isel, "MOV", wbuf, rbuf);
                 } else {
-                    int tmp = isel_temp_wr(isel, -1, -1);
+                    int tmp = isel_temp_wr_avoid_bytes(isel, -1, -1, avoid, navoid);
                     char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
                     if (tmp != reg) {
                         char rbuf[16]; wr_name(rbuf, sizeof(rbuf), reg);
@@ -753,8 +788,6 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             break;
         }
         int nargs = ins->args ? (int)list_len(ins->args) : 0;
-        /* ① 活值压栈（递归安全：内层调用覆盖寄存器后，外层经 POP 恢复） */
-        save_live_regs_stack(isel);
         /* ② 实参 → ABI 寄存器：先按声明序预计算（与被调方 PARAM 消费序一致）；
          *    源值寄存器命中其他实参的 ABI 目标时预转存（防逆序装载互相覆盖）；
          *    再逆序装载 */
@@ -780,7 +813,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             int r = isel_value_reg(ctx, av);
             if (r < 0 || r == abi_regs[i]) continue;  /* 常量/槽 或 已就位 */
             int hit = 0;
-            for (int j = 0; j < nargs; j++) if (abi_regs[j] == r) { hit = 1; break; }
+            for (int j = 0; j < nargs; j++)
+                if (abi_regs[j] == r || abi_regs[j] == r + 1) { hit = 1; break; }
             if (!hit) continue;                       /* 源不在 ABI 目标集，直接装载安全 */
             char *sp = c251_alloc_spill(ctx, av);
             char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
@@ -790,6 +824,9 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             isel->reg_val[r/2] = -1;
             /* 解除绑定后 load_* 自动走槽路径 */
         }
+        /* ① 活值压栈（递归安全：内层调用覆盖寄存器后，外层经 POP 恢复；
+         *    预转存已解除绑定的 WR 不压栈，restore 对称） */
+        save_live_regs_stack(isel);
         /* ③ 逆序装载（源已搬离 ABI 目标集，装载不会互相覆盖） */
         for (int i = nargs - 1; i >= 0 && !fail; i--) {
             ValueName av = *(ValueName*)list_get(ins->args, i);
