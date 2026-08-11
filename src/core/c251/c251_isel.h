@@ -41,6 +41,14 @@ typedef struct ISelContext {
     int param_abi_count;    /* 参数总数 */
     int param_abi_bytes[32]; /* 全部参数 ABI 字节槽集（物化冲突检查用） */
     int param_abi_nbytes;   /* param_abi_bytes 长度 */
+
+    /* BR 免物化 hint（比较指令 → BR 直接复用 CMP 标志，跳过 0/1 物化）：
+     * 比较指令处理时前瞻（可选 NE X,0 后）发现结果仅被 BR 使用 → 只发 CMP，
+     * 记录 br_hint_jump（结果为真时的条件跳转）；BR 命中时直接跳转。
+     * br_hint_ne_skip = 模式中被消费的 NE 指令 dest（NE 处理时跳过），-1 = 无。 */
+    int br_hint_cond;        /* 免物化比较结果值名, -1 = 无 */
+    char br_hint_jump[8];    /* 结果为真时的条件跳转助记符 (如 "JE"/"JSL") */
+    int br_hint_ne_skip;     /* 被消费的 NE 指令 dest 值名, -1 = 无 */
 } ISelContext;
 
 /* 指令选择主入口 */

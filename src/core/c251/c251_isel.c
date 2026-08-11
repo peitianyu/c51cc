@@ -627,6 +627,134 @@ static void emit_compare_result(ISelContext* isel, Instr* ins, const char* jcc) 
     free(lbl);
 }
 
+/* BR 免物化：条件跳转反转。jcc 为 emit_compare_result 的"结果为 0 跳走"条件，
+ * 返回"结果为 1（真）跳转"的条件（BR 直接用）。无反转则返回 NULL。 */
+static const char* invert_jcc_str(const char* jcc) {
+    if (!jcc) return NULL;
+    if (!strcmp(jcc, "JE"))   return "JNE";
+    if (!strcmp(jcc, "JNE"))  return "JE";
+    if (!strcmp(jcc, "JG"))   return "JLE";
+    if (!strcmp(jcc, "JLE"))  return "JG";
+    if (!strcmp(jcc, "JSL"))  return "JSGE";
+    if (!strcmp(jcc, "JSGE")) return "JSL";
+    if (!strcmp(jcc, "JSLE")) return "JSG";
+    if (!strcmp(jcc, "JSG"))  return "JSLE";
+    if (!strcmp(jcc, "JC"))   return "JNC";
+    if (!strcmp(jcc, "JNC"))  return "JC";
+    if (!strcmp(jcc, "JZ"))   return "JNZ";
+    if (!strcmp(jcc, "JNZ"))  return "JZ";
+    return NULL;
+}
+
+/* 指令 args 是否使用值 v */
+static bool instr_uses_value(Instr* ins, ValueName v) {
+    if (!ins || !ins->args) return false;
+    for (Iter it = list_iter(ins->args); !iter_end(it);) {
+        ValueName *ap = iter_next(&it);
+        if (ap && *ap == v) return true;
+    }
+    return false;
+}
+
+/* block_instrs[from..n) 中 v 被使用的次数（含 BR 自身） */
+static int count_block_uses_from(ISelContext* isel, int from, ValueName v) {
+    if (v < 0) return 0;
+    int cnt = 0;
+    for (int i = from; i < isel->block_instr_count; i++) {
+        Instr *ins = isel->block_instrs[i];
+        if (!ins || !ins->args) continue;
+        for (Iter it = list_iter(ins->args); !iter_end(it);) {
+            ValueName *ap = iter_next(&it);
+            if (ap && *ap == v) cnt++;
+        }
+    }
+    return cnt;
+}
+
+/* 从 pos+1 起找下一条有效指令（跳过 NOP 和 CONST——CONST 的 MOV 不影响标志） */
+static Instr* next_non_nop(ISelContext* isel, int pos) {
+    for (int i = pos + 1; i < isel->block_instr_count; i++) {
+        Instr *ins = isel->block_instrs[i];
+        if (!ins) continue;
+        if (ins->op == IROP_NOP || ins->op == IROP_CONST) continue;
+        return ins;
+    }
+    return NULL;
+}
+
+/* 在 block_instrs 中查找值 v 的常量 def（CONST 指令）；找到且为 0 返回 true。
+ * 不能依赖 value_to_const——const def 可能在当前指令之后才被 isel 处理。 */
+static bool block_const_is_zero(ISelContext* isel, ValueName v) {
+    if (v < 0) return false;
+    for (int i = 0; i < isel->block_instr_count; i++) {
+        Instr *ins = isel->block_instrs[i];
+        if (ins && ins->op == IROP_CONST && ins->dest == v)
+            return ins->imm.ival == 0;
+    }
+    return false;
+}
+
+/* 比较指令（EQ/NE/LT/GT/LE/GE）免物化前瞻：
+ * 若 dest 仅被后续 BR（或 NE dest,0 → BR）使用，则只发 CMP 并记录 hint，
+ * BR 直接复用比较标志。命中返回 true，调用方跳过物化。
+ * 支持两种模式：
+ *   A) cmp_dest → BR(dest)          （BR 直接用比较结果）
+ *   B) cmp_dest → NE(dest,0) → BR   （布尔化比较结果再跳）
+ */
+static bool try_br_fold(ISelContext* isel, Instr* ins, const char* jcc) {
+    ValueName dest = ins->dest;
+    if (dest < 0) return false;
+    if (is_global_live(isel->global_live, dest)) return false;  /* 跨块活：必须物化 */
+    if (isel->block_instr_pos + 1 >= isel->block_instr_count) return false;
+
+    ValueName s1 = src1_of(ins), s2 = src2_of(ins);
+    int use_count = count_block_uses_from(isel, isel->block_instr_pos + 1, dest);
+    if (use_count == 0) return false;   /* 无人用：不该发生（SSA 正常有 BR 用） */
+
+    Instr *nxt = next_non_nop(isel, isel->block_instr_pos);
+    if (!nxt) return false;
+    /* nxt 在数组中的位置（跳过 NOP/CONST 后） */
+    int nxt_idx = isel->block_instr_pos + 1;
+    while (nxt_idx < isel->block_instr_count) {
+        Instr *c = isel->block_instrs[nxt_idx];
+        if (c && c->op != IROP_NOP && c->op != IROP_CONST) break;
+        nxt_idx++;
+    }
+
+    /* 模式 A：直接 BR(dest) */
+    if (nxt->op == IROP_BR && instr_uses_value(nxt, dest) && use_count == 1) {
+        emit_cmp(isel, ins, s1, s2, -1);
+        isel->br_hint_cond = dest;
+        snprintf(isel->br_hint_jump, sizeof(isel->br_hint_jump), "%s",
+                 invert_jcc_str(jcc) ? invert_jcc_str(jcc) : "JNE");
+        isel->br_hint_ne_skip = -1;
+        return true;
+    }
+
+    /* 模式 B：NE(dest,0) → BR(ne_dest) */
+    if (nxt->op == IROP_NE && instr_uses_value(nxt, dest)) {
+        Instr *nn = next_non_nop(isel, nxt_idx);
+        if (nn && nn->op == IROP_BR && instr_uses_value(nn, nxt->dest)
+            && count_block_uses_from(isel, isel->block_instr_pos + 1, dest) == 1
+            && count_block_uses_from(isel, nxt_idx + 1, nxt->dest) == 1) {
+            /* NE 必须是 (dest, 0)：检查 NE 另一操作数为常量 0（扫描块内 CONST def） */
+            ValueName na = src1_of(nxt), nb = src2_of(nxt);
+            bool is_zero = false;
+            if (na == dest)      is_zero = block_const_is_zero(isel, nb);
+            else if (nb == dest) is_zero = block_const_is_zero(isel, na);
+            if (is_zero) {
+                emit_cmp(isel, ins, s1, s2, -1);
+                isel->br_hint_cond = dest;
+                snprintf(isel->br_hint_jump, sizeof(isel->br_hint_jump), "%s",
+                         invert_jcc_str(jcc) ? invert_jcc_str(jcc) : "JNE");
+                isel->br_hint_ne_skip = nxt->dest;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /* ins->labels 含 "imm" 标记 → 常量值在 ins->imm.ival（ssa_pass 约定） */
 static bool has_imm_label(Instr* ins) {
     if (!ins || !ins->labels) return false;
@@ -1036,7 +1164,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: {
-        /* M2 简化：比较结果物化为 0/1 值（BR 直接比较优化在任务 5） */
+        /* M2 简化：比较结果物化为 0/1 值；BR 紧邻时免物化（try_br_fold） */
         bool us = value_is_unsigned(isel, src1_of(ins)) || value_is_unsigned(isel, src2_of(ins));
         const char *jcc;
         switch (ins->op) {
@@ -1048,7 +1176,14 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         case IROP_GE: jcc = us ? "JC"  : "JSL";  break;
         default: jcc = "JNE"; break;
         }
-        emit_compare_result(isel, ins, jcc);
+        /* 本指令是模式 B 中被前一条比较指令消费的 NE？→ 跳过（hint 已记录，
+         * br_hint_ne_skip 保留给 BR 匹配用，BR 命中后统一清除） */
+        if (ins->op == IROP_NE && isel->br_hint_ne_skip == ins->dest) {
+            break;
+        }
+        if (!try_br_fold(isel, ins, jcc)) {
+            emit_compare_result(isel, ins, jcc);
+        }
         break;
     }
     case IROP_RET: {
@@ -1515,6 +1650,20 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             isel_emit(isel, "SJMP", t, NULL);
             break;
         }
+        /* BR 免物化：条件值命中紧邻比较的 hint（比较指令已发 CMP，直接 Jcc）。
+         * 模式 B（NE dest,0 → BR）中 BR 条件 = NE 结果（br_hint_ne_skip）。 */
+        if (isel->br_hint_cond >= 0
+            && (cond == isel->br_hint_cond || cond == isel->br_hint_ne_skip)) {
+            emit_phi_copies(isel, tid);
+            char t[32]; block_label_name(t, sizeof(t), tid);
+            isel_emit(isel, isel->br_hint_jump, t, NULL);
+            emit_phi_copies(isel, fid);
+            char f[32]; block_label_name(f, sizeof(f), fid);
+            isel_emit(isel, "SJMP", f, NULL);
+            isel->br_hint_cond = -1;
+            isel->br_hint_ne_skip = -1;
+            break;
+        }
         /* 物化条件 → CMP #0 → JNE 真; SJMP 假 */
         int r = isel_value_reg(ctx, cond);
         if (r < 0) {
@@ -1624,6 +1773,10 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
 void isel_block(ISelContext* isel, Block* block) {
     if (!isel || !block) return;
     isel->current_block_id = block->id;
+
+    /* BR 免物化 hint 块级重置（hint 只在块内紧邻有效） */
+    isel->br_hint_cond = -1;
+    isel->br_hint_ne_skip = -1;
 
     /* 块标签：L<id>: */
     char lbl[32];
