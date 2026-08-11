@@ -5,8 +5,11 @@
   python scripts/c251/c251_sim.py                    # 跑 test/suite/ 全部
   python scripts/c251/c251_sim.py test/suite/01_const_expr.c  # 单个
   python scripts/c251/c251_sim.py --filter "0[1-5]"  # 过滤
+  python scripts/c251/c251_sim.py --ret-reg A       # u8 返回断言 R[11] (A)
 
 期望值约定: 源码中 `return EXPR;  /* VALUE */` 注释, 或 `/* EXPECT VALUE */`。
+返回寄存器: 默认 WR6 (R6:R7 大端, Keil u16 返回); `/* RETREG A */` 或
+`--ret-reg A` 断言 A 寄存器 (R[11], Keil u8 返回)。文件注释优先于命令行。
 """
 import argparse
 import glob
@@ -32,7 +35,15 @@ def parse_expected(src_text):
     return None
 
 
-def run_hex(hex_path, max_cycles=MAX_CYCLES):
+def parse_retreg(src_text):
+    """返回寄存器注释: `/* RETREG A */` → 'A', `/* RETREG WR6 */` → 'WR6', 无则 None。"""
+    m = re.search(r"/\*\s*RETREG\s+(A|WR6)\s*\*/", src_text)
+    if m:
+        return m.group(1)
+    return None
+
+
+def run_hex(hex_path, max_cycles=MAX_CYCLES, ret_reg="WR6"):
     with tempfile.TemporaryDirectory() as d:
         dump = os.path.join(d, "dump.txt")
         r = subprocess.run(
@@ -46,8 +57,11 @@ def run_hex(hex_path, max_cycles=MAX_CYCLES):
         if os.path.exists(dump):
             for line in open(dump):
                 # sim251 每行打印 8 个寄存器 (R[00]..R[07] 同行) → 用 finditer 捕获全部
-                for m in re.finditer(r"R\[(\d+)\]:\s*([0-9a-fA-F]{2})", line):
+                for m in re.finditer(r"R\[(\d+)\]\s*:\s*([0-9a-fA-F]{2})", line):
                     regs[int(m.group(1))] = int(m.group(2), 16)
+        if ret_reg == "A":
+            # Keil u8 返回: A 寄存器 = R[11] (RF_ACC), 无符号 0-255
+            return regs.get(11, 0), ""
         r6 = regs.get(6, 0)
         r7 = regs.get(7, 0)
         ret = (r6 << 8) | r7
@@ -71,6 +85,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("tests", nargs="*")
     ap.add_argument("--filter", default=None)
+    ap.add_argument("--ret-reg", choices=["A", "WR6"], default="WR6",
+                    help="返回寄存器: WR6 (默认, R6:R7 大端 u16) 或 A (R[11], u8)")
     args = ap.parse_args()
 
     if args.tests:
@@ -83,7 +99,8 @@ def main():
     ok = fail = skip = 0
     workdir = tempfile.TemporaryDirectory(prefix="c251sim_")
     for src in files:
-        exp = parse_expected(open(src, encoding="utf-8", errors="replace").read())
+        src_text = open(src, encoding="utf-8", errors="replace").read()
+        exp = parse_expected(src_text)
         if exp is None:
             print(f"SKIP {os.path.basename(src):<40} (无期望值注释)")
             skip += 1
@@ -93,16 +110,18 @@ def main():
             print(f"FAIL {os.path.basename(src):<40} 编译错误: {cerr.splitlines()[-1] if cerr else ''}")
             fail += 1
             continue
-        ret, rerr = run_hex(hexp)
+        # 文件 `/* RETREG A */` 注释优先于命令行默认
+        ret_reg = parse_retreg(src_text) or args.ret_reg
+        ret, rerr = run_hex(hexp, ret_reg=ret_reg)
         if ret is None:
             print(f"FAIL {os.path.basename(src):<40} sim251 错误: {rerr}")
             fail += 1
             continue
         if ret == exp:
-            print(f"OK   {os.path.basename(src):<40} ret={ret}")
+            print(f"OK   {os.path.basename(src):<40} ret={ret} ({ret_reg})")
             ok += 1
         else:
-            print(f"FAIL {os.path.basename(src):<40} ret={ret} 期望={exp}")
+            print(f"FAIL {os.path.basename(src):<40} ret={ret} 期望={exp} ({ret_reg})")
             fail += 1
     workdir.cleanup()
 
