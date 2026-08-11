@@ -12,6 +12,7 @@ C251GenContext* c251_ctx_new(void) {
     ctx->value_to_reg = make_dict(NULL);
     ctx->value_type = make_dict(NULL);
     ctx->value_to_const = make_dict(NULL);
+    ctx->value_to_addr = make_dict(NULL);
     ctx->temp_values = make_list();
     return ctx;
 }
@@ -21,6 +22,7 @@ void c251_ctx_free(C251GenContext* ctx) {
     if (ctx->value_to_reg)  { dict_free(ctx->value_to_reg, free); }
     if (ctx->value_type)    { dict_free(ctx->value_type, NULL); }
     if (ctx->value_to_const){ dict_free(ctx->value_to_const, free); }
+    if (ctx->value_to_addr) { dict_free(ctx->value_to_addr, free); }
     if (ctx->temp_values)   { list_free(ctx->temp_values); }
     free(ctx);
 }
@@ -33,13 +35,29 @@ static void process_global_var(C251GenContext *ctx, GlobalVar *g) {
     if (size < 1) size = 1;
     int sec_idx = obj_find_or_add_section(ctx->obj, "?ED?", SEC_EDATA, 1);
     Section *sec = obj_get_section(ctx->obj, sec_idx);
+    /* 首次创建时预留 0x80 字节：避开 IRAM 0x00-0x7F（寄存器文件 R0-R7/位区/数据区），
+     * 变量从 0x80 起布局，与 hex 输出 (type-04 0x0000 + off) 一致 */
+    if (sec->bytes_len == 0) {
+        section_append_zeros(sec, 0x80);
+    }
     int offset = sec->bytes_len;
     obj_add_symbol(ctx->obj, g->name, SYM_DATA, sec_idx, offset, size, SYM_FLAG_GLOBAL);
     section_append_zeros(sec, size);
-    /* 有初始值：写第一个字节（M1 简化，完整初始化在 M3） */
-    if (g->has_init && g->init_instr == NULL) {
-        unsigned char v = (unsigned char)(g->init_value & 0xFF);
-        sec->bytes[offset] = v;
+    /* 初始化字节：blob（小端，SSA 约定）→ 大端内存布局（251 字访问大端，addr 处=高字节）。
+     * init_instr blob 优先，否则标量 init_value 同样转大端。 */
+    if (g->has_init) {
+        if (g->init_instr && g->init_instr->imm.blob.bytes && g->init_instr->imm.blob.len > 0) {
+            int bn = g->init_instr->imm.blob.len;
+            if (bn > size) bn = size;
+            for (int i = 0; i < bn; i++) {
+                sec->bytes[offset + i] = g->init_instr->imm.blob.bytes[bn - 1 - i];
+            }
+        } else {
+            long iv = g->init_value;
+            for (int i = 0; i < size && i < 4; i++) {
+                sec->bytes[offset + i] = (unsigned char)((iv >> (8 * (size - 1 - i))) & 0xFF);
+            }
+        }
     }
 }
 

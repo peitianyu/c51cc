@@ -46,6 +46,12 @@ int isel_value_reg(C251GenContext* ctx, ValueName val) {
     return r ? *r : -1;
 }
 
+/* 查 ADDR 产物指向的全局符号名（无则 NULL） */
+static char* value_to_addr_lookup(C251GenContext* ctx, ValueName val) {
+    if (!ctx || !ctx->value_to_addr) return NULL;
+    return (char*)dict_get(ctx->value_to_addr, k251_key(val));
+}
+
 /* 从 SSA 指令取 src1/src2 值名 */
 static ValueName src1_of(Instr* ins) {
     if (!ins->args || list_len(ins->args) < 1) return -1;
@@ -178,15 +184,57 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_LOAD: {
-        /* M1: 占位（真实寻址 M2；当前产生占位 MOV 防值无定义） */
+        /* 真实寻址：ptr 是 ADDR 产物 → 查 value_to_addr 得符号名 → MOV WRj,SYMBOL */
+        ValueName ptr = src1_of(ins);
+        char *sym = value_to_addr_lookup(ctx, ptr);
         int wr = isel_alloc_wr(ctx, ins->dest);
         char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
-        isel_emit(isel, "MOV", wbuf, "#0");
+        if (sym) {
+            isel_emit(isel, "MOV", wbuf, sym);   /* MOV WRj,dir16 */
+        } else {
+            /* 指针变量/数组元素 → M2.5 支持 */
+            fprintf(stderr, "c251 isel: LOAD 指针寻址 M2.5 支持 (v%d)\n", ptr);
+            isel_emit(isel, "MOV", wbuf, "#0");
+        }
         break;
     }
-    case IROP_STORE:
-    case IROP_ADDR:
-        break; /* M1 占位，M2 实现 */
+    case IROP_STORE: {
+        /* store ptr, val → MOV SYMBOL,WRj（编码器 dir16 写形态） */
+        ValueName ptr = src1_of(ins), val = src2_of(ins);
+        char *sym = value_to_addr_lookup(ctx, ptr);
+        if (!sym) {
+            fprintf(stderr, "c251 isel: STORE 指针寻址 M2.5 支持 (v%d)\n", ptr);
+            break;
+        }
+        int r = isel_value_reg(ctx, val);
+        if (r >= 0) {
+            char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+            isel_emit(isel, "MOV", sym, rbuf);
+        } else {
+            /* 值未物化：查常量 → 物化临时寄存器再 MOV（编码器无 MOV SYM,#imm 形态） */
+            int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k251_key(val));
+            if (cv) {
+                int tmp = pick_temp_wr(-1, -1);
+                char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+                char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
+                isel_emit(isel, "MOV", tbuf, imm);
+                isel_emit(isel, "MOV", sym, tbuf);
+            } else {
+                fprintf(stderr, "c251 isel: STORE 值未物化 (v%d)\n", val);
+            }
+        }
+        break;
+    }
+    case IROP_ADDR: {
+        /* 符号名在 labels[0]（带 '@' 前缀），去前缀后记录 dest→符号名 */
+        const char *sym = (ins->labels && list_len(ins->labels) > 0)
+            ? (const char*)list_get(ins->labels, 0) : NULL;
+        if (sym && sym[0] == '@') sym++;
+        if (sym && sym[0]) {
+            dict_put(ctx->value_to_addr, k251_key(ins->dest), strdup(sym));
+        }
+        break;
+    }
     default:
         break; /* M2 扩展 */
     }
@@ -205,6 +253,7 @@ void isel_function(C251GenContext* ctx, Func* func) {
     if (!ctx || !func) return;
     if (ctx->value_to_reg) { dict_free(ctx->value_to_reg, free); ctx->value_to_reg = make_dict(NULL); }
     if (ctx->value_to_const) { dict_free(ctx->value_to_const, free); ctx->value_to_const = make_dict(NULL); }
+    if (ctx->value_to_addr) { dict_free(ctx->value_to_addr, free); ctx->value_to_addr = make_dict(NULL); }
     ctx->label_counter = 0;   /* 每函数重置寄存器分配计数器（多函数编译必需） */
 
     int sec_idx = obj_add_section(ctx->obj, "?PR?", SEC_CODE, 0, 1);

@@ -16,6 +16,7 @@ typedef struct C251GenContext {
     Dict* value_to_reg;     /* ValueName -> int* (WR 索引 0/2/4/6) */
     Dict* value_type;       /* ValueName -> Ctype* */
     Dict* value_to_const;   /* value -> int64_t* (记录常量值) */
+    Dict* value_to_addr;    /* ValueName -> char* (ADDR 产物指向的全局符号名) */
     int label_counter;
     List* temp_values;
 } C251GenContext;
