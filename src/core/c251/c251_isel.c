@@ -48,7 +48,7 @@ static Dict* compute_global_live(Func* func) {
                 if (!ap || *ap < 0) continue;
                 char *k = c251_key(*ap);
                 LiveInfo *li = (LiveInfo*)dict_get(d, k);
-                if (!li) { li = calloc(1, sizeof(LiveInfo)); dict_put(d, k, li); }
+                if (!li) { li = calloc(1, sizeof(LiveInfo)); li->last_block = -1; dict_put(d, k, li); }
                 else free(k);
                 if (li->last_block != block_id) { li->last_block = block_id; li->cnt++; }
             }
@@ -56,7 +56,7 @@ static Dict* compute_global_live(Func* func) {
             if (ins->dest >= 0) {
                 char *k = c251_key(ins->dest);
                 LiveInfo *li = (LiveInfo*)dict_get(d, k);
-                if (!li) { li = calloc(1, sizeof(LiveInfo)); dict_put(d, k, li); }
+                if (!li) { li = calloc(1, sizeof(LiveInfo)); li->last_block = -1; dict_put(d, k, li); }
                 else free(k);
                 if (li->last_block != block_id) { li->last_block = block_id; li->cnt++; }
             }
@@ -684,8 +684,12 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         char *lbl1 = isel_new_label(isel, "?S"), *lbl2 = isel_new_label(isel, "?S");
         int r = isel_value_reg(ctx, cond);
         if (r < 0) {
-            r = isel_temp_wr(isel, -1, -1);
-            load_value_to_wr(isel, cond, r);
+            /* 条件临时寄存器避开 dest（防 forced-spill 夺走 dest 寄存器） */
+            r = isel_temp_wr(isel, wr, -1);
+            if (load_value_to_wr(isel, cond, r) < 0) {
+                fprintf(stderr, "c251 isel: SELECT 条件无法物化 (v%d)\n", cond);
+                break;
+            }
         }
         char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
         isel_emit(isel, "CMP", rbuf, "#0");
@@ -694,12 +698,24 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
             if (f_is_imm) { char imm[32]; snprintf(imm, sizeof(imm), "#%lld", f_imm & 0xFFFF); isel_emit(isel, "MOV", wbuf, imm); }
-            else load_value_to_wr(isel, v_false, wr);
+            else if (v_false == 0) { /* undef 且无 imm2 标签 → 显式报错 + 兜底，不静默用 undef */
+                fprintf(stderr, "c251 isel: SELECT 假分支值 undef (v_true=%d)\n", v_true);
+                isel_emit(isel, "MOV", wbuf, "#0");
+            } else if (load_value_to_wr(isel, v_false, wr) < 0) {
+                fprintf(stderr, "c251 isel: SELECT 假分支无法加载 (v%d)\n", v_false);
+                isel_emit(isel, "MOV", wbuf, "#0");
+            }
         } else {
-            int tmp = isel_temp_wr(isel, -1, -1);
+            int tmp = isel_temp_wr(isel, r, -1); /* 避开条件寄存器 */
             char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
             if (f_is_imm) { char imm[32]; snprintf(imm, sizeof(imm), "#%lld", f_imm & 0xFFFF); isel_emit(isel, "MOV", tbuf, imm); }
-            else load_value_to_wr(isel, v_false, tmp);
+            else if (v_false == 0) {
+                fprintf(stderr, "c251 isel: SELECT 假分支值 undef (v_true=%d)\n", v_true);
+                isel_emit(isel, "MOV", tbuf, "#0");
+            } else if (load_value_to_wr(isel, v_false, tmp) < 0) {
+                fprintf(stderr, "c251 isel: SELECT 假分支无法加载 (v%d)\n", v_false);
+                isel_emit(isel, "MOV", tbuf, "#0");
+            }
             char *sp = c251_alloc_spill(ctx, ins->dest);
             isel_emit(isel, "MOV", sp, tbuf);
         }
@@ -709,12 +725,24 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
             if (t_is_imm) { char imm[32]; snprintf(imm, sizeof(imm), "#%lld", t_imm & 0xFFFF); isel_emit(isel, "MOV", wbuf, imm); }
-            else load_value_to_wr(isel, v_true, wr);
+            else if (v_true == 0) { /* undef 且无 imm1 标签 → 显式报错 + 兜底 */
+                fprintf(stderr, "c251 isel: SELECT 真分支值 undef (v_false=%d)\n", v_false);
+                isel_emit(isel, "MOV", wbuf, "#0");
+            } else if (load_value_to_wr(isel, v_true, wr) < 0) {
+                fprintf(stderr, "c251 isel: SELECT 真分支无法加载 (v%d)\n", v_true);
+                isel_emit(isel, "MOV", wbuf, "#0");
+            }
         } else {
-            int tmp = isel_temp_wr(isel, -1, -1);
+            int tmp = isel_temp_wr(isel, r, -1); /* 避开条件寄存器 */
             char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
             if (t_is_imm) { char imm[32]; snprintf(imm, sizeof(imm), "#%lld", t_imm & 0xFFFF); isel_emit(isel, "MOV", tbuf, imm); }
-            else load_value_to_wr(isel, v_true, tmp);
+            else if (v_true == 0) {
+                fprintf(stderr, "c251 isel: SELECT 真分支值 undef (v_false=%d)\n", v_false);
+                isel_emit(isel, "MOV", tbuf, "#0");
+            } else if (load_value_to_wr(isel, v_true, tmp) < 0) {
+                fprintf(stderr, "c251 isel: SELECT 真分支无法加载 (v%d)\n", v_true);
+                isel_emit(isel, "MOV", tbuf, "#0");
+            }
             char *sp = c251_value_spill(ctx, ins->dest);
             isel_emit(isel, "MOV", sp, tbuf);
         }
