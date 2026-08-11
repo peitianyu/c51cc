@@ -1316,6 +1316,101 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         break;
     }
+    case IROP_OFFSET: {
+        /* v: ptr = offset base, index, elem_size
+         * 定义时把元素地址物化到 dest 寄存器（懒物化的 ADDR 不可用——地址是计算值）：
+         *   MOV WRj,#base_sym（或 base 已在寄存器）→ ADD WRj,#idx*size（常量）
+         *   / SLL(2^shift) + ADD WRj,WRk（寄存器 index）
+         * 后续 LOAD/STORE 经任务 1 的 @WRj 间接路径消费 dest 寄存器。
+         * 元素 size 仅支持 1/2/4/8（2 的幂，SLL 实现）；其它报错提示。 */
+        int size = (int)ins->imm.ival;
+        if (size < 1) size = 1;
+        int wr = isel_alloc_wr(isel, ins->dest);
+        if (wr >= 0) {
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            /* 1) 基址物化到 wr（ADDR 产物 → MOV WRj,#sym；嵌套 OFFSET → 其 dest 寄存器已物化） */
+            ValueName base = src1_of(ins);
+            if (load_value_to_wr(isel, base, wr) < 0) {
+                fprintf(stderr, "c251 isel: OFFSET base 无法物化 (v%d)\n", base);
+                isel_emit(isel, "MOV", wbuf, "#0");
+                break;
+            }
+            /* 2) index 偏移 */
+            if (ins->labels && list_len(ins->labels) >= 2) {
+                char *tag = (char*)list_get(ins->labels, 0);
+                if (tag && strcmp(tag, "imm") == 0) {
+                    /* 常量 index（ssa_pass 约定: labels[1] = 十进制字符串） */
+                    char *ims = (char*)list_get(ins->labels, 1);
+                    long idx = ims ? strtol(ims, NULL, 10) : 0;
+                    long off = idx * size;
+                    if (off != 0) {
+                        char imm[32]; snprintf(imm, sizeof(imm), "#%ld", off & 0xFFFF);
+                        isel_emit(isel, "ADD", wbuf, imm);
+                    }
+                    break;
+                }
+            }
+            ValueName idxv = src2_of(ins);
+            if (idxv >= 0) {
+                /* 用独立 temp 物化 index 再乘——SLL 就地修改会破坏共享 index 的持久寄存器
+                 * （t2: 两个 OFFSET 共享 v1=const 2，第一次 SLL 2→4，第二次 4→8 地址错） */
+                int idxr = isel_temp_wr(isel, wr, -1);
+                if (load_value_to_wr(isel, idxv, idxr) == 0) {
+                    char ibuf[16]; wr_name(ibuf, sizeof(ibuf), idxr);
+                    /* index * size：2 的幂用 SLL 展开 */
+                    int sz = size, shift = 0;
+                    while (sz > 1 && (sz & 1) == 0) { shift++; sz >>= 1; }
+                    if (sz == 1) {
+                        for (int i = 0; i < shift; i++) isel_emit(isel, "SLL", ibuf, NULL);
+                    } else {
+                        fprintf(stderr, "c251 isel: OFFSET 非2幂元素大小 %d (M2.5 简化)\n", size);
+                    }
+                    isel_emit(isel, "ADD", wbuf, ibuf);
+                    break;
+                }
+                fprintf(stderr, "c251 isel: OFFSET index 无法物化 (v%d)\n", idxv);
+            }
+        } else {
+            /* 寄存器不足：temp 算地址，结果存溢出槽 */
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            ValueName base = src1_of(ins);
+            if (load_value_to_wr(isel, base, tmp) < 0) {
+                fprintf(stderr, "c251 isel: OFFSET base 无法物化 (v%d)\n", base);
+                isel_emit(isel, "MOV", tbuf, "#0");
+            } else {
+                if (ins->labels && list_len(ins->labels) >= 2) {
+                    char *tag = (char*)list_get(ins->labels, 0);
+                    if (tag && strcmp(tag, "imm") == 0) {
+                        char *ims = (char*)list_get(ins->labels, 1);
+                        long idx = ims ? strtol(ims, NULL, 10) : 0;
+                        long off = idx * size;
+                        if (off != 0) {
+                            char imm[32]; snprintf(imm, sizeof(imm), "#%ld", off & 0xFFFF);
+                            isel_emit(isel, "ADD", tbuf, imm);
+                        }
+                    }
+                } else {
+                    ValueName idxv = src2_of(ins);
+                    if (idxv >= 0) {
+                        int idxr = isel_temp_wr(isel, tmp, -1);
+                        if (load_value_to_wr(isel, idxv, idxr) == 0) {
+                            char ibuf[16]; wr_name(ibuf, sizeof(ibuf), idxr);
+                            int sz = size, shift = 0;
+                            while (sz > 1 && (sz & 1) == 0) { shift++; sz >>= 1; }
+                            if (sz == 1) {
+                                for (int i = 0; i < shift; i++) isel_emit(isel, "SLL", ibuf, NULL);
+                            }
+                            isel_emit(isel, "ADD", tbuf, ibuf);
+                        }
+                    }
+                }
+            }
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", sp, tbuf);
+        }
+        break;
+    }
     case IROP_ZEXT: case IROP_SEXT: case IROP_TRUNC: {
         /* M2：宽度转换按拷贝处理（16 位值域内 zext/sext/trunc 无操作）；
          * dest 独立寄存器/槽，避免与 src 共享寄存器导致死值释放冲突 */
