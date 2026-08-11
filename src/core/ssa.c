@@ -368,7 +368,7 @@ static void write_scalar_bytes(unsigned char *buf, int offset, int size, long va
         buf[offset + i] = (unsigned char)((val >> (8 * i)) & 0xFF);
 }
 
-static void fill_array_init_bytes(unsigned char *buf, int size, Ctype *elem, List *items)
+static void fill_array_init_bytes(unsigned char *buf, int size, Ctype *elem, List *items, List *relocs)
 {
     if (!buf || !elem || !items) return;
     int offset = 0;
@@ -376,15 +376,23 @@ static void fill_array_init_bytes(unsigned char *buf, int size, Ctype *elem, Lis
         Ast *one = iter_next(&it);
         if (!one) { offset += elem->size; continue; }
         if (elem->type == CTYPE_ARRAY && one->type == AST_ARRAY_INIT) {
-            fill_array_init_bytes(buf + offset, elem->size, elem->ptr, one->arrayinit);
+            fill_array_init_bytes(buf + offset, elem->size, elem->ptr, one->arrayinit, relocs);
         } else if (is_inttype(elem) && one->type == AST_LITERAL) {
             write_scalar_bytes(buf, offset, elem->size, one->ival);
+        } else if (elem->type == CTYPE_PTR && one->type == AST_ADDR &&
+                   one->operand && one->operand->type == AST_GVAR && relocs) {
+            /* 指针元素 = &全局符号：blob 填 0 占位 + 记录重定位（gen 时填大端地址） */
+            memset(buf + offset, 0, (size_t)elem->size);
+            InitReloc *r = ssa_alloc(sizeof(InitReloc));
+            r->offset = offset;
+            r->symbol = ssa_strdup(one->operand->varname);
+            list_push(relocs, r);
         }
         offset += elem->size;
     }
 }
 
-static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items)
+static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items, List *relocs)
 {
     if (!buf || !type || !items || type->type != CTYPE_STRUCT) return;
     int idx = 0;
@@ -408,16 +416,24 @@ static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items)
         }
 
         if (field->type == CTYPE_ARRAY && init->type == AST_ARRAY_INIT) {
-            fill_array_init_bytes(buf + off, field->size, field->ptr, init->arrayinit);
+            fill_array_init_bytes(buf + off, field->size, field->ptr, init->arrayinit, relocs);
         } else if (field->type == CTYPE_ARRAY && init->type == AST_STRING && field->ptr->type == CTYPE_CHAR) {
             int slen = (int)strlen(init->sval) + 1;
             if (slen > field->size) slen = field->size;
             memcpy(buf + off, init->sval, (size_t)(slen - 1));
             buf[off + slen - 1] = '\0';
         } else if (field->type == CTYPE_STRUCT && init->type == AST_STRUCT_INIT) {
-            fill_struct_init_bytes(buf + off, field, init->structinit);
+            fill_struct_init_bytes(buf + off, field, init->structinit, relocs);
         } else if (is_inttype(field) && init->type == AST_LITERAL) {
             write_scalar_bytes(buf, off, field->size, init->ival);
+        } else if (field->type == CTYPE_PTR && init->type == AST_ADDR &&
+                   init->operand && init->operand->type == AST_GVAR && relocs) {
+            /* 指针字段 = &全局符号：blob 填 0 占位 + 记录重定位 */
+            memset(buf + off, 0, (size_t)field->size);
+            InitReloc *r = ssa_alloc(sizeof(InitReloc));
+            r->offset = off;
+            r->symbol = ssa_strdup(init->operand->varname);
+            list_push(relocs, r);
         }
 
         if (type->is_union)
@@ -426,9 +442,11 @@ static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items)
 }
 
 
+
 static Instr *build_global_init_instr(SSABuild *b, Ctype *type, Ast *init)
 {
     if (!type || !init) return NULL;
+    List *relocs = NULL;
     if (type->type == CTYPE_ARRAY) {
         int size = type->size;
         if (size <= 0) return NULL;
@@ -439,23 +457,29 @@ static Instr *build_global_init_instr(SSABuild *b, Ctype *type, Ast *init)
             memcpy(buf, init->sval, (size_t)(slen - 1));
             buf[slen - 1] = '\0';
         } else if (init->type == AST_ARRAY_INIT) {
-            fill_array_init_bytes(buf, size, type->ptr, init->arrayinit);
+            if (type->ptr->type == CTYPE_PTR || type->ptr->type == CTYPE_STRUCT) relocs = make_list();
+            fill_array_init_bytes(buf, size, type->ptr, init->arrayinit, relocs);
         } else {
             return NULL;
         }
         Instr *i = ssa_make_instr(b, IROP_CONST);
+        if (relocs && list_len(relocs) == 0) { list_free(relocs); free(relocs); relocs = NULL; }
         i->imm.blob.bytes = buf;
         i->imm.blob.len = size;
+        i->imm.blob.relocs = relocs;
         return i;
     }
     if (type->type == CTYPE_STRUCT && init->type == AST_STRUCT_INIT) {
         int size = type->size;
         if (size <= 0) return NULL;
         unsigned char *buf = ssa_alloc((size_t)size);
-        fill_struct_init_bytes(buf, type, init->structinit);
+        relocs = make_list();
+        fill_struct_init_bytes(buf, type, init->structinit, relocs);
+        if (list_len(relocs) == 0) { list_free(relocs); free(relocs); relocs = NULL; }
         Instr *i = ssa_make_instr(b, IROP_CONST);
         i->imm.blob.bytes = buf;
         i->imm.blob.len = size;
+        i->imm.blob.relocs = relocs;
         return i;
     }
     if (is_inttype(type) && init->type == AST_LITERAL) {
@@ -465,6 +489,13 @@ static Instr *build_global_init_instr(SSABuild *b, Ctype *type, Ast *init)
         Instr *i = ssa_make_instr(b, IROP_CONST);
         i->imm.blob.bytes = buf;
         i->imm.blob.len = size;
+        return i;
+    }
+    if (type->type == CTYPE_PTR && init->type == AST_ADDR &&
+        init->operand && init->operand->type == AST_GVAR) {
+        /* 指针 = &全局符号：无 blob，labels[0] = 目标符号（gen 时查符号 offset 填大端地址） */
+        Instr *i = ssa_make_instr(b, IROP_CONST);
+        list_push(i->labels, ssa_strdup(init->operand->varname));
         return i;
     }
     return NULL;
@@ -1113,7 +1144,11 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         if (ast->operand && ast->operand->type == AST_GVAR) {
             return ssa_build_addr(b, ast->operand->varname, ast->operand->ctype);
         }
-        // &array[i] 等复杂情况
+        // &*e → e 的地址（如 &arr[i] = &*(arr+i)：不能 load，否则取到值）
+        if (ast->operand && ast->operand->type == AST_DEREF && ast->operand->operand) {
+            return gen_expr(b, ast->operand->operand);
+        }
+        // 其他复杂情况（&结构体成员等）
         ValueName ptr = gen_expr(b, ast->operand);
         return ptr; // 已经是地址
     }
@@ -1402,6 +1437,19 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         if (ast->left && ast->left->type == AST_LVAR) {
             ValueName cur = ssa_build_read(b, ast->left->varname);
             ValueName rhs = gen_expr(b, ast->right);
+            /* 指针 +/- 复合赋值：按元素大小缩放（p += n → p + n*sizeof(*p)） */
+            Ctype *lt = ast->left->ctype;
+            if ((op == IROP_ADD || op == IROP_SUB) && lt && lt->type == CTYPE_PTR) {
+                int esz = (lt->ptr && lt->ptr->size > 0) ? lt->ptr->size : 1;
+                if (op == IROP_SUB) {
+                    Ctype *itype = ast->right->ctype ? ast->right->ctype : ctype_int;
+                    ValueName zero = ssa_build_const_t(b, 0, itype);
+                    rhs = ssa_build_binop_t(b, IROP_SUB, zero, rhs, itype);
+                }
+                ValueName val = ssa_build_offset(b, cur, rhs, esz);
+                ssa_build_write(b, ast->left->varname, val);
+                return val;
+            }
             rhs = gen_type_cast(b, rhs, ast->right->ctype, ast->left->ctype);
             ValueName val = ssa_build_binop_t(b, op, cur, rhs, ast->left->ctype);
             ssa_build_write(b, ast->left->varname, val);
@@ -1650,6 +1698,8 @@ static void gen_stmt(SSABuild *b, Ast *ast) {
                     init_instr = build_global_init_instr(b, var->ctype, ast->declinit);
                     if (init_instr && init_instr->imm.blob.bytes &&
                         init_instr->imm.blob.len > 0) has_init = true;
+                    else if (init_instr && init_instr->labels &&
+                             list_len(init_instr->labels) > 0) has_init = true;
                 }
             }
             CtypeAttr gattr = get_attr(var->ctype->attr);
@@ -2301,6 +2351,9 @@ void ast_to_ssa(SSABuild *b, Ast *ast) {
                 } else {
                     init_instr = build_global_init_instr(b, var->ctype, ast->declinit);
                     if (init_instr && init_instr->imm.blob.bytes && init_instr->imm.blob.len > 0) {
+                        has_init = true;
+                    } else if (init_instr && init_instr->labels &&
+                               list_len(init_instr->labels) > 0) {
                         has_init = true;
                     }
                 }

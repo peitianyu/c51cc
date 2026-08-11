@@ -25,6 +25,16 @@ int isel_value_reg(C251GenContext* ctx, ValueName val) {
     return r ? *r : -1;
 }
 
+/* obj 中是否已存在同名符号（全局变量/已分配的局部槽） */
+static int c251_obj_has_sym(ObjFile *obj, const char *name) {
+    if (!obj || !name) return 0;
+    for (Iter it = list_iter(obj->symbols); !iter_end(it);) {
+        Symbol *s = iter_next(&it);
+        if (s && s->name && strcmp(s->name, name) == 0) return 1;
+    }
+    return 0;
+}
+
 /* ============================================================
  * 简单 liveness（M2）：
  *  - global_live：跨块活值（PHI 参数 / 出现在 ≥2 块）永不释放
@@ -1487,12 +1497,34 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_ADDR: {
-        /* 符号名在 labels[0]（带 '@' 前缀），去前缀后记录 dest→符号名 */
+        /* 符号名在 labels[0]（带 '@' 前缀），去前缀后记录 dest→符号名。
+         * 局部变量（数组/结构体等需内存寻址）首次 ADDR 时分配 EDATA 槽并注册符号：
+         * 大小取 mem_type->size（addr 对象完整类型）；已存在符号（全局/已分配）跳过。 */
         const char *sym = (ins->labels && list_len(ins->labels) > 0)
             ? (const char*)list_get(ins->labels, 0) : NULL;
         if (sym && sym[0] == '@') sym++;
         if (sym && sym[0]) {
-            dict_put(ctx->value_to_addr, c251_key(ins->dest), strdup(sym));
+            /* 全局符号（已注册）直接用原名；局部变量用函数名作用域修饰避免跨函数冲突 */
+            if (!c251_obj_has_sym(ctx->obj, sym)) {
+                char locname[128];
+                const char *fn = (ctx->current_func && ctx->current_func->name)
+                    ? ctx->current_func->name : "?";
+                snprintf(locname, sizeof(locname), "__loc_%s_%s", fn, sym);
+                if (!c251_obj_has_sym(ctx->obj, locname)) {
+                    int sz = (ins->mem_type && ins->mem_type->size > 0) ? ins->mem_type->size : 2;
+                    int sec_idx = obj_find_or_add_section(ctx->obj, "?ED?", SEC_EDATA, 1);
+                    Section *sec = obj_get_section(ctx->obj, sec_idx);
+                    if (sec->bytes_len == 0) {
+                        section_append_zeros(sec, C251_EDATA_BASE);
+                    }
+                    int off = sec->bytes_len;
+                    obj_add_symbol(ctx->obj, locname, SYM_DATA, sec_idx, off, sz, SYM_FLAG_LOCAL);
+                    section_append_zeros(sec, sz);
+                }
+                dict_put(ctx->value_to_addr, c251_key(ins->dest), strdup(locname));
+            } else {
+                dict_put(ctx->value_to_addr, c251_key(ins->dest), strdup(sym));
+            }
         }
         break;
     }
@@ -1591,7 +1623,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         break;
     }
-    case IROP_ZEXT: case IROP_SEXT: case IROP_TRUNC: {
+    case IROP_ZEXT: case IROP_SEXT: case IROP_TRUNC: case IROP_INTTOPTR: {
         /* M2：宽度转换按拷贝处理（16 位值域内 zext/sext/trunc 无操作）；
          * dest 独立寄存器/槽，避免与 src 共享寄存器导致死值释放冲突 */
         ValueName s = src1_of(ins);

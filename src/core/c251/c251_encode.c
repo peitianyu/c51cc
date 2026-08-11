@@ -184,6 +184,10 @@ static unsigned symbol_addr(EncodeState *st, const char *name) {
         fprintf(stderr, "c251_encode: unknown symbol: %s\n", name);
         return 0;
     }
+    if (getenv("C251_DEBUG_SYM")) {
+        fprintf(stderr, "c251_encode: sym %s value=%d sec=%d kind=%d\n",
+                name, s->value, s->section, s->kind);
+    }
     return (unsigned)s->value;
 }
 
@@ -369,17 +373,20 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
         int r1 = parse_reg(a1, &w1);
         if (r1 >= 0 && w1) { /* WRj 目标 */
             if (a2 && a2[0] == '#') {
+                /* #SYM 优先：符号地址立即数（ADDR 产物物化，如 MOV WRj,#g_x）。
+                 * 必须在 parse_imm 之前判定——parse_imm 的 base-16 兜底会把
+                 * 符号名 "a".."f"/"1a" 等误解析为十六进制数字（0092 变量 a）。 */
+                if (a2[1] != '\0' && is_symbol_arg(a2 + 1) &&
+                    c251_find_symbol(st->obj, a2 + 1)) {
+                    unsigned addr = symbol_addr(st, a2 + 1);
+                    emit4(st, 0x7E, (unsigned char)(((r1 / 2) << 4) | 0x4),
+                          (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
+                    return 0;
+                }
                 imm = parse_imm(a2, &ok);
                 if (ok) {
                     emit4(st, 0x7E, (unsigned char)(((r1 / 2) << 4) | 0x4),
                           (unsigned char)((imm >> 8) & 0xFF), (unsigned char)(imm & 0xFF));
-                    return 0;
-                }
-                /* #SYM：符号地址立即数（ADDR 产物物化，如 MOV WRj,#g_x） */
-                if (a2[1] != '\0' && is_symbol_arg(a2 + 1)) {
-                    unsigned addr = symbol_addr(st, a2 + 1);
-                    emit4(st, 0x7E, (unsigned char)(((r1 / 2) << 4) | 0x4),
-                          (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
                     return 0;
                 }
                 return -1;

@@ -44,6 +44,13 @@ typedef enum IrOp {
 
 typedef int ValueName;
 
+/* 全局初始化指针重定位：blob 内偏移 (小端坐标) + 目标符号名
+ * （用于 int *p = &x / struct 内指针字段 = &x 等地址初始化） */
+typedef struct InitReloc {
+    int offset;      /* blob 内偏移 */
+    char *symbol;    /* 目标符号名 */
+} InitReloc;
+
 typedef struct Instr {
     IrOp        op;
     ValueName   dest;
@@ -57,6 +64,7 @@ typedef struct Instr {
         struct {
             unsigned char *bytes;
             int len;
+            List *relocs;   /* InitReloc* 列表（指针字段地址重定位） */
         } blob; // 数组/结构/联合等初始化字节序列
     } imm;
 } Instr;

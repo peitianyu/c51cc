@@ -68,6 +68,70 @@ char* c251_alloc_spill(C251GenContext* ctx, ValueName val) {
     return symdup;
 }
 
+/* blob (小端, SSA 约定) → EDATA 大端内存：按类型元素边界递归反转。
+ * 数组: 每元素独立反转 (元素顺序不变)；结构体: 每字段独立反转；标量: 字节序反转。
+ * char 元素 size=1 反转无效果 → 字符串安全。consumed 记录已消费的 blob 字节。 */
+static void emit_blob_be(Section *sec, int offset, Ctype *type,
+                         const unsigned char *blob, int blob_len, int *consumed)
+{
+    if (!type || !blob || !consumed || *consumed >= blob_len) return;
+    switch (type->type) {
+    case CTYPE_ARRAY: {
+        Ctype *elem = type->ptr;
+        int esz = (elem && elem->size > 0) ? elem->size : 1;
+        int n = type->size / esz;
+        for (int i = 0; i < n && *consumed < blob_len; i++)
+            emit_blob_be(sec, offset + i * esz, elem, blob, blob_len, consumed);
+        break;
+    }
+    case CTYPE_STRUCT: {
+        if (!type->fields) break;
+        for (Iter it = list_iter(type->fields->list); !iter_end(it);) {
+            DictEntry *e = iter_next(&it);
+            if (!e) continue;
+            Ctype *field = dict_get(type->fields, e->key);
+            if (!field) continue;
+            emit_blob_be(sec, offset + field->offset, field, blob, blob_len, consumed);
+            if (type->is_union) break;
+        }
+        break;
+    }
+    default: {
+        int sz = (type->size > 0) ? type->size : 1;
+        int avail = blob_len - *consumed;
+        if (avail > sz) avail = sz;
+        if (avail > 0) {
+            for (int i = 0; i < avail; i++)
+                sec->bytes[offset + i] = blob[*consumed + avail - 1 - i];
+            *consumed += avail;
+        }
+        break;
+    }
+    }
+}
+
+/* 查全局符号在 EDATA 段的绝对偏移（value 含 C251_EDATA_BASE 基址；未找到返回 -1） */
+static int c251_find_sym_offset(C251GenContext *ctx, const char *name) {
+    if (!ctx || !name) return -1;
+    for (Iter it = list_iter(ctx->obj->symbols); !iter_end(it);) {
+        Symbol *s = iter_next(&it);
+        if (s && s->name && strcmp(s->name, name) == 0 && s->kind == SYM_DATA)
+            return s->value;
+    }
+    return -1;
+}
+
+/* 填大端 2 字节地址到目标符号 (EDATA 绝对偏移) */
+static void c251_fill_ptr_addr(C251GenContext *ctx, Section *sec, int pos, const char *sym) {
+    int off = c251_find_sym_offset(ctx, sym);
+    if (off < 0) { /* 目标未定义：填 0 占位 */
+        sec->bytes[pos] = 0; sec->bytes[pos + 1] = 0;
+        return;
+    }
+    sec->bytes[pos]     = (unsigned char)((off >> 8) & 0xFF);
+    sec->bytes[pos + 1] = (unsigned char)(off & 0xFF);
+}
+
 /* M1: 整数全局变量 → SEC_EDATA + 符号 + 初始化字节 */
 static void process_global_var(C251GenContext *ctx, GlobalVar *g) {
     if (!g || !g->name) return;
@@ -90,14 +154,30 @@ static void process_global_var(C251GenContext *ctx, GlobalVar *g) {
     }
     section_append_zeros(sec, size);
     /* 初始化字节：blob（小端，SSA 约定）→ 大端内存布局（251 字访问大端，addr 处=高字节）。
-     * init_instr blob 优先，否则标量 init_value 同样转大端。 */
+     * blob 按类型元素边界递归反转（数组每元素独立反转，结构体每字段独立反转，
+     * 字符串 char 元素 size=1 反转无效果）；标量 init_value 同样转大端。 */
     if (g->has_init) {
         if (g->init_instr && g->init_instr->imm.blob.bytes && g->init_instr->imm.blob.len > 0) {
-            int bn = g->init_instr->imm.blob.len;
-            if (bn > size) bn = size;
-            for (int i = 0; i < bn; i++) {
-                sec->bytes[offset + i] = g->init_instr->imm.blob.bytes[bn - 1 - i];
+            int consumed = 0;
+            emit_blob_be(sec, offset, g->type,
+                         g->init_instr->imm.blob.bytes,
+                         g->init_instr->imm.blob.len, &consumed);
+            /* 指针地址重定位：blob 内偏移（小端坐标）→ 目标符号 EDATA 绝对地址（大端） */
+            if (g->init_instr->imm.blob.relocs) {
+                for (Iter rit = list_iter(g->init_instr->imm.blob.relocs); !iter_end(rit);) {
+                    InitReloc *r = iter_next(&rit);
+                    if (r && r->symbol && r->offset + 1 < size && r->offset >= 0) {
+                        /* 注意 blob 内 offset 是小端坐标；反转后字节位置不变（同偏移） */
+                        c251_fill_ptr_addr(ctx, sec, offset + r->offset, r->symbol);
+                    }
+                }
             }
+        } else if (g->init_instr && g->init_instr->labels &&
+                   list_len(g->init_instr->labels) > 0 && g->type &&
+                   g->type->type == CTYPE_PTR) {
+            /* 顶层指针 = &全局符号：labels[0] = 目标符号，填大端 EDATA 地址 */
+            const char *sym = (const char*)list_get(g->init_instr->labels, 0);
+            c251_fill_ptr_addr(ctx, sec, offset, sym);
         } else {
             long iv = g->init_value;
             for (int i = 0; i < size && i < 4; i++) {
