@@ -197,6 +197,100 @@ static ValueName src2_of(Instr* ins) {
     return *(ValueName*)list_get(ins->args, 1);
 }
 
+/* 生成内部标签名（无冒号）；发射时用 isel_emit_label */
+static char* isel_new_label(ISelContext* isel, const char* prefix) {
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%s%d", prefix, isel->label_counter++);
+    return strdup(buf);
+}
+
+static void isel_emit_label(ISelContext* isel, const char* name) {
+    if (!name) return;
+    char *s = malloc(strlen(name) + 2);
+    sprintf(s, "%s:", name);
+    isel_emit(isel, s, NULL, NULL);
+    free(s);
+}
+
+/* 值类型 unsigned 判断（def 时 value_type 已记录）；未知默认有符号（C 语义） */
+static bool value_is_unsigned(ISelContext* isel, ValueName v) {
+    C251GenContext *ctx = isel->ctx;
+    if (v >= 0) {
+        char *k = c251_key(v);
+        Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
+        free(k);
+        if (t) return get_attr(t->attr).ctype_unsigned;
+    }
+    return false;
+}
+
+/* CMP lhs,rhs：lhs 必须物化在寄存器（比较方向不可交换）；rhs 可为寄存器/常量/槽 */
+static void emit_cmp(ISelContext* isel, ValueName s1, ValueName s2, int avoid_wr) {
+    C251GenContext *ctx = isel->ctx;
+    int r1 = isel_value_reg(ctx, s1);
+    if (r1 < 0) {
+        int t = isel_temp_wr(isel, avoid_wr, -1);
+        if (load_value_to_wr(isel, s1, t) < 0) {
+            fprintf(stderr, "c251 isel: CMP lhs 无法物化 (v%d)\n", s1);
+            return;
+        }
+        r1 = t;
+    }
+    char r1buf[16]; wr_name(r1buf, sizeof(r1buf), r1);
+    int r2 = isel_value_reg(ctx, s2);
+    if (r2 >= 0) {
+        char r2buf[16]; wr_name(r2buf, sizeof(r2buf), r2);
+        isel_emit(isel, "CMP", r1buf, r2buf);
+        return;
+    }
+    if (s2 >= 0) {
+        char *k = c251_key(s2);
+        int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k);
+        free(k);
+        if (cv) {
+            char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
+            isel_emit(isel, "CMP", r1buf, imm);
+            return;
+        }
+        char *sp = c251_value_spill(ctx, s2);
+        if (sp) {
+            int t2 = isel_temp_wr(isel, r1, avoid_wr);
+            char t2buf[16]; wr_name(t2buf, sizeof(t2buf), t2);
+            isel_emit(isel, "MOV", t2buf, sp);
+            isel_emit(isel, "CMP", r1buf, t2buf);
+            return;
+        }
+    }
+    fprintf(stderr, "c251 isel: CMP rhs 无来源 (v%d)\n", s2);
+    isel_emit(isel, "CMP", r1buf, "#0");
+}
+
+/* 比较结果物化为 0/1（M2 简化）：CMP; MOV dest,#0; Bcc L1; MOV dest,#1; L1:
+ * jcc = "结果为 0" 时跳走的条件（即比较成立的否定条件） */
+static void emit_compare_result(ISelContext* isel, Instr* ins, const char* jcc) {
+    C251GenContext *ctx = isel->ctx;
+    ValueName s1 = src1_of(ins), s2 = src2_of(ins);
+    int wr = isel_alloc_wr(isel, ins->dest);
+    emit_cmp(isel, s1, s2, wr);
+    char *lbl = isel_new_label(isel, "?C");
+    if (wr >= 0) {
+        char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+        isel_emit(isel, "MOV", wbuf, "#0");
+        isel_emit(isel, jcc, lbl, NULL);
+        isel_emit(isel, "MOV", wbuf, "#1");
+    } else {
+        int tmp = isel_temp_wr(isel, -1, -1);
+        char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+        isel_emit(isel, "MOV", tbuf, "#0");
+        isel_emit(isel, jcc, lbl, NULL);
+        isel_emit(isel, "MOV", tbuf, "#1");
+        char *sp = c251_alloc_spill(ctx, ins->dest);
+        isel_emit(isel, "MOV", sp, tbuf);
+    }
+    isel_emit_label(isel, lbl);
+    free(lbl);
+}
+
 /* ins->labels 含 "imm" 标记 → 常量值在 ins->imm.ival（ssa_pass 约定） */
 static bool has_imm_label(Instr* ins) {
     if (!ins || !ins->labels) return false;
@@ -267,6 +361,11 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     if (!isel || !ins) return;
     C251GenContext *ctx = isel->ctx;
 
+    /* 记录值类型（供比较有符号判断等；def 先于 use，SSA 顺序保证） */
+    if (ins->dest >= 0 && ins->type) {
+        dict_put(ctx->value_type, c251_key(ins->dest), ins->type);
+    }
+
     switch (ins->op) {
     case IROP_NOP:
         break;
@@ -315,6 +414,22 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             char *sp = c251_alloc_spill(ctx, ins->dest);
             isel_emit(isel, "MOV", sp, tbuf);
         }
+        break;
+    }
+    case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE: {
+        /* M2 简化：比较结果物化为 0/1 值（BR 直接比较优化在任务 5） */
+        bool us = value_is_unsigned(isel, src1_of(ins)) || value_is_unsigned(isel, src2_of(ins));
+        const char *jcc;
+        switch (ins->op) {
+        case IROP_EQ: jcc = "JNE"; break;               /* 相等→1；不等跳走置 0 */
+        case IROP_NE: jcc = "JE";  break;               /* 不等→1；相等跳走置 0 */
+        case IROP_LT: jcc = us ? "JNC" : "JSGE"; break;/* 无符号 a<b→cy=1; 有符号 a<b→N≠OV */
+        case IROP_GT: jcc = us ? "JLE" : "JSLE"; break;
+        case IROP_LE: jcc = us ? "JG"  : "JSG";  break;
+        case IROP_GE: jcc = us ? "JC"  : "JSL";  break;
+        default: jcc = "JNE"; break;
+        }
+        emit_compare_result(isel, ins, jcc);
         break;
     }
     case IROP_RET: {
