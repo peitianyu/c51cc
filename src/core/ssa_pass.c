@@ -1676,6 +1676,126 @@ static bool const_no_cross_block_uses(Func *f, Block *b, ValueName v) {
     return true;
 }
 
+/*---------- SELECT → PHI (三元汇合消除 cond 跨块物化) ----------
+ * 三元 `c ? a : b` 优化后常为: br(cond 链) → 真/假块 → 汇合块的 select(cond)。
+ * select 的 cond 跨块 (global-live) → isel 双重物化 (条件 0/1 + BR 再测)。
+ * 若汇合块的每个前驱都能由同根 cond 的 BR 判定真假, select 等价于 phi,
+ * 转成 phi 后由 pass_phi 处理 (边缘拷贝), cond 不再跨块 → br_hint 免物化生效。 */
+
+/* 沿 0/1 包装 (ZEXT/TRUNC) 追踪条件根值 */
+static ValueName select_cond_root(Func *f, ValueName v) {
+    for (int guard = 0; v > 0 && guard < 8; guard++) {
+        Instr *d = find_def_instr(f, v);
+        if (!d) break;
+        if (d->op == IROP_ZEXT || d->op == IROP_TRUNC) { v = get_arg(d, 0); continue; }
+        break;
+    }
+    return v;
+}
+
+/* start 经 jmp 链 (或直接) 能否到达 target */
+static bool jmp_chain_reaches(Func *f, Block *start, Block *target) {
+    for (int g = 0; start && g < 16; g++) {
+        if (start == target) return true;
+        Instr *term = block_last_effective_instr(start);
+        if (term && term->op == IROP_JMP && term->labels && term->labels->len >= 1) {
+            int tid = -1;
+            sscanf((char *)list_get(term->labels, 0), "block%d", &tid);
+            start = find_block_by_id(f, tid);
+            continue;
+        }
+        return false;
+    }
+    return false;
+}
+
+static bool pass_select_to_phi(Func *f, Stats *s) {
+    if (!f || !f->blocks) return false;
+    rebuild_preds(f);
+    bool changed = false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b || !b->instrs) continue;
+        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
+            Instr *sel = iter_next(&jt);
+            if (!sel || sel->op != IROP_SELECT || !sel->args || sel->args->len < 3) continue;
+            if (sel->dest <= 0) continue;
+            ValueName cond = get_arg(sel, 0), v_true = get_arg(sel, 1), v_false = get_arg(sel, 2);
+            if (cond <= 0 || v_true <= 0 || v_false <= 0) continue;
+            ValueName root = select_cond_root(f, cond);
+            if (root <= 0) continue;
+
+            /* 每个前驱必须能由同根 BR 判定真假 */
+            ValueName arm_vals[16];
+            int arm_blocks[16];
+            int narm = 0;
+            bool ok = true;
+            if (!b->preds || b->preds->len < 2 || b->preds->len > 16) continue;
+            for (Iter pit = list_iter(b->preds); !iter_end(pit);) {
+                Block *p = iter_next(&pit);
+                if (!p) { ok = false; break; }
+                /* 沿 p 的 jmp 链向上找判定 BR (p 由该 BR 的一臂到达) */
+                int is_true = -1;
+                Block *cur = p;
+                for (int g = 0; cur && g < 16; g++) {
+                    Instr *term = block_last_effective_instr(cur);
+                    if (term && term->op == IROP_BR && term->labels && term->labels->len >= 2) {
+                        if (select_cond_root(f, get_arg(term, 0)) != root) { ok = false; break; }
+                        int t0 = -1, t1 = -1;
+                        sscanf((char *)list_get(term->labels, 0), "block%d", &t0);
+                        sscanf((char *)list_get(term->labels, 1), "block%d", &t1);
+                        if (jmp_chain_reaches(f, find_block_by_id(f, t0), p)) is_true = 1;
+                        else if (jmp_chain_reaches(f, find_block_by_id(f, t1), p)) is_true = 0;
+                        else { ok = false; }
+                        break;
+                    }
+                    if (term && term->op == IROP_JMP && cur->preds && cur->preds->len == 1) {
+                        cur = list_get(cur->preds, 0);
+                        continue;
+                    }
+                    ok = false;
+                    break;
+                }
+                if (!ok || is_true < 0) { ok = false; break; }
+                if (narm < 16) {
+                    arm_vals[narm] = is_true ? v_true : v_false;
+                    arm_blocks[narm] = (int)p->id;
+                    narm++;
+                }
+            }
+            if (!ok || narm != (b->preds ? b->preds->len : 0)) continue;
+
+            /* 建 phi (arm 值在 pred 块, 标签 = pred 块 id) */
+            Instr *phi = pass_alloc(sizeof(Instr));
+            memset(phi, 0, sizeof(*phi));
+            phi->op = IROP_PHI;
+            phi->dest = sel->dest;
+            phi->type = sel->type;
+            phi->mem_type = sel->mem_type;
+            phi->args = make_list();
+            phi->labels = make_list();
+            for (int i = 0; i < narm; i++) {
+                ValueName *pv = pass_alloc(sizeof(ValueName));
+                *pv = arm_vals[i];
+                list_push(phi->args, pv);
+                char lb[32];
+                snprintf(lb, sizeof(lb), "block%d", arm_blocks[i]);
+                char *lb2 = pass_alloc(strlen(lb) + 1);
+                strcpy(lb2, lb);
+                list_push(phi->labels, lb2);
+            }
+            if (!b->phis) b->phis = make_list();
+            list_push(b->phis, phi);
+            sel->op = IROP_NOP;
+            if (sel->args) list_clear(sel->args);
+            if (sel->labels) list_clear(sel->labels);
+            if (s) s->fold++;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 /*---------- 常量合并 ----------*/
 static bool pass_const_merge(Func *f, Stats *s) {
     bool changed = false;
@@ -4300,6 +4420,7 @@ void ssa_optimize_func(Func *f, int level) {
         RUN_PASS(pass_entry_jmp_elim);
         RUN_PASS(pass_unreachable_block_elim);
         RUN_PASS(pass_const_merge);
+        RUN_PASS(pass_select_to_phi);
         RUN_PASS(pass_phi);
         RUN_PASS(pass_inline_consts_into_instrs);
         RUN_PASS(pass_remove_unused_consts);

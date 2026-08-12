@@ -940,6 +940,32 @@ static bool try_br_fold(ISelContext* isel, Instr* ins, const char* jcc) {
             }
         }
     }
+
+    /* 模式 C：cmp → ZEXT(dest) → BR — ne x,0 被 pass 折叠成 zext (0/1 值) */
+    if (nxt->op == IROP_ZEXT && instr_uses_value(nxt, dest)) {
+        Instr *nn = next_non_nop(isel, nxt_idx);
+        if (nn && nn->op == IROP_BR && instr_uses_value(nn, nxt->dest)
+            && count_block_uses_from(isel, isel->block_instr_pos + 1, dest) == 1
+            && count_block_uses_from(isel, nxt_idx + 1, nxt->dest) == 1) {
+            emit_cmp(isel, ins, s1, s2, -1);
+            isel->br_hint_cond = dest;
+            snprintf(isel->br_hint_jump, sizeof(isel->br_hint_jump), "%s",
+                     invert_jcc_str(jcc) ? invert_jcc_str(jcc) : "JNE");
+            isel->br_hint_ne_skip = nxt->dest;  /* zext 处理同样跳过 */
+            return true;
+        }
+    }
+
+    /* 模式 D：cmp → SELECT(cond=dest) — 三元条件直接用比较标志 */
+    if (nxt->op == IROP_SELECT && src1_of(nxt) == dest
+        && count_block_uses_from(isel, isel->block_instr_pos + 1, dest) == 1) {
+        emit_cmp(isel, ins, s1, s2, -1);
+        isel->br_hint_cond = dest;
+        snprintf(isel->br_hint_jump, sizeof(isel->br_hint_jump), "%s",
+                 invert_jcc_str(jcc) ? invert_jcc_str(jcc) : "JNE");
+        isel->br_hint_ne_skip = -1;
+        return true;
+    }
     return false;
 }
 
@@ -1450,12 +1476,13 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 isel_emit(isel, "MOV", "WR6", imm);
             }
         }
-        /* 中断函数 → RETI (恢复中断); 普通函数 → RET。中断 epilog: POP 逆序恢复 R0-R7 + PSW */
+        /* 中断函数 → RETI (恢复中断); 普通函数 → RET。中断 epilog: POP 逆序恢复 R0-R7 + PSW1 + PSW */
         if (ctx->current_func && ctx->current_func->is_interrupt) {
             for (int rr = 7; rr >= 0; rr--) {
                 char rnm[8]; snprintf(rnm, sizeof(rnm), "R%d", rr);
                 isel_emit(isel, "POP", rnm, NULL);
             }
+            isel_emit(isel, "POP", "0xD1", NULL);
             isel_emit(isel, "POP", "0xD0", NULL);
             isel_emit(isel, "RETI", NULL, NULL);
         } else {
@@ -2279,6 +2306,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_ZEXT: case IROP_SEXT: case IROP_TRUNC: case IROP_INTTOPTR: {
+        /* 模式 C 消费: zext 由 BR 直接跳转 (br_hint_ne_skip), 跳过拷贝物化 */
+        if (ins->op == IROP_ZEXT && isel->br_hint_ne_skip == ins->dest) break;
         /* M2：宽度转换按拷贝处理（16 位值域内 zext/sext/trunc 无操作）；
          * dest 独立寄存器/槽，避免与 src 共享寄存器导致死值释放冲突 */
         ValueName s = src1_of(ins);
@@ -2425,18 +2454,27 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         int wr = isel_alloc_wr(isel, ins->dest);
         char *lbl1 = isel_new_label(isel, "?S"), *lbl2 = isel_new_label(isel, "?S");
-        int r = isel_value_reg(ctx, cond);
-        if (r < 0) {
-            /* 条件临时寄存器避开 dest（防 forced-spill 夺走 dest 寄存器） */
-            r = isel_temp_wr(isel, wr, -1);
-            if (load_value_to_wr(isel, cond, r) < 0) {
-                fprintf(stderr, "c251 isel: SELECT 条件无法物化 (v%d)\n", cond);
-                break;
+        int r = -1;
+        char rbuf[16] = "";
+        if (isel->br_hint_cond >= 0 && cond == isel->br_hint_cond) {
+            /* 模式 D: 比较指令已发 CMP → 直接 Jcc 真分支 (省 0/1 物化 + 再测) */
+            isel_emit(isel, isel->br_hint_jump, lbl1, NULL);
+            isel->br_hint_cond = -1;
+            isel->br_hint_ne_skip = -1;
+        } else {
+            r = isel_value_reg(ctx, cond);
+            if (r < 0) {
+                /* 条件临时寄存器避开 dest（防 forced-spill 夺走 dest 寄存器） */
+                r = isel_temp_wr(isel, wr, -1);
+                if (load_value_to_wr(isel, cond, r) < 0) {
+                    fprintf(stderr, "c251 isel: SELECT 条件无法物化 (v%d)\n", cond);
+                    break;
+                }
             }
+            wr_name(rbuf, sizeof(rbuf), r);
+            isel_emit(isel, "CMP", rbuf, "#0");
+            isel_emit(isel, "JNE", lbl1, NULL);
         }
-        char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
-        isel_emit(isel, "CMP", rbuf, "#0");
-        isel_emit(isel, "JNE", lbl1, NULL);
         /* 假分支: dest = v_false（或 imm2） */
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
@@ -2777,10 +2815,12 @@ void isel_function(C251GenContext* ctx, Func* func) {
     snprintf(label, sizeof(label), "_%s:", func->name);
     isel_emit(&isel, label, NULL, NULL);
 
-    /* 中断函数 prolog: 保存 PSW + 全部 R0-R7 (Keil ISR 语义, 保护被中断的 main 现场)。
-     * PUSH PSW(0xD0) → PUSH R0..R7; RETI 前 POP 逆序恢复。 */
+    /* 中断函数 prolog: 保存 PSW(0xD0) + PSW1(0xD1, 含 N/Z 扩展标志 — JSL/JSGE 等
+     * 依赖 PSW1, ISR 内 CMP/算术会破坏被中断代码的标志) + 全部 R0-R7。
+     * PUSH PSW → PUSH PSW1 → PUSH R0..R7; RETI 前 POP 逆序恢复。 */
     if (func->is_interrupt) {
         isel_emit(&isel, "PUSH", "0xD0", NULL);
+        isel_emit(&isel, "PUSH", "0xD1", NULL);
         for (int rr = 0; rr < 8; rr++) {
             char rnm[8]; snprintf(rnm, sizeof(rnm), "R%d", rr);
             isel_emit(&isel, "PUSH", rnm, NULL);
