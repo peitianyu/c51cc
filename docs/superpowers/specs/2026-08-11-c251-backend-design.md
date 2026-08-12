@@ -202,13 +202,15 @@ C51 的 SEC_DATA/SEC_IDATA/SEC_XDATA 保留（显式空间声明在 251 上仍�
 
 每阶段门禁：**sim251 行为验证通过** + suite 全过 + Keil 对齐。
 
-| 里程碑 | 内容 | 验收 |
-|--------|------|------|
-| M1 骨架 | c251cc.exe 平台选择 + obj/输出/链接裁剪 + 编码器骨架（mov/arith 基础表）+ 分层 linscan 雏形 | test/suite 基础算术测试 **sim251 跑通** |
-| M2 核心指令 | 16 位算术/比较/控制流/函数调用完整 isel | test/execute 全部 **sim251 跑通**；keil_size_compare 启动 |
-| M3 XSMALL 完整 | near 变量/栈帧/far 指针/@DRk 间接/SEC_EDATA/REGPARMS 传参 | **sim_keil_validate（sim251 双跑）行为对齐通过** |
-| M4 外设与中断 | sfr/sbit 全量、中断函数、STC32G 定时器/串口/GPIO 示例 | stc32g 前 8 个示例 **sim251 外设断言跑通** + Keil 对比 |
-| M5 全量对齐 | 32 位运算例程、peephole 打磨、STC32G 全部示例、测试脚本全绿 | 32 个示例 + suite/execute/ssa **全绿（sim251 验证）**，Keil 大小差距记录在案 |
+| 里程碑 | 内容 | 验收 | 状态 |
+|--------|------|------|------|
+| M1 骨架 | c251cc.exe 平台选择 + obj/输出/链接裁剪 + 编码器骨架（mov/arith 基础表）+ 分层 linscan 雏形 | test/suite 基础算术测试 **sim251 跑通** | ✅ 完成（M1 计划 doc 有验收记录） |
+| M2 核心指令 | 16 位算术/比较/控制流/函数调用完整 isel | test/execute 全部 **sim251 跑通**；keil_size_compare 启动 | ✅ 完成（M2.5 计划 doc 有验收记录） |
+| M3 XSMALL 完整 | near 变量/栈帧/far 指针/@DRk 间接/SEC_EDATA/REGPARMS 传参 | **sim_keil_validate（sim251 双跑）行为对齐通过** | 🔄 进行中：near 变量/栈帧/SEC_EDATA/REGPARMS 已在 M2-M2.5 落地；**far 指针未完成**（77_far_mem FAIL）。实施分组与设计略有差异：**M4 的 sfr/sbit/中断已提前到 M3 完成**（3 提交）。见 M3 计划 doc |
+| M4 外设与中断 | sfr/sbit 全量、中断函数、STC32G 定时器/串口/GPIO 示例 | stc32g 前 8 个示例 **sim251 外设断言跑通** + Keil 对比 | 🔄 部分完成：sfr/sbit/中断已提前到 M3（72-76/84-99 大部分 PASS）；STC32G 外设示例已 34/34。剩余见 M3 计划 doc |
+| M5 全量对齐 | 32 位运算例程、peephole 打磨、STC32G 全部示例、测试脚本全绿 | 32 个示例 + suite/execute/ssa **全绿（sim251 验证）**，Keil 大小差距记录在案 | ⏳ 未开始 |
+
+> 注：实际实施把里程碑重新分组（M3 = sfr/sbit/bit/中断/far/存储类，见 `docs/superpowers/plans/2026-08-11-c251-backend-m3.md`），设计表按功能域保留。
 
 ## 11. 风险与开放问题
 

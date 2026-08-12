@@ -157,3 +157,34 @@ version: 0.1.1
 其它：
 - 补充部分语法支持（如 case/default 的补充）与测试示例的添加
 - 若干合并/整理提交与小幅功能完善
+version: 0.2.0 (C251 后端 M1-M3)
+说明: 新增 C251 后端 (c251cc.exe, 8051 向后兼容的 251 Source Mode), 与 c51 后端共存于同一仓库。
+构建: scripts/build_compiler.bat 双后端 (c251cc.exe 必须带 .exe 后缀, 否则走 c51 分支)。
+验证: sim251 (MCS-251 Source Mode 模拟器) 行为断言为真值; Keil C251 (O9 SIZE) 大小对比为参考。
+
+特性:
+- C251 平台选择 (BACKEND_GEN/LINK/WRITE_ASM/WRITE_HEX 四阶段切换) + SEC_EDATA 段
+- 编码器骨架: MOV/算术/比较/分支/调用基础表 (Source Mode 编码)
+- 16 位算术/比较/控制流/函数调用完整 isel (M2)
+- 指针间接寻址 @WRj / 数组 IROP_OFFSET / struct 成员 (M2.5)
+- 递归 spill 栈式保护 (62_power) + BR 免物化 (比较标志直接条件跳转)
+- inits 全局/局部初始化布局 (blob 大端反转 + 指针 reloc)
+- rel8→LJMP 越界降级 / u8 返回断言 (RETREG A)
+- sfr 特殊功能寄存器直接地址读写 (MOV A,dir8 / MOV dir8,A)
+- sbit/bit 位操作 (RMW: 读→清位→OR 位值→写回) + IROP_LNOT
+- 中断函数 (C51 标准后缀语法 interrupt N) + 向量表 (0x0003+N*8) + ISR PUSH PSW+R0-R7/RETI
+- 多文件 libc 链接 (write_hex 前重编码修复跨文件函数引用)
+- long 16 位加载取低 16 位 / 匿名 union/struct 初始化对齐 / 函数指针全局初始化重定位
+
+修复:
+- 数组衰减就地降级 + 指针 dest LOAD 物化 #sym 地址
+- 常量合并跨块悬空引用 (pass_const_merge 每块独立 const 表)
+- 循环 phi 两阶段并行语义 (gcd a=t 交换)
+- rel8 降级标签冲突 (同名标签跨函数重复 → label_pos 最近距离)
+- 12 EEPROM UART2 波特率: gv() 双 WR 高字 load / CMP32 RHS 32 位常量物化 / 数组基址 DR 符号地址立即数保留
+
+当前基线 (M3 阶段, 2026-08-12):
+- Suite: 55 OK / 9 FAIL / 37 SKIP (M3 范围 72-99: 18 OK / 9 FAIL)
+- Execute: 104 PASS / 3 FAIL / 0 CE
+- STC32G: 历史基线 34/34（当前分支无验证脚本, 待恢复）
+- M3 剩余: far 指针 (77), 循环后置递减 (79/80/81), 前端缺口 (82/83), 存储类 idata/xdata (87/88/96)
