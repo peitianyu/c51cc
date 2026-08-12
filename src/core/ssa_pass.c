@@ -2783,6 +2783,57 @@ static Instr *clone_instr_inline(Instr *i, ValueMapEntry *vmap, int vmap_count,
     return ni;
 }
 
+/* 克隆 phi 指令: dest 已预映射; arm 值 vmap 映射 (undef 0 保留), arm 标签 bmap 重定向。
+ * 返回 NULL = 未映射 (bail)。 */
+static Instr *clone_phi_inline(Instr *p, ValueMapEntry *vmap, int vmap_count,
+                               BlockMapEntry *bmap, int bmap_count) {
+    Instr *np = pass_alloc(sizeof(Instr));
+    memset(np, 0, sizeof(*np));
+    np->op = IROP_PHI;
+    np->type = p->type;
+    np->mem_type = p->mem_type;
+    {
+        bool found = false;
+        np->dest = vmap_get(vmap, vmap_count, p->dest, &found);
+        if (!found) return NULL;
+    }
+    np->args = make_list();
+    np->labels = make_list();
+    int an = p->args ? p->args->len : 0;
+    for (int k = 0; k < an; ++k) {
+        ValueName av = *(ValueName *)list_get(p->args, k);
+        ValueName mv = 0;
+        if (av != 0) {
+            bool found = false;
+            mv = vmap_get(vmap, vmap_count, av, &found);
+            if (!found) return NULL;
+        }
+        ValueName *pv2 = pass_alloc(sizeof(ValueName));
+        *pv2 = mv;
+        list_push(np->args, pv2);
+    }
+    if (p->labels) {
+        for (Iter lt = list_iter(p->labels); !iter_end(lt);) {
+            char *lbl = iter_next(&lt);
+            char *dup = lbl ? pass_alloc(strlen(lbl) + 1) : NULL;
+            if (dup) strcpy(dup, lbl);
+            if (dup) {
+                int bid = -1;
+                if (sscanf(dup, "block%d", &bid) == 1) {
+                    int to = block_map_get(bmap, bmap_count, bid);
+                    if (to >= 0) {
+                        char rep[32];
+                        snprintf(rep, sizeof(rep), "block%d", to);
+                        strcpy(dup, rep);
+                    }
+                }
+            }
+            list_push(np->labels, dup);
+        }
+    }
+    return np;
+}
+
 /* 多块无 phi 内联:
  * - 前置: 2-16 块 + 无 phi + 无 CALL + 非递归 + 指令白名单 + 至少一个 ret
  * - entry 指令 → out_instrs (调用点); 其他块 → f->blocks 新块; ret → JMP tail_id
@@ -2806,7 +2857,7 @@ static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
     for (Iter it = list_iter(callee->blocks); !iter_end(it);) {
         Block *blk = iter_next(&it);
         if (!blk) continue;
-        if (blk->phis && blk->phis->len > 0) return false;
+        if (blk->phis && blk->phis->len > 0 && blk == callee->entry) return false; /* entry phi 不内联 (arm 需调用点 preds 语义) */
         if (!blk->instrs) continue; /* 空块 (优化残留) 允许, 克隆为空块 */
         for (Iter it2 = list_iter(blk->instrs); !iter_end(it2);) {
             Instr *ii = iter_next(&it2);
@@ -2814,6 +2865,7 @@ static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
             if (ii->op == IROP_CALL) return false;
             if (ii->op == IROP_RET) { has_ret = true; continue; }
             if (ii->op == IROP_JMP || ii->op == IROP_BR) continue; /* 终止指令 */
+            if (ii->op == IROP_PHI) continue; /* phi 由克隆逻辑处理 (可能残留在 instrs) */
             if (!inline_allowed_op(ii->op)) return false;
             total_eff++;
         }
@@ -2852,6 +2904,15 @@ static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
                 if (!vmap_put(vmap, &vmap_count, 256, i->dest, (*next_val)++)) return false;
             }
         }
+        /* phi dest 也预映射 (phi 内联支持) */
+        if (blk->phis) {
+            for (Iter pt = list_iter(blk->phis); !iter_end(pt);) {
+                Instr *p = iter_next(&pt);
+                if (p && p->dest) {
+                    if (!vmap_put(vmap, &vmap_count, 256, p->dest, (*next_val)++)) return false;
+                }
+            }
+        }
     }
 
     /* 块 id 分配: tail 块 = 调用点后续指令; 新块 = callee 非 entry 块 */
@@ -2881,14 +2942,32 @@ static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
     /* 先克隆到临时列表 (全部 fallible 操作在此, 失败可安全返回) */
     List *entry_list = make_list();
     List **nb_lists = pass_alloc(sizeof(List *) * (nnew > 0 ? nnew : 1));
+    List **nb_phis_lists = pass_alloc(sizeof(List *) * (nnew > 0 ? nnew : 1));
     int bi = 0;
     for (Iter it = list_iter(callee->blocks); !iter_end(it);) {
         Block *blk = iter_next(&it);
         if (!blk || blk == callee->entry) continue;
         List *nl = make_list();
+        List *nlp = make_list();
+        /* phi åé (åæ¬æ®çå¨ instrs ç PHI) */
+        if (blk->phis) {
+            for (Iter pt = list_iter(blk->phis); !iter_end(pt);) {
+                Instr *p = iter_next(&pt);
+                if (!p || p->op != IROP_PHI) continue;
+                Instr *np = clone_phi_inline(p, vmap, vmap_count, bmap, bmap_count);
+                if (!np) return false;
+                list_push(nlp, np);
+            }
+        }
         for (Iter it2 = list_iter(blk->instrs); !iter_end(it2);) {
             Instr *i = iter_next(&it2);
             if (!i || i->op == IROP_NOP || i->op == IROP_PARAM) continue;
+            if (i->op == IROP_PHI) {
+                Instr *np = clone_phi_inline(i, vmap, vmap_count, bmap, bmap_count);
+                if (!np) return false;
+                list_push(nlp, np);
+                continue;
+            }
             if (i->op == IROP_RET) {
                 ValueName vv = 0;
                 bool is_imm = false;
@@ -2934,6 +3013,7 @@ static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
             list_push(nl, ni);
         }
         nb_lists[bi] = nl;
+        nb_phis_lists[bi] = nlp;
         bi++;
     }
 
@@ -2991,7 +3071,7 @@ static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
         Block *nb = pass_alloc(sizeof(Block));
         memset(nb, 0, sizeof(*nb));
         nb->id = (uint32_t)(base + bi);
-        nb->phis = make_list();
+        nb->phis = nb_phis_lists[bi];
         nb->instrs = nb_lists[bi];
         nb->preds = make_list();
         list_push(f->blocks, nb);
