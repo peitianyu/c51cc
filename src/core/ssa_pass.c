@@ -1198,24 +1198,32 @@ static bool is_copy_instr(const Instr *i) {
     return false; /* 禁止 copy-prop 消除 SEXT/ZEXT，保持扩展语义 */
 }
 
-static void replace_all_uses(Func *f, ValueName from, ValueName to, bool *changed) {
-    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
-        Block *b = iter_next(&it);
-        if (!b) continue;
-        List *lists[2] = {b->phis, b->instrs};
-        for (int li = 0; li < 2; li++) {
-            if (!lists[li]) continue;
-            for (Iter jt = list_iter(lists[li]); !iter_end(jt);) {
-                Instr *i = iter_next(&jt);
-                if (!i || !i->args) continue;
-                for (int k = 0; k < i->args->len; ++k) {
-                    ValueName *arg = list_get(i->args, k);
-                    if (*arg == from) { *arg = to; *changed = true; }
-                }
+/* 块内 use 替换（const_merge 用：跨块 use 保持原 const, 避免 NOP 后悬空） */
+static void replace_block_uses(Block *b, ValueName from, ValueName to, bool *changed) {
+    if (!b) return;
+    List *lists[2] = {b->phis, b->instrs};
+    for (int li = 0; li < 2; li++) {
+        if (!lists[li]) continue;
+        for (Iter jt = list_iter(lists[li]); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || !i->args) continue;
+            for (int k = 0; k < i->args->len; ++k) {
+                ValueName *arg = list_get(i->args, k);
+                if (*arg == from) { *arg = to; if (changed) *changed = true; }
             }
         }
     }
 }
+
+static void replace_all_uses(Func *f, ValueName from, ValueName to, bool *changed) {
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        replace_block_uses(b, from, to, changed);
+    }
+}
+
+
 
 static bool pass_copy_prop(Func *f, Stats *s) {
     bool changed = false;
@@ -1550,6 +1558,28 @@ static bool pass_cse_ext(Func *f, Stats *s) {
     return changed;
 }
 
+/* i->dest 的 use 是否全在块 b 内（const_merge 合并前提：NOP 后无跨块悬空） */
+static bool const_no_cross_block_uses(Func *f, Block *b, ValueName v) {
+    if (v < 0) return false;
+    for (Iter it = list_iter(f->blocks); !iter_end(it);) {
+        Block *ob = iter_next(&it);
+        if (!ob || ob == b) continue;
+        List *lists[2] = {ob->phis, ob->instrs};
+        for (int li = 0; li < 2; li++) {
+            if (!lists[li]) continue;
+            for (Iter jt = list_iter(lists[li]); !iter_end(jt);) {
+                Instr *i = iter_next(&jt);
+                if (!i || !i->args) continue;
+                for (int k = 0; k < i->args->len; ++k) {
+                    ValueName *arg = list_get(i->args, k);
+                    if (*arg == v) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 /*---------- 常量合并 ----------*/
 static bool pass_const_merge(Func *f, Stats *s) {
     bool changed = false;
@@ -1575,8 +1605,9 @@ static bool pass_const_merge(Func *f, Stats *s) {
             for (int k = 0; k < const_count; k++)
                 if (const_vals[k] == val) { found = k; break; }
 
-            if (found >= 0) {
-                replace_all_uses(f, i->dest, const_names[found], &changed);
+            if (found >= 0 && const_no_cross_block_uses(f, b, i->dest)) {
+                /* 无跨块 use 才合并：跨块 use 保持原 const (NOP 后跨块引用会悬空) */
+                replace_block_uses(b, i->dest, const_names[found], &changed);
                 i->op = IROP_NOP;
                 ++s->fold;
             } else if (const_count < MAX_CONSTS) {
