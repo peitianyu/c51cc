@@ -115,3 +115,36 @@ v13/v18 的槽在 def 时写入正确值, b5 SELECT 从槽读到正确值。
 000014 7D32      MOV WR6,WR4          ; y*2 (SLL WR6)
 000016 3E34      SLL WR6
 ```
+
+## 附录 B: far 指针 (Keil XSMALL+Source 通用指针, 2026-08-12 实测)
+
+### Keil 布局 (k77.LST, 77_far_mem.c)
+```
+; XFR 扩展 SFR 0x7efe10: DR = 0x007EFE10 (空间字节 0x7E 在高 8 位)
+000002 7E34FE10  MOV WR6,#0FE10H      ; 低 16 位地址
+000006 7E24007E  MOV WR4,#07EH        ; 空间字节 (WR4 = 0x007E → R5 = 0x7E)
+00000A 7A1BB0    MOV @DR4,R11         ; far 写 (A=R11)
+00000D 7E1BB0    MOV R11,@DR4         ; far 读
+; xram 0x000100: 空间 0x00
+00006A 7E080100  MOV DR0,#0100H       ; MOV DRj,#imm16 (高字 0)
+00006E 7A0BB0    MOV @DR0,R11
+```
+
+### 编码 (sim251 decode_impl.inc 交叉验证)
+| 指令 | 编码 | 解码路径 |
+|------|------|---------|
+| MOV Rm,@DRk  | 7E (k/4)B (m)0      | regop2_generic case 0xB |
+| MOV @DRk,Rm  | 7A (k/4)B (m)0      | mov_op1_reg case 0xB |
+| MOV WRj,@DRk | 7E (k/4)0A (j/2)0   | inc_dec_short sel2 (b1&2) |
+| MOV @DRk,WRj | 7E (k/4)1A (j/2)0   | inc_dec_short dec1 sel2 |
+
+### sim251 路由 (mem.c ld_far8/st_far8)
+- @DRk 取低 24 位 → 高字节 0xFF → code; 低 16 位 < 0x10000 → IRAM (edata);
+  其余 → XRAM/XFR (0xFA00-0xFFFF 窗口由 xram8 内部处理)
+- 验证: Keil 编译 77_far_mem 跑 sim251 ret=0 ✓
+
+### c251cc 实现要点
+- far 常量 `(u8 volatile far *)0x7efe10`: INTTOPTR 常量透传 (24 位不截断) →
+  MOV WR(k+2),#lo16; MOV WRk,#space → DRk
+- DRk 选择: DR0 (WR0:WR2) / DR4 (WR4:WR6) 对, 避开活值绑定
+- 属性下推 (parser): `unsigned char *` 的 unsigned/volatile/far 修饰被指向类型
