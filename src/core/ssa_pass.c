@@ -2729,6 +2729,24 @@ static int block_map_get(BlockMapEntry *map, int count, int from) {
     return -1;
 }
 
+/* 从 start 沿终止指令目标链能否到达 target (循环回边检测) */
+static bool block_reaches(Func *f, Block *start, Block *target) {
+    for (int g = 0; start && g < 8; g++) {
+        if (start == target) return true;
+        Instr *term = block_last_effective_instr(start);
+        if (!term || !term->labels) return false;
+        bool advanced = false;
+        for (int k = 0; k < term->labels->len; k++) {
+            int tid = -1;
+            sscanf((char *)list_get(term->labels, k), "block%d", &tid);
+            Block *t = find_block_by_id(f, tid);
+            if (t) { start = t; advanced = true; break; }
+        }
+        if (!advanced) return false;
+    }
+    return false;
+}
+
 /* 克隆指令: dest/args 已在 vmap 中预分配 (Pass A); labels 中 blockN 经 bmap 重定向。
  * 返回 NULL = 未映射 (理论上不会; 0 视为 undef 原样保留)。 */
 static Instr *clone_instr_inline(Instr *i, ValueMapEntry *vmap, int vmap_count,
@@ -2871,6 +2889,21 @@ static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
         }
     }
     if (!has_ret) return false;
+    /* 含循环 (回边) 的 callee 不自动内联: 循环体复制 + spill 往返膨胀 (54/61) */
+    if (!callee->is_inline) {
+        for (Iter lit = list_iter(callee->blocks); !iter_end(lit);) {
+            Block *lb = iter_next(&lit);
+            if (!lb) continue;
+            Instr *lterm = block_last_effective_instr(lb);
+            if (!lterm || !lterm->labels) continue;
+            for (int k = 0; k < lterm->labels->len; k++) {
+                int ltid = -1;
+                sscanf((char *)list_get(lterm->labels, k), "block%d", &ltid);
+                Block *lt = find_block_by_id(callee, ltid);
+                if (lt && block_reaches(callee, lt, lb)) return false; /* 后继可达自身 = 回边 */
+            }
+        }
+    }
     if (!callee->is_inline && total_eff > 20) return false;
 
     int argc = call->args ? call->args->len : 0;
@@ -2963,6 +2996,13 @@ static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
             Instr *i = iter_next(&it2);
             if (!i || i->op == IROP_NOP || i->op == IROP_PARAM) continue;
             if (i->op == IROP_PHI) {
+                /* instrs 残留 PHI: blk->phis 已克隆则跳过 (去重) */
+                bool dup = false;
+                for (Iter dpt = list_iter(nlp); !iter_end(dpt);) {
+                    Instr *ep = iter_next(&dpt);
+                    if (ep && ep->op == IROP_PHI && ep->dest == i->dest) { dup = true; break; }
+                }
+                if (dup) continue;
                 Instr *np = clone_phi_inline(i, vmap, vmap_count, bmap, bmap_count);
                 if (!np) return false;
                 list_push(nlp, np);
