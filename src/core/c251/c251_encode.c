@@ -46,7 +46,7 @@ typedef struct EncodeState {
     Section *sec;
     const ObjFile *obj;
     int pc;
-    Dict *label_pos;    /* char* label(无冒号) -> int* offset */
+    Dict *label_pos;    /* char* label(无冒号) -> List<int*> offset 列表（同名标签多函数重复） */
     List *fixups;       /* List<RelFixup*> */
     List *absfixups;    /* List<AbsFixup*> 函数符号绝对跳转 */
     List *abslabfixups; /* List<AbsFixup*> 代码内标签绝对跳转（LJMP 降级） */
@@ -215,12 +215,18 @@ static const char* arg(const AsmInstr *ins, int i) {
 static int encode_instr(EncodeState *st, AsmInstr *ins) {
     if (!ins || !ins->op) return 0;
     if (is_label_instr(ins)) {
-        /* 记录标签位置（去尾部 ':'） */
+        /* 记录标签位置（去尾部 ':'）。同名标签跨函数重复（L1/L2/L3 每函数重置），
+         * 故 value 存 List<int*> 位置列表，resolve 时按 offset 找最近的前驱标签。 */
         size_t n = strlen(ins->op);
         char *lbl = strdup(ins->op);
         if (n > 0 && lbl[n - 1] == ':') lbl[n - 1] = '\0';
         int *pos = malloc(sizeof(int)); *pos = st->pc;
-        dict_put(st->label_pos, lbl, pos);
+        List *positions = (List*)dict_get(st->label_pos, lbl);
+        if (!positions) {
+            positions = make_list();
+            dict_put(st->label_pos, lbl, positions);
+        }
+        list_push(positions, pos);
         /* 函数标签 `_name:` → 更新函数符号 value（代码偏移，供 LJMP/LCALL fixup） */
         if (lbl[0] == '_') {
             Symbol *s = c251_find_symbol(st->obj, lbl + 1);
@@ -569,16 +575,51 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
 
 /* 第二遍：填充条件跳转/SJMP 的 rel8 偏移（rel = 目标 - (指令起始 + 2)）。
  * 越界（超出 ±128）→ 加入 degraded_seqs，下一轮重编码降级为 LJMP 序列。 */
+/* 找距 offset 最近的同名标签位置（同名标签跨函数重复；跳转目标可能是前向或后向）。
+ * 对同轮编码内的前向/后向跳转都正确：取绝对距离最近的位置。 */
+static int label_pos_before(EncodeState *st, const char *name, int offset, int *out) {
+    List *positions = (List*)dict_get(st->label_pos, name);
+    if (!positions) return 0;
+    int best = -1, best_dist = 0x7FFFFFFF;
+    for (Iter it = list_iter(positions); !iter_end(it);) {
+        int *p = (int*)iter_next(&it);
+        int d = *p > offset ? (*p - offset) : (offset - *p);
+        if (d < best_dist) { best_dist = d; best = *p; }
+    }
+    if (best < 0) return 0;
+    *out = best;
+    return 1;
+}
+
+/* 释放 label_pos dict：键 strdup + 值 List<int*>（元素+节点+结构）
+ * 注意：元素已手动 free，list_free 会再 free elem → 只用其释放节点 */
+static void free_label_pos_entry(void *val) {
+    List *positions = (List*)val;
+    if (!positions) return;
+    for (Iter it = list_iter(positions); !iter_end(it);) {
+        int *p = (int*)iter_next(&it);
+        free(p);
+    }
+    /* 只释放节点结构，不清 elem（已 free） */
+    ListNode *node = positions->head;
+    while (node) {
+        ListNode *next = node->next;
+        free(node);
+        node = next;
+    }
+    free(positions);
+}
+
 static void resolve_fixups(EncodeState *st) {
     if (!st->fixups) return;
     for (Iter it = list_iter(st->fixups); !iter_end(it);) {
         RelFixup *fx = iter_next(&it);
-        int *lp = (int*)dict_get(st->label_pos, fx->label);
-        if (!lp) {
+        int lp = 0;
+        if (!label_pos_before(st, fx->label, fx->offset, &lp)) {
             fprintf(stderr, "c251_encode: unknown jump label: %s\n", fx->label);
             continue;
         }
-        int rel = *lp - (fx->offset + 2);
+        int rel = lp - (fx->offset + 2);
         if (rel < -128 || rel > 127) {
             fprintf(stderr, "c251_encode: rel8 overflow for %s (rel=%d), degrading to LJMP\n", fx->label, rel);
             int *sp = malloc(sizeof(int));
@@ -596,12 +637,12 @@ static void resolve_abs_label_fixups(EncodeState *st) {
     if (!st->abslabfixups) return;
     for (Iter it = list_iter(st->abslabfixups); !iter_end(it);) {
         AbsFixup *fx = iter_next(&it);
-        int *lp = (int*)dict_get(st->label_pos, fx->symbol);
-        if (!lp) {
+        int lp = 0;
+        if (!label_pos_before(st, fx->symbol, fx->offset, &lp)) {
             fprintf(stderr, "c251_encode: unknown abs label target: %s\n", fx->symbol);
             continue;
         }
-        unsigned addr = (unsigned)*lp;
+        unsigned addr = (unsigned)lp;
         st->sec->bytes[fx->offset + 1] = (unsigned char)((addr >> 8) & 0xFF);
         st->sec->bytes[fx->offset + 2] = (unsigned char)(addr & 0xFF);
     }
@@ -658,7 +699,7 @@ void c251_encode(C251GenContext* ctx, ObjFile* obj) {
             resolve_abs_fixups(&st);
             int after = list_len(degraded_seqs);
             /* 释放本轮临时结构 */
-            dict_free(st.label_pos, free);
+            dict_free(st.label_pos, free_label_pos_entry);
             for (Iter it = list_iter(st.fixups); !iter_end(it);) {
                 RelFixup *fx = iter_next(&it);
                 if (fx) free(fx->label);
