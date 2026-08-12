@@ -1278,7 +1278,17 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 isel_emit(isel, "MOV", "WR6", imm);
             }
         }
-        isel_emit(isel, "RET", NULL, NULL);
+        /* 中断函数 → RETI (恢复中断); 普通函数 → RET。中断 epilog: POP 逆序恢复 R0-R7 + PSW */
+        if (ctx->current_func && ctx->current_func->is_interrupt) {
+            for (int rr = 7; rr >= 0; rr--) {
+                char rnm[8]; snprintf(rnm, sizeof(rnm), "R%d", rr);
+                isel_emit(isel, "POP", rnm, NULL);
+            }
+            isel_emit(isel, "POP", "0xD0", NULL);
+            isel_emit(isel, "RETI", NULL, NULL);
+        } else {
+            isel_emit(isel, "RET", NULL, NULL);
+        }
         break;
     }
     case IROP_CALL: {
@@ -2144,6 +2154,16 @@ void isel_function(C251GenContext* ctx, Func* func) {
     char label[256];
     snprintf(label, sizeof(label), "_%s:", func->name);
     isel_emit(&isel, label, NULL, NULL);
+
+    /* 中断函数 prolog: 保存 PSW + 全部 R0-R7 (Keil ISR 语义, 保护被中断的 main 现场)。
+     * PUSH PSW(0xD0) → PUSH R0..R7; RETI 前 POP 逆序恢复。 */
+    if (func->is_interrupt) {
+        isel_emit(&isel, "PUSH", "0xD0", NULL);
+        for (int rr = 0; rr < 8; rr++) {
+            char rnm[8]; snprintf(rnm, sizeof(rnm), "R%d", rr);
+            isel_emit(&isel, "PUSH", rnm, NULL);
+        }
+    }
 
     /* main: 初始化 SP 到 EDATA 高位 (Keil STARTUP 行为; 避免 RET 弹栈到寄存器区 0x07,
      * 也避免 WR6/R7 返回值污染 SP=7 的栈导致 sim251 ret_mismatch) */

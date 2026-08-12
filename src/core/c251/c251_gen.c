@@ -245,16 +245,51 @@ ObjFile *c251_gen(SSAUnit *unit) {
                 ai->args = make_list();
                 list_push(ai->args, strdup("main"));
                 /* 头部插入：stub 在第一个函数之前（地址 0x0000） */
+                List *nl = make_list();
+                list_push(nl, ai);
+
+                /* M3: 中断向量表 — interrupt N → 地址 0x0003+N*8 放 LJMP ISR_N。
+                 * stub 占 0x0000-0x0002, 向量在 0x0003 起 (N=0 的向量紧接 stub)。
+                 * 用 NOP 填充向量间空隙, 最多 8 个向量 (0x0003-0x003B)。 */
+                {
+                    int vec_pos = 3;  /* 第一个向量地址 */
+                    for (int i = 0; i < (int)list_len(unit->funcs); i++) {
+                        Func *ff = (Func*)list_get(unit->funcs, i);
+                        if (!ff || !ff->is_interrupt) continue;
+                        int vaddr = 3 + ff->interrupt_id * 8;  /* 0x0003 + N*8 */
+                        if (vaddr < 0x0040) {
+                            /* NOP 填充到向量地址 */
+                            while (vec_pos < vaddr && vec_pos < 0x0040) {
+                                AsmInstr *nop = calloc(1, sizeof(AsmInstr));
+                                nop->op = strdup("NOP");
+                                list_push(nl, nop);
+                                vec_pos++;
+                            }
+                            /* 向量 LJMP ISR_N (占 3 字节) */
+                            AsmInstr *vj = calloc(1, sizeof(AsmInstr));
+                            vj->op = strdup("LJMP");
+                            vj->args = make_list();
+                            char isrname[32]; snprintf(isrname, sizeof(isrname), "ISR_%d", ff->interrupt_id);
+                            list_push(vj->args, strdup(isrname));
+                            list_push(nl, vj);
+                            vec_pos += 3;
+                        }
+                    }
+                    /* 填充到 0x0040 (向量区结束), 保持函数对齐 */
+                    while (vec_pos < 0x0040) {
+                        AsmInstr *nop = calloc(1, sizeof(AsmInstr));
+                        nop->op = strdup("NOP");
+                        list_push(nl, nop);
+                        vec_pos++;
+                    }
+                }
                 if (sec->asminstrs) {
-                    List *nl = make_list();
-                    list_push(nl, ai);
                     for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
                         list_push(nl, iter_next(&ait));
                     }
                     sec->asminstrs = nl;
                 } else {
-                    sec->asminstrs = make_list();
-                    list_push(sec->asminstrs, ai);
+                    sec->asminstrs = nl;
                 }
                 /* stub 占 3 字节 (LJMP 02 hi lo)，函数符号 value 由 encode 标签处理设置 */
             }

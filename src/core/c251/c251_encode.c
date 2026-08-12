@@ -261,6 +261,7 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
 
     if (!strcmp(op, "NOP"))            { emit1(st, 0x00); return 0; }
     if (!strcmp(op, "RET"))            { emit1(st, 0x22); return 0; }
+    if (!strcmp(op, "RETI"))           { emit1(st, 0x32); return 0; }  /* 中断返回 */
 
     /* PUSH dir8 / POP dir8 (8051 兼容, 递归栈保护用; R0-R7 → 地址 0x00-0x07) */
     if (!strcmp(op, "PUSH") || !strcmp(op, "POP")) {
@@ -268,6 +269,14 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
         if (r1 >= 0 && !w1 && r1 <= 7) {
             emit2(st, !strcmp(op, "PUSH") ? 0xC0 : 0xD0, (unsigned char)r1);
             return 0;
+        }
+        /* PUSH/POP dir8 (SFR 地址, 如 PSW=0xD0) */
+        {
+            char *end; long dir = strtol(a1, &end, 16);
+            if (a1 && *a1 != '#' && *end == '\0' && dir >= 0x80 && dir <= 0xFF) {
+                emit2(st, !strcmp(op, "PUSH") ? 0xC0 : 0xD0, (unsigned char)(dir & 0xFF));
+                return 0;
+            }
         }
         return -1;
     }

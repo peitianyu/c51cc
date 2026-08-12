@@ -2794,9 +2794,39 @@ static Ast *read_func_def(Ctype *rettype, char *fname)
     localenv = make_dict(globalenv);
     List *params = read_params();
 
+    /* C51 标准中断语法: void f(void) interrupt N [using M] { } — 参数后后缀 */
+    int isr_id = -1;
+    Token nxt = peek_token();
+    if (is_ident(nxt, "interrupt")) {
+        read_token();
+        Ast *id_ast = read_expr();
+        isr_id = eval_intexpr(id_ast);
+        /* 可选 using 寄存器组 */
+        if (is_ident(peek_token(), "using")) {
+            read_token();
+            Ast *bank_ast = read_expr();
+            (void)eval_intexpr(bank_ast);
+        }
+    }
+
     Token tok = read_token();
     if(is_punct(tok, '{')) {
         is_first = true;
+        /* 中断函数: 构建 AST_INTERRUPT_DEF 而非普通函数 */
+        if (isr_id >= 0) {
+            Ast *func_decl = ast_func_decl(rettype, fname, params);
+            dict_put(functionenv, fname, func_decl);
+            localenv = make_dict(localenv);
+            localvars = make_list();
+            labels = make_list();
+            Ast *body = read_compound_stmt();
+            Ast *r = ast_interrupt_def(rettype, isr_id, 0, body, localvars, labels);
+            localenv = dict_parent(localenv);
+            localvars = NULL;
+            labels = NULL;
+            dict_put(functionenv, fname, r);
+            return r;
+        }
         // 先创建函数声明并添加到符号表，支持递归调用
         Ast *func_decl = ast_func_decl(rettype, fname, params);
         dict_put(functionenv, fname, func_decl);
