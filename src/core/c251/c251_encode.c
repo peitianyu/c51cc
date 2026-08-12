@@ -528,11 +528,27 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
                 return 0;
             }
         } else if (a1 && !strcmp(a1, "SP")) {
-            /* MOV SP,#imm: 75 81 v (8051/251 兼容, 启动代码初始化栈用) */
+            /* MOV SP,#imm: 75 81 v (8051/251 兼容, 启动代码初始化栈用)。
+             * SP 动态化: = EDATA 段末尾 + 栈余量 (栈向下增长不碰全局/spill 槽)。
+             * 0041-queen: _heap[1024] 全局占 0x84-0x483, 硬编码 SP=0xDF 使栈区与
+             * _heap 重叠 — calloc 清零覆盖 PUSH 保存区 → 递归结果错 (N=0)。
+             * 段末尾 > 0xFF 时用 MOV DR60,#imm16 (SPX: 7E F8 hi lo)。 */
             if (a2 && a2[0] == '#') {
-                imm = parse_imm(a2, &ok);
-                if (!ok) return -1;
-                emit3(st, 0x75, 0x81, (unsigned char)(imm & 0xFF));
+                unsigned sp = 0xDF;
+                for (Iter sit = list_iter(st->obj->sections); !iter_end(sit);) {
+                    Section *sec = iter_next(&sit);
+                    if (sec && sec->kind == SEC_EDATA && sec->bytes_len > 0) {
+                        sp = (unsigned)sec->bytes_len + 0x200;  /* 段末尾 + 512B 栈余量 */
+                        if (sp > 0xFF00) sp = 0xFF00;
+                        break;
+                    }
+                }
+                if (sp <= 0xFF) {
+                    emit3(st, 0x75, 0x81, (unsigned char)(sp & 0xFF));
+                } else {
+                    emit4(st, 0x7E, 0xF8, (unsigned char)((sp >> 8) & 0xFF),
+                          (unsigned char)(sp & 0xFF));
+                }
                 return 0;
             }
         } else if (is_symbol_arg(a1)) {
@@ -728,6 +744,9 @@ static void resolve_fixups(EncodeState *st) {
             continue;
         }
         int rel = lp - (fx->offset + 2);
+        if (getenv("C251_DBG_SJMP")) {
+            fprintf(stderr, "[sjmp] %s @0x%X -> 0x%X rel=%d\n", fx->label, fx->offset, lp, rel);
+        }
         if (rel < -128 || rel > 127) {
             fprintf(stderr, "c251_encode: rel8 overflow for %s (rel=%d), degrading to LJMP\n", fx->label, rel);
             int *sp = malloc(sizeof(int));

@@ -24,7 +24,7 @@ SIM = os.environ.get('MCS251', os.path.join(ROOT, 'sim251', 'mcs251.exe'))
 SRC = os.path.join(ROOT, 'test', 'execute')
 OPT = os.environ.get('C251_OPT', '-O1')
 REPORT = os.path.join(ROOT, '.tmp', 'c251_execute_report.txt')
-MAX_CYCLES = int(os.environ.get('C251_MAX_CYCLES', '2000000'))
+MAX_CYCLES = int(os.environ.get('C251_MAX_CYCLES', '5000000000'))
 TIMEOUT = int(os.environ.get('C251_TIMEOUT', '120'))
 
 

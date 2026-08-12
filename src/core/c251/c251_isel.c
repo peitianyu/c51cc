@@ -344,8 +344,11 @@ static Block* find_block_by_id(ISelContext* isel, int id) {
 }
 
 /* 跳转目标标签名（无冒号）：L<id> */
-static void block_label_name(char* out, size_t n, int id) {
-    snprintf(out, n, "L%d", id);
+static void block_label_name(ISelContext* isel, char* out, size_t n, int id) {
+    /* 函数名前缀：块标签 L<id> 跨函数重复 → 跳转目标可能选错函数 */
+    const char *fn = (isel && isel->ctx && isel->ctx->current_func && isel->ctx->current_func->name)
+        ? isel->ctx->current_func->name : "?";
+    snprintf(out, n, "%s_L%d", fn, id);
 }
 
 /* ============================================================
@@ -552,7 +555,11 @@ static void emit_phi_copies(ISelContext* isel, int succ_id) {
 /* 生成内部标签名（无冒号）；发射时用 isel_emit_label */
 static char* isel_new_label(ISelContext* isel, const char* prefix) {
     char buf[48];
-    snprintf(buf, sizeof(buf), "%s%d", prefix, isel->label_counter++);
+    /* 函数名前缀：跨函数同名标签 (L0/?C0 等) 在 encode 的 label_pos 共享 → "最近距离"
+     * 可能选错函数 (0041-queen: go 的 SJMP L25 跳到 chk/strcpy 的 L25 → 搜索错乱)。 */
+    const char *fn = (isel->ctx && isel->ctx->current_func && isel->ctx->current_func->name)
+        ? isel->ctx->current_func->name : "?";
+    snprintf(buf, sizeof(buf), "%s_%s%d", fn, prefix, isel->label_counter++);
     return strdup(buf);
 }
 
@@ -923,6 +930,23 @@ static bool op_supports_imm(int op) {
     return op == IROP_ADD || op == IROP_SUB || op == IROP_AND || op == IROP_OR || op == IROP_XOR;
 }
 
+/* MUL/DIV WRj,WRk: 32 位结果 → 低字 WRj, 高字/余数写 partner (WRj^2)。
+ * partner 若持有活值 → 先溢出到槽 (0041-queen/t_lhs2: t[0]*1000 结果在 WR0,
+ * 后续 MUL WR2 覆盖 WR0 高字 → g_sol 写 2)。 */
+static void spill_partner_if_live(ISelContext* isel, int wr) {
+    int pr = wr ^ 2;
+    ValueName rv = isel->reg_val[pr/2];
+    if (rv >= 0 && value_still_used(isel, rv, isel->block_instr_pos)) {
+        char *sp = c251_alloc_spill(isel->ctx, rv);
+        char wbuf[16]; wr_name(wbuf, sizeof(wbuf), pr);
+        isel_emit(isel, "MOV", sp, wbuf);
+        char *k = c251_key(rv);
+        dict_remove(isel->ctx->value_to_reg, k);
+        free(k);
+        isel->reg_val[pr/2] = -1;
+    }
+}
+
 /* 用立即数发射 op：支持 imm 的 op 直接 op WRj,#imm；否则物化 imm 到临时寄存器再 op */
 static void emit_op_with_imm(ISelContext* isel, const char* opm, int op,
                              const char* wbuf, int wr, int r1, long long val) {
@@ -1078,12 +1102,14 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         int wr = isel_alloc_wr(isel, ins->dest);
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            if (ins->op == IROP_MUL) spill_partner_if_live(isel, wr);
             load_value_to_wr(isel, s1, wr);
             emit_binop_src2(isel, opm, ins->op, wbuf, wr, s1, s2, il, ins->imm.ival);
         } else {
             /* dest 溢出：计算到临时 → 存槽 */
             int tmp = isel_temp_wr(isel, -1, -1);
             char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            if (ins->op == IROP_MUL) spill_partner_if_live(isel, tmp);
             load_value_to_wr(isel, s1, tmp);
             emit_binop_src2(isel, opm, ins->op, tbuf, tmp, s1, s2, il, ins->imm.ival);
             char *sp = c251_alloc_spill(ctx, ins->dest);
@@ -1256,6 +1282,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             } else {
                 load_value_to_wr(isel, s2, t2);
             }
+            /* DIV 余数写 partner(t1) — 活值先溢出 (0041-queen 同类) */
+            spill_partner_if_live(isel, t1);
             isel_emit(isel, "DIV", b1, b2);
             int pr = (t1 & 2) == 0 ? t1 + 2 : t1 - 2;  /* 余数所在 DR 对另一侧 */
             char pbuf[16]; wr_name(pbuf, sizeof(pbuf), pr);
@@ -1273,10 +1301,12 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             /* 有符号除法（截断向零）：
              *   f1 = (num<0), f2 = (den<0)；anum=|num|, aden=|den|
              *   DIV → q, r；q 符号 = f1^f2；r 符号 = f1
-             * R0/R1 作标志 → 占 WR0，temp 全部避开 WR0 */
-            int avoid0[1] = { 0 };
-            int t1s = isel_temp_wr_avoid_bytes(isel, -1, -1, avoid0, 1);
-            int t2s = isel_temp_wr_avoid_bytes(isel, t1s, -1, avoid0, 1);
+             * R0/R1 作标志 → 占 WR0。t1s 必须避开 WR2：DIV 余数写 partner(t1s),
+             * t1s=WR2 → partner=WR0 覆盖 R0/R1 标志 (0042-prime 死循环根因)。
+             * 故 t1s ∈ {WR4, WR6} (partner ∈ {WR6, WR4} 均不碰 WR0)。 */
+            int avoid0[2] = { 0, 2 };
+            int t1s = isel_temp_wr_avoid_bytes(isel, -1, -1, avoid0, 2);
+            int t2s = isel_temp_wr_avoid_bytes(isel, t1s, -1, avoid0, 2);
             char sb1[16], sb2[16];
             wr_name(sb1, sizeof(sb1), t1s); wr_name(sb2, sizeof(sb2), t2s);
             load_value_to_wr(isel, s1, t1s);
@@ -1304,7 +1334,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             isel_emit(isel, "INC", sb2, NULL);
             isel_emit(isel, "MOV", "R1", "#1");
             isel_emit_label(isel, l2);
-            /* 无符号除 */
+            /* 无符号除：余数写 partner(t1s) — 活值先溢出 */
+            spill_partner_if_live(isel, t1s);
             isel_emit(isel, "DIV", sb1, sb2);   /* q→t1s, r→prs */
             int prs = (t1s & 2) == 0 ? t1s + 2 : t1s - 2;
             char spb[16]; wr_name(spb, sizeof(spb), prs);
@@ -2067,7 +2098,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         int tid = parse_block_id(lbl);
         if (tid < 0) { fprintf(stderr, "c251 isel: JMP 目标无法解析: %s\n", lbl ? lbl : "?"); break; }
         emit_phi_copies(isel, tid);
-        char t[32]; block_label_name(t, sizeof(t), tid);
+        char t[32]; block_label_name(isel, t, sizeof(t), tid);
         isel_emit(isel, "SJMP", t, NULL);
         break;
     }
@@ -2096,7 +2127,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         if (cond_const) {
             int go_t = (cv != 0);
             emit_phi_copies(isel, go_t ? tid : fid);
-            char t[32]; block_label_name(t, sizeof(t), go_t ? tid : fid);
+            char t[32]; block_label_name(isel, t, sizeof(t), go_t ? tid : fid);
             isel_emit(isel, "SJMP", t, NULL);
             break;
         }
@@ -2105,10 +2136,10 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         if (isel->br_hint_cond >= 0
             && (cond == isel->br_hint_cond || cond == isel->br_hint_ne_skip)) {
             emit_phi_copies(isel, tid);
-            char t[32]; block_label_name(t, sizeof(t), tid);
+            char t[32]; block_label_name(isel, t, sizeof(t), tid);
             isel_emit(isel, isel->br_hint_jump, t, NULL);
             emit_phi_copies(isel, fid);
-            char f[32]; block_label_name(f, sizeof(f), fid);
+            char f[32]; block_label_name(isel, f, sizeof(f), fid);
             isel_emit(isel, "SJMP", f, NULL);
             isel->br_hint_cond = -1;
             isel->br_hint_ne_skip = -1;
@@ -2126,10 +2157,10 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
         isel_emit(isel, "CMP", rbuf, "#0");
         emit_phi_copies(isel, tid);
-        char t[32]; block_label_name(t, sizeof(t), tid);
+        char t[32]; block_label_name(isel, t, sizeof(t), tid);
         isel_emit(isel, "JNE", t, NULL);
         emit_phi_copies(isel, fid);
-        char f[32]; block_label_name(f, sizeof(f), fid);
+        char f[32]; block_label_name(isel, f, sizeof(f), fid);
         isel_emit(isel, "SJMP", f, NULL);
         break;
     }
@@ -2239,7 +2270,7 @@ void isel_block(ISelContext* isel, Block* block) {
 
     /* 块标签：L<id>: */
     char lbl[32];
-    block_label_name(lbl, sizeof(lbl), block->id);
+    block_label_name(isel, lbl, sizeof(lbl), block->id);
     isel_emit_label(isel, lbl);
 
     /* PHI：块首为每个 phi dest 分配 EDATA 槽（边缘拷贝目标）；值在使用处从槽加载 */

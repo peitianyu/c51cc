@@ -830,7 +830,26 @@ static bool pass_phi(Func *f, Stats *s) {
         }
         List *keep = filter_list(b->phis, phi_pred, f);
         s->phi_rm += b->phis->len - keep->len;
-        b->phis = keep;
+        /* 非 PHI (phi_simplify_value 把 phi 降级成的 TRUNC/CONST) 不能留在 phis：
+         * isel_block 只对 phis 里的 IROP_PHI 分配槽，TRUNC 会被忽略 → dest 槽未写 →
+         * 下游 phi 读到残留 (0057-duff: v127 幽灵)。移到 instrs 头部保持块首语义。 */
+        List *keep_phi = make_list();
+        List *moved = make_list();
+        for (Iter kt2 = list_iter(keep); !iter_end(kt2);) {
+            Instr *p = iter_next(&kt2);
+            if (p && p->op == IROP_PHI) list_push(keep_phi, p);
+            else list_push(moved, p);
+        }
+        b->phis = keep_phi;
+        if (list_len(moved) > 0) {
+            List *ni = make_list();
+            for (Iter jt2 = list_iter(moved); !iter_end(jt2);) list_push(ni, iter_next(&jt2));
+            for (Iter jt3 = list_iter(b->instrs); !iter_end(jt3);) list_push(ni, iter_next(&jt3));
+            b->instrs = ni;
+            changed = true;
+        }
+        list_clear_shallow(keep);
+        free(keep);
     }
     return changed || s->phi_rm != rm0;
 }
