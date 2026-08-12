@@ -16,6 +16,7 @@ C251GenContext* c251_ctx_new(void) {
     ctx->value_to_spill = make_dict(NULL);
     ctx->sym_size = make_dict(NULL);
     ctx->sfr_addr = make_dict(NULL);
+    ctx->value_to_off = make_dict(NULL);
     ctx->next_spill_id = 0;
     ctx->temp_values = make_list();
     return ctx;
@@ -27,6 +28,7 @@ void c251_ctx_free(C251GenContext* ctx) {
     if (ctx->value_type)    { dict_free(ctx->value_type, NULL); }
     if (ctx->value_to_const){ dict_free(ctx->value_to_const, free); }
     if (ctx->value_to_addr) { dict_free(ctx->value_to_addr, free); }
+    if (ctx->value_to_off)  { dict_free(ctx->value_to_off, free); }
     if (ctx->value_to_spill){ dict_free(ctx->value_to_spill, free); }
     if (ctx->sym_size)      { dict_free(ctx->sym_size, free); }
     if (ctx->temp_values)   { list_free(ctx->temp_values); }

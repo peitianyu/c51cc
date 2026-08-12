@@ -301,6 +301,22 @@ static char* value_to_addr_lookup(C251GenContext* ctx, ValueName val) {
     return sym;
 }
 
+
+/* OFFSET 折叠记录: dest -> {sym, off} (@WRj+dis16 位移寻址用) */
+typedef struct OffInfo { char *sym; int off; } OffInfo;
+
+/* 查 OFFSET 折叠记录 (dest -> sym/off); 返回 1 且置值 */
+static int offset_fold_lookup(C251GenContext *ctx, ValueName v, const char **sym, int *off) {
+    if (!ctx || !ctx->value_to_off || v < 0 || !sym || !off) return 0;
+    char *k = c251_key(v);
+    OffInfo *oi = (OffInfo*)dict_get(ctx->value_to_off, k);
+    free(k);
+    if (!oi) return 0;
+    *sym = oi->sym;
+    *off = oi->off;
+    return 1;
+}
+
 /* M3: 查 sfr/sbit 编码值 (低 8 位 = SFR 地址, bit16+ = 位号, -1 = sfr 整字节)。
  * 返回 1 且 *addr/*bit 置值; 非 sfr/sbit 返回 0。 */
 static int sfr_lookup(C251GenContext *ctx, const char *sym, int *addr, int *bit) {
@@ -1695,9 +1711,16 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 }
                 break;
             }
-            /* 指针间接读: ptr 值 → WRk（16 位 EDATA 地址）→ MOV WRj,@WRk */
+            /* 指针间接读: ptr 值 → WRk（16 位 EDATA 地址）→ MOV WRj,@WRk。
+             * @WRj+dis16 折叠: ptr 是 OFFSET(ADDR @sym, 常量) → 基址 #sym + @WRj+off */
+            const char *fold_sym = NULL; int fold_off = 0;
+            bool folded = offset_fold_lookup(ctx, ptr, &fold_sym, &fold_off);
             int addr_wr = isel_temp_wr(isel, wr, -1);
-            if (load_value_to_wr(isel, ptr, addr_wr) < 0) {
+            if (folded) {
+                char saddr[64]; snprintf(saddr, sizeof(saddr), "#%s", fold_sym);
+                char ab[16]; wr_name(ab, sizeof(ab), addr_wr);
+                isel_emit(isel, "MOV", ab, saddr);
+            } else if (load_value_to_wr(isel, ptr, addr_wr) < 0) {
                 /* ptr 未物化（如 OFFSET 产物，任务 2 实现）：兜底 dest=0，不产生未定义值 */
                 if (wr >= 0) {
                     char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
@@ -1712,7 +1735,9 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 break;
             }
             char abuf[16]; wr_name(abuf, sizeof(abuf), addr_wr);
-            char ind[32]; snprintf(ind, sizeof(ind), "@%s", abuf);
+            char ind[32];
+            if (folded) snprintf(ind, sizeof(ind), "@%s+%d", abuf, fold_off);
+            else snprintf(ind, sizeof(ind), "@%s", abuf);
             if (msz <= 1) {
                 int lo = (wr >= 0) ? wr : isel_temp_wr(isel, addr_wr, -1);
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);
@@ -1862,13 +1887,23 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
              * 写宽度按【目标内存类型】mem_type（u8 元素 → 8 位写低字节 R(t+1)），
              * 而非值宽度（`g_buf[i] = a+11` 的 RHS 是 int 16 位, 目标 u8 → 8 位写, 否则越界写邻居）。 */
             int dsz = (ins->mem_type && ins->mem_type->size <= 1) ? 1 : 2;
+            /* @WRj+dis16 折叠: ptr 是 OFFSET(ADDR @sym, 常量) → 基址装载 #sym (不含 off),
+             * 访问用 @WRj+off (Keil 位移寻址, 省 ADD) */
+            const char *fold_sym = NULL; int fold_off = 0;
+            bool folded = offset_fold_lookup(ctx, ptr, &fold_sym, &fold_off);
             int addr_wr = isel_temp_wr(isel, -1, -1);
-            if (load_value_to_wr(isel, ptr, addr_wr) < 0) {
+            if (folded) {
+                char saddr[64]; snprintf(saddr, sizeof(saddr), "#%s", fold_sym);
+                char ab[16]; wr_name(ab, sizeof(ab), addr_wr);
+                isel_emit(isel, "MOV", ab, saddr);
+            } else if (load_value_to_wr(isel, ptr, addr_wr) < 0) {
                 fprintf(stderr, "c251 isel: STORE 指针值无法装载 (v%d)\n", ptr);
                 break;
             }
             char abuf[16]; wr_name(abuf, sizeof(abuf), addr_wr);
-            char ind[32]; snprintf(ind, sizeof(ind), "@%s", abuf);
+            char ind[32];
+            if (folded) snprintf(ind, sizeof(ind), "@%s+%d", abuf, fold_off);
+            else snprintf(ind, sizeof(ind), "@%s", abuf);
             int r = isel_value_reg(ctx, val);
             if (r >= 0) {
                 if (dsz <= 1) {
@@ -1975,6 +2010,29 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
          * 元素 size 仅支持 1/2/4/8（2 的幂，SLL 实现）；其它报错提示。 */
         int size = (int)ins->imm.ival;
         if (size < 1) size = 1;
+        /* @WRj+dis16 折叠前提: dest 只被 LOAD/STORE 当 ptr 消费 (否则地址不含偏移会错);
+         * 且不跨块 (块内 use 才可扫描)。
+         * sim251 mov_dis 只实现字节级 (0x09/0x19); 字级 (MOV WRj,@WRj+dis16, 0x29/0x39)
+         * 未实现 → 字访问 (int 数组) 折叠会触发 unsupported → 指令丢弃 (48_ptr_arith FAIL)。
+         * 故只折叠字节访问 (LOAD/STORE 目标 dsz<=1 且 mem_type 字节)。 */
+        bool fold_ok = ins->dest >= 0 && !is_global_live(isel->global_live, ins->dest)
+            && ins->type && ins->type->size <= 1;
+        if (fold_ok && isel->block_instrs) {
+            for (int fi = isel->block_instr_pos + 1; fi < isel->block_instr_count; fi++) {
+                Instr *u = isel->block_instrs[fi];
+                if (!u || !u->args) continue;
+                for (Iter uit = list_iter(u->args); !iter_end(uit);) {
+                    ValueName *ap = iter_next(&uit);
+                    if (ap && *ap == ins->dest) {
+                        if (u->op != IROP_LOAD && u->op != IROP_STORE) fold_ok = false;
+                        /* LOAD/STORE 里必须是 ptr (src1) 才安全 */
+                        if (u->op == IROP_LOAD || u->op == IROP_STORE) {
+                            if (src1_of(u) != ins->dest) fold_ok = false;
+                        }
+                    }
+                }
+            }
+        }
         int wr = isel_alloc_wr(isel, ins->dest);
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
@@ -1993,6 +2051,18 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                     char *ims = (char*)list_get(ins->labels, 1);
                     long idx = ims ? strtol(ims, NULL, 10) : 0;
                     long off = idx * size;
+                    /* @WRj+dis16 折叠：base 是 ADDR @sym 且 index 常量 → 跳过 ADD,
+                     * 记录 (dest -> {sym, off})；LOAD/STORE 用 MOV WRj,#sym + @WRj+off
+                     * (Keil 位移寻址, 省一条 ADD)。 */
+                    char *base_sym = value_to_addr_lookup(ctx, base);
+                    if (fold_ok && base_sym && off >= 0 && off <= 0x7FFF && ins->dest >= 0) {
+                        OffInfo *oi = malloc(sizeof(OffInfo));
+                        oi->sym = strdup(base_sym);
+                        oi->off = (int)off;
+                        dict_put(ctx->value_to_off, c251_key(ins->dest), oi);
+                        /* 基址物化 (不含 off)：wr 已含 #sym */
+                        break;
+                    }
                     if (off != 0) {
                         char imm[32]; snprintf(imm, sizeof(imm), "#%ld", off & 0xFFFF);
                         isel_emit(isel, "ADD", wbuf, imm);

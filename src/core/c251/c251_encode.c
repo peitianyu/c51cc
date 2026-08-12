@@ -98,6 +98,22 @@ static int parse_indirect_wr(const char *s) {
     return (int)v;
 }
 
+/* @WRn+off → WR 索引 + 偏移（Keil 位移寻址 MOV @WRj+dis16,Rm）; 无 + 返回 0 偏移 */
+static int parse_indirect_wr_off(const char *s, int *off) {
+    if (off) *off = 0;
+    if (!s || s[0] != '@' || s[1] != 'W' || s[2] != 'R') return -1;
+    char *end; long v = strtol(s + 3, &end, 10);
+    if (v < 0 || v > 30 || (v % 2) != 0) return -1;
+    if (*end == '\0') return -1;   /* 无偏移: 普通 @WRj (非位移寻址, 交普通分支) */
+    if (*end == '+' || *end == '-') {
+        long o = strtol(end, &end, 10);
+        if (*end != '\0') return -1;
+        if (off) *off = (int)o;
+        return (int)v;
+    }
+    return -1;
+}
+
 /* @DRn → DR 索引（24 位间接地址寄存器，far 指针访问），失败返回 -1 */
 static int parse_indirect_dr(const char *s) {
     if (!s || s[0] != '@' || s[1] != 'D' || s[2] != 'R') return -1;
@@ -453,6 +469,18 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
             }
             return -1;
         }
+        /* @WRj+dis16 间接目标 (Keil 位移寻址): MOV @WRj+dis16,Rm = 19 (m<<4|j/2) hi lo */
+        int off1 = 0;
+        int indo1 = parse_indirect_wr_off(a1, &off1);
+        if (indo1 >= 0) {
+            int r2 = parse_reg(a2, &w2);
+            if (r2 >= 0 && !w2 && r2 <= 15) {
+                emit4(st, 0x19, (unsigned char)((r2 << 4) | (indo1 / 2)),
+                      (unsigned char)((off1 >> 8) & 0xFF), (unsigned char)(off1 & 0xFF));
+                return 0;
+            }
+            return -1;
+        }
         /* @WRj 间接目标: MOV @WRk,src (7A (k/2)A (src/2)0, decode_impl.inc case 0x9/0xA) */
         int ind1 = parse_indirect_wr(a1);
         if (ind1 >= 0) {
@@ -465,6 +493,18 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
             if (r2 >= 0 && !w2) {
                 emit3(st, 0x7A, (unsigned char)(((ind1 / 2) << 4) | 0x9),
                       (unsigned char)(r2 << 4));
+                return 0;
+            }
+            return -1;
+        }
+        /* @WRj+dis16 间接源: MOV Rm,@WRj+dis16 = 09 (m<<4|j/2) hi lo */
+        int off2 = 0;
+        int indo2 = parse_indirect_wr_off(a2, &off2);
+        if (indo2 >= 0) {
+            int r1b = parse_reg(a1, &w1);
+            if (r1b >= 0 && !w1 && r1b <= 15) {
+                emit4(st, 0x09, (unsigned char)((r1b << 4) | (indo2 / 2)),
+                      (unsigned char)((off2 >> 8) & 0xFF), (unsigned char)(off2 & 0xFF));
                 return 0;
             }
             return -1;
