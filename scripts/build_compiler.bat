@@ -14,7 +14,10 @@ set SRCS=%ROOT%\src\main.c
 for %%f in (%ROOT%\src\core\*.c) do set SRCS=!SRCS! %%f
 
 if /i "%OUT%"=="c251cc.exe" (
-    for %%f in (%ROOT%\src\core\c251\*.c) do set SRCS=!SRCS! %%f
+    for %%f in (%ROOT%\src\core\c251\*.c) do (
+        REM c251_libc.c 是系统库源码 (供 c251cc 编译消费), 不链接进编译器二进制
+        if /i not "%%~nxf"=="c251_libc.c" set SRCS=!SRCS! %%f
+    )
     set EXTRA=-DC251CC_BUILD
 ) else (
     for %%f in (%ROOT%\src\core\c51\*.c) do set SRCS=!SRCS! %%f

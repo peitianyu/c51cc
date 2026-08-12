@@ -125,6 +125,11 @@ typedef struct SSABuild {
     /* 已取地址的局部变量集合：取地址后值可被指针写改变，
      * 后续 read 必须走内存 load 而非 var_map SSA 值 (0005-ifstmt 根因)。 */
     Dict        *taken_addr;   /* char* 变量名 -> int* 1 */
+
+    /* 延迟的 trivial phi 替换 (0042-prime/0041-queen 悬空值根因):
+     * phi 的 use 可能在其 seal 之后才发射, 立即 replace_uses 会漏掉
+     * 后续指令 → 引用已 NOP 的 phi dest → 死循环。函数构建完成后统一应用。 */
+    List        *pending_replace; /* PendingReplace* 列表 */
 } SSABuild;
 
 /* ============================================================

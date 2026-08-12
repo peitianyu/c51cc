@@ -69,8 +69,13 @@ static void read_func_ptr_params(void);
 static Ast *read_switch_case_stmt(void);
 static Ast *read_switch_default_stmt(void);
 
+/* 匿名 union 分组计数器: 每个匿名 union 一个唯一组号 (bit_offset 存负值),
+ * 布局时同组共享偏移 (重叠), 不同组/普通字段顺序推进 (0047/0051 嵌套场景) */
+static int anon_union_group_seq = 0;
+
 void parser_reset(void)
 {
+    anon_union_group_seq = 0;
     globalenv = make_dict(parser_empty_dict);
     struct_defs = make_dict(parser_empty_dict);
     union_defs = make_dict(parser_empty_dict);
@@ -1736,6 +1741,8 @@ static Dict *read_struct_union_fields(bool is_struct_type)
          *   匿名 union   (0051-inits):   成员共享同一偏移 (重叠) */
         if (is_punct(name, ';') && ctype->type == CTYPE_STRUCT) {
             Dict *inner = ctype->fields;
+            /* 匿名 union: 整个组一个组号 (每个成员 bit_offset 相同) */
+            int ugid = ctype->is_union ? -(++anon_union_group_seq) : 0;
             if (inner) {
                 for (Iter fi = list_iter(inner->list); !iter_end(fi);) {
                     DictEntry *e = iter_next(&fi);
@@ -1743,10 +1750,9 @@ static Dict *read_struct_union_fields(bool is_struct_type)
                     if (field) {
                         Ctype *fcopy = malloc(sizeof(Ctype));
                         memcpy(fcopy, field, sizeof(Ctype));
-                        /* 匿名 union 成员标记: 布局循环按哨兵共享偏移 */
                         if (ctype->is_union) {
                             fcopy->offset = 0;
-                            fcopy->bit_offset = -1;  /* 普通字段 bit_offset>=0 */
+                            fcopy->bit_offset = ugid;  /* 布局循环同组共享偏移 */
                         }
                         dict_put(r, e->key, fcopy);
                     }
@@ -1867,30 +1873,34 @@ static Ctype *read_struct_def(void)
     int offset = 0;
     Iter i = list_iter(dict_values(fields));
     Ctype *fieldtype = NULL;
+    int cur_gid = 0;      /* 当前匿名 union 组号 (0 = 无) */
     int union_max = 0;
-    bool in_union = false;
     for (; !iter_end(i);) {
         fieldtype = iter_next(&i);
-        /* 匿名 union 成员 (bit_offset==-1): 共享当前 offset, 重叠布局 (0051-inits) */
-        if (fieldtype->bit_offset == -1) {
-            if (!in_union) {
+        /* 匿名 union 成员: bit_offset<0, 组号 = -(bit_offset);
+         * 同组共享当前 offset (重叠), 组结束按最大成员推进 (0047/0051) */
+        int gid = (fieldtype->bit_offset < 0) ? -(fieldtype->bit_offset) : 0;
+        if (gid != 0) {
+            if (cur_gid != gid) {
+                if (cur_gid) offset += union_max;
+                union_max = 0;
                 int sz = (fieldtype->size < MAX_ALIGN) ? fieldtype->size : MAX_ALIGN;
                 if (sz > 0 && offset % sz != 0)
                     offset += sz - offset % sz;
-                in_union = true;
+                cur_gid = gid;
             }
             fieldtype->offset = offset;
             if (fieldtype->size > union_max) union_max = fieldtype->size;
             continue;
         }
-        if (in_union) { offset += union_max; union_max = 0; in_union = false; }
+        if (cur_gid) { offset += union_max; union_max = 0; cur_gid = 0; }
         int size = (fieldtype->size < MAX_ALIGN) ? fieldtype->size : MAX_ALIGN;
         if (size > 0 && offset % size != 0)
             offset += size - offset % size;
         fieldtype->offset = offset;
         offset += fieldtype->size;
     }
-    if (in_union) offset += union_max;
+    if (cur_gid) offset += union_max;
     if (fieldtype && fieldtype->bit_size) {
         offset = (fieldtype->bit_offset+fieldtype->bit_size)/8;
         if((fieldtype->bit_offset+fieldtype->bit_size)%8) offset++;

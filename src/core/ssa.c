@@ -15,6 +15,11 @@ typedef struct CFContext {
     struct CFContext *parent;
 } CFContext;
 
+typedef struct {
+    ValueName old_val;
+    ValueName new_val;
+} PendingReplace;
+
 static Dict *current_label_blocks = NULL;
 
 static void* ssa_alloc(size_t size) {
@@ -213,7 +218,7 @@ static ValueName ssa_add_phi_operands(SSABuild *b, const char *var, Instr *phi, 
         b->cur_block = saved;
         
         // 如果读取到了 phi 节点自身，说明这个前驱在循环中还未定义该变量
-        // 跳过这个前驱，不添加其操作数
+        // 跳过这个前驱，不添加其操作数 (误删会引入自引用边 → 优化器误判)
         if (val == phi->dest) {
             continue;
         }
@@ -280,6 +285,14 @@ static ValueName ssa_try_remove_trivial_phi(SSABuild *b, Instr *phi) {
     }
     
     if (has_same) {
+        /* 记录延迟替换: phi 的 use 可能在其 seal 之后才发射, 立即 replace_uses
+         * 会漏掉后续指令 → 引用已 NOP 的 phi dest (0042-prime 悬空值死循环) */
+        if (b->pending_replace) {
+            PendingReplace *pr = ssa_alloc(sizeof(PendingReplace));
+            pr->old_val = phi->dest;
+            pr->new_val = same;
+            list_push(b->pending_replace, pr);
+        }
         replace_uses(b, phi->dest, same);
         phi->op = IROP_NOP;
         /* 必须清掉 phi 的标签/操作数: phi 的 labels 是前驱块标签,
@@ -301,14 +314,43 @@ static void ssa_build_seal(SSABuild *b, Block *blk) {
     for (Iter it = list_iter(blk->incomplete); !iter_end(it);) {
         IncompletePhi *inc = iter_next(&it);
         
+        bool found = false;
         for (Iter jt = list_iter(blk->phis); !iter_end(jt);) {
             Instr *phi = iter_next(&jt);
             if (phi->dest == inc->phi && phi->args->len == 0) {
-                ssa_add_phi_operands(b, inc->var, phi, blk);
+                ValueName resolved = ssa_add_phi_operands(b, inc->var, phi, blk);
+                /* 同步 var_map (仅当仍指向 phi 时): do-while 等结构中块内可能
+                 * 已有更新的写 (0008-dowhilestmt: b1 内 x=x-1 写 v4, phi 是 v2),
+                 * 盲目覆盖会把新值打回 phi → ret 读到旧值 */
+                ValueName *cur = dict_get(blk->var_map, (char *)inc->var);
+                if (cur && *cur == phi->dest) {
+                    *cur = resolved;
+                }
+                found = true;
                 break;
             }
         }
     }
+}
+
+static void ssa_apply_pending_replacements(SSABuild *b) {
+    if (!b || !b->pending_replace || b->pending_replace->len == 0) return;
+    for (Iter it = list_iter(b->pending_replace); !iter_end(it);) {
+        PendingReplace *pr = iter_next(&it);
+        replace_uses(b, pr->old_val, pr->new_val);
+        /* 同步修正所有块 var_map: 后续读取经 var_map 拿到已解析值 */
+        for (Iter jt = list_iter(b->cur_func->blocks); !iter_end(jt);) {
+            Block *blk = iter_next(&jt);
+            if (!blk->var_map) continue;
+            for (Iter kt = list_iter(blk->var_map->list); !iter_end(kt);) {
+                DictEntry *e = iter_next(&kt);
+                if (!e || !e->val) continue;
+                if (*(ValueName *)e->val == pr->old_val)
+                    *(ValueName *)e->val = pr->new_val;
+            }
+        }
+    }
+    list_clear(b->pending_replace);
 }
 
 static void ssa_build_push_cf(SSABuild *b, Block *brk, Block *cont) {
@@ -342,6 +384,7 @@ SSABuild* ssa_build_create(void) {
     b->unit->globals = make_list();
     b->unit->asm_blocks = make_list();
     b->taken_addr = make_dict(NULL);
+    b->pending_replace = make_list();
     return b;
 }
 
@@ -1143,6 +1186,14 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         if (ast->ctype && ast->ctype->type == CTYPE_ARRAY) {
             return ssa_build_addr(b, ast->varname, ast->ctype);
         }
+        /* 数组衰减: parser 将 `int *p = arr` 的节点降级为指针类型,
+         * 但变量本身是数组 (stack_offsets 只登记数组/结构) — 取地址而非读值
+         * (48_ptr_arith/局部数组 根因: 衰减后读首元素当指针) */
+        if (ast->ctype && ast->ctype->type == CTYPE_PTR &&
+            b->cur_func && b->cur_func->stack_offsets &&
+            dict_get(b->cur_func->stack_offsets, (char*)ast->varname)) {
+            return ssa_build_addr(b, ast->varname, ast->ctype);
+        }
         /* volatile 局部变量: 每次读取强制走内存 (IROP_LOAD),
          * 不能走 var_map 的 SSA 值 (会被常量折叠/寄存器化, 违反 volatile 语义) */
         if (ast->ctype && get_attr(ast->ctype->attr).ctype_volatile) {
@@ -1159,7 +1210,12 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
     }
 
     case AST_GVAR: {
-        if (ast->ctype && ast->ctype->type == CTYPE_ARRAY) {
+        /* 数组衰减: parser 将 `int *p = g_arr` 的节点降级为指针类型,
+         * 但全局声明仍是数组 — 按声明类型取地址 (48_ptr_arith 根因) */
+        GlobalVar *gv = (b->unit && ast->varname)
+                            ? ssa_find_global(b->unit, ast->varname) : NULL;
+        if (ast->ctype && ast->ctype->type == CTYPE_ARRAY ||
+            (gv && gv->type && gv->type->type == CTYPE_ARRAY)) {
             return ssa_build_addr(b, ast->varname, ast->ctype);
         }
         ValueName addr = ssa_build_addr(b, ast->varname, ast->ctype);
@@ -2278,6 +2334,9 @@ static void gen_func(SSABuild *b, Ast *ast) {
         Block *blk = iter_next(&it);
         ssa_build_seal(b, blk);
     }
+    /* 所有块已发射/密封完毕: 统一应用延迟的 trivial phi 替换
+     * (0042-prime 悬空值根因 — 补 seal 时已发射指令的引用) */
+    ssa_apply_pending_replacements(b);
     
     // 只在当前块不为空或有前驱时才添加默认ret
     // 避免在死块（如if语句的merge块）中添加不必要的ret
