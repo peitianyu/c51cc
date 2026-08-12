@@ -98,6 +98,14 @@ static int parse_indirect_wr(const char *s) {
     return (int)v;
 }
 
+/* @DRn → DR 索引（24 位间接地址寄存器，far 指针访问），失败返回 -1 */
+static int parse_indirect_dr(const char *s) {
+    if (!s || s[0] != '@' || s[1] != 'D' || s[2] != 'R') return -1;
+    char *end; long v = strtol(s + 3, &end, 10);
+    if (*end != '\0' || v < 0 || v > 12 || (v % 4) != 0) return -1;
+    return (int)v;
+}
+
 /* #imm / #0xHH 解析；base 0 失败（如 isel 硬编码的 #FFFF 无 0x 前缀）→ base 16 重试。
  * 失败返回 0 且 *ok=0 */
 static long parse_imm(const char *s, int *ok) {
@@ -403,6 +411,40 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
                 int r1 = parse_reg(a1, &w1);
                 if (r1 >= 0 && !w1) { emit2(st, 0xF8 | (unsigned char)r1, 0x00); return 0; }
             }
+        }
+        /* @DRk 间接目标 (far 指针写): MOV @DRk,Rm = 7A (k/4)B (m)0;
+         * MOV @DRk,WRj = 7E (k/4)1A (j/2)0 (decode inc_dec_short sel2, b1&2) */
+        int indd1 = parse_indirect_dr(a1);
+        if (indd1 >= 0) {
+            int r2 = parse_reg(a2, &w2);
+            if (r2 >= 0 && w2) {
+                emit3(st, 0x7E, (unsigned char)(((indd1 / 4) << 4) | 0x1A),
+                      (unsigned char)((r2 / 2) << 4));
+                return 0;
+            }
+            if (r2 >= 0 && !w2) {
+                emit3(st, 0x7A, (unsigned char)(((indd1 / 4) << 4) | 0xB),
+                      (unsigned char)(r2 << 4));
+                return 0;
+            }
+            return -1;
+        }
+        /* @DRk 间接源 (far 指针读): MOV Rm,@DRk = 7E (k/4)B (m)0;
+         * MOV WRj,@DRk = 7E (k/4)0A (j/2)0 */
+        int indd2 = parse_indirect_dr(a2);
+        if (indd2 >= 0) {
+            int r1b = parse_reg(a1, &w1);
+            if (r1b >= 0 && w1) {
+                emit3(st, 0x7E, (unsigned char)(((indd2 / 4) << 4) | 0x0A),
+                      (unsigned char)((r1b / 2) << 4));
+                return 0;
+            }
+            if (r1b >= 0 && !w1) {
+                emit3(st, 0x7E, (unsigned char)(((indd2 / 4) << 4) | 0xB),
+                      (unsigned char)(r1b << 4));
+                return 0;
+            }
+            return -1;
         }
         /* @WRj 间接目标: MOV @WRk,src (7A (k/2)A (src/2)0, decode_impl.inc case 0x9/0xA) */
         int ind1 = parse_indirect_wr(a1);

@@ -2009,6 +2009,7 @@ static int read_decl_ctype_attr(Token tok, int *attr_out) {
     else if (is_ident(tok, "xdata"))    { attr.c_attr.ctype_data = 4; }
     else if (is_ident(tok, "edata"))    { attr.c_attr.ctype_data = 5; }
     else if (is_ident(tok, "code"))     { attr.c_attr.ctype_data = 6; }
+    else if (is_ident(tok, "far"))      { attr.c_attr.ctype_data = 7; }
     *attr_out |= attr.i_attr;
     return attr.i_attr;
 }
@@ -2051,10 +2052,24 @@ static Ctype *read_decl_spec(void)
         tok = read_token();
         if (!is_punct(tok, '*')) {
             while(read_decl_ctype_attr(tok, &attr)) tok = read_token();
+            /* 属性循环可能消费到紧随属性的 '*' (如 `volatile *`/`far *`)：
+             * 此时 tok 已是 '*'（已读出未 unget），直接进指针层，避免上层 expect(')')
+             * 遇到未消费的 '*' 报错 (77_far_mem cast 解析)。 */
+            if (is_punct(tok, '*')) {
+                if (attr) ctype = clone_ctype_with_attr(ctype, attr);
+                ctype = make_ptr_type(ctype);
+                attr = 0;
+                continue;
+            }
             unget_token(tok);
             return clone_ctype_with_attr(ctype, attr);
         }
+        /* C 语义: `unsigned char *` 的限定符修饰【被指向类型】。
+         * 下推累积属性 (unsigned/volatile/far 等) 到 ctype, 指针类型继承。
+         * 否则解引用 *p 的类型是 signed char (77_far_mem u8 读写回错)。 */
+        if (attr) ctype = clone_ctype_with_attr(ctype, attr);
         ctype = make_ptr_type(ctype);
+        attr = 0;
     }
 }
 

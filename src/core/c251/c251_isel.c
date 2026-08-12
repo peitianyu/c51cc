@@ -609,6 +609,94 @@ static bool value_decl_unsigned(C251GenContext *ctx, ValueName v) {
     return false;
 }
 
+/* ============================================================
+ * far 指针 (Keil XSMALL+Source 通用指针, ctype_data==7)
+ * 访问: 24 位地址 (空间字节<<16 | 低16位) 装 DRk → MOV Rm,@DRk / MOV @DRk,Rm
+ * Keil 参考 (k77.LST): MOV WR6,#0FE10H; MOV WR4,#07EH; MOV @DR4,R11
+ *   DR4 = 0x007EFE10 → @DR4 低 24 位 = 0x7EFE10 → sim251 ld_far8 路由
+ * ============================================================ */
+static bool is_far_ptr(C251GenContext *ctx, ValueName v) {
+    if (v < 0) return false;
+    char *k = c251_key(v);
+    Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
+    free(k);
+    if (!t || t->type != CTYPE_PTR) return false;
+    return get_attr(t->attr).ctype_data == 7;
+}
+
+/* 选 far 访问的 DRk (k=0/4): 需要 (WRk, WRk+2) 对空闲/可回收; avoid_wr 避开。
+ * 返回 k; 兜底强制溢出对中活值。 */
+static int alloc_far_dr(ISelContext* isel, int avoid_wr) {
+    int pairs[2][2] = { {4, 6}, {0, 2} };
+    for (int c = 0; c < 2; c++) {
+        int a = pairs[c][0], b = pairs[c][1];
+        if (a == avoid_wr || b == avoid_wr) continue;
+        if (isel->reg_val[a/2] < 0 && isel->reg_val[b/2] < 0) return a;
+    }
+    for (int c = 0; c < 2; c++) {
+        int a = pairs[c][0], b = pairs[c][1];
+        if (a == avoid_wr || b == avoid_wr) continue;
+        if (isel->reg_val[a/2] < 0 && isel->reg_val[b/2] >= 0
+            && !value_still_used(isel, isel->reg_val[b/2], isel->block_instr_pos)) return a;
+        if (isel->reg_val[b/2] < 0 && isel->reg_val[a/2] >= 0
+            && !value_still_used(isel, isel->reg_val[a/2], isel->block_instr_pos)) return a;
+    }
+    /* 强制溢出: 选第一对 (a,b), spill 其中活值 */
+    for (int c = 0; c < 2; c++) {
+        int a = pairs[c][0], b = pairs[c][1];
+        if (a == avoid_wr || b == avoid_wr) continue;
+        for (int i = 0; i < 2; i++) {
+            int w = (i == 0) ? a : b;
+            ValueName rv = isel->reg_val[w/2];
+            if (rv >= 0) {
+                char *sp = c251_alloc_spill(isel->ctx, rv);
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
+                isel_emit(isel, "MOV", sp, wbuf);
+                char *k2 = c251_key(rv);
+                dict_remove(isel->ctx->value_to_reg, k2); free(k2);
+                isel->reg_val[w/2] = -1;
+            }
+        }
+        return a;
+    }
+    return 4;
+}
+
+/* 装载 far 地址到 DRk (返回 k): 常量 (INTTOPTR 0x7efe10 → 低 16 位 + 空间字节) */
+static int load_far_addr(ISelContext* isel, ValueName ptr, int avoid_wr) {
+    int k = alloc_far_dr(isel, avoid_wr);
+    char wlo[16]; wr_name(wlo, sizeof(wlo), k + 2);
+    char whi[16]; wr_name(whi, sizeof(whi), k);
+    int64_t *cv = NULL;
+    if (ptr >= 0) {
+        char *kk = c251_key(ptr);
+        cv = (int64_t*)dict_get(isel->ctx->value_to_const, kk);
+        free(kk);
+    }
+    if (cv) {
+        unsigned long v = (unsigned long)*cv;
+        char ilo[32]; snprintf(ilo, sizeof(ilo), "#0x%04lX", v & 0xFFFF);
+        char isp[32]; snprintf(isp, sizeof(isp), "#0x%02lX", (v >> 16) & 0xFF);
+        isel_emit(isel, "MOV", wlo, ilo);   /* 低 16 位地址 → WR(k+2) */
+        isel_emit(isel, "MOV", whi, isp);   /* 空间字节 (0x00XX) → WRk → R(k+1) */
+    } else {
+        fprintf(stderr, "c251 isel: far 非常量指针暂不支持 (v%d)\n", ptr);
+        isel_emit(isel, "MOV", wlo, "#0");
+        isel_emit(isel, "MOV", whi, "#0");
+    }
+    /* DRk 占用 (WRk, WRk+2): 解除寄存器绑定, 防后续 load 读坏值 */
+    for (int i = 0; i < 2; i++) {
+        int w = (i == 0) ? k : k + 2;
+        ValueName rv = isel->reg_val[w/2];
+        if (rv >= 0) {
+            char *kk = c251_key(rv);
+            dict_remove(isel->ctx->value_to_reg, kk); free(kk);
+            isel->reg_val[w/2] = -1;
+        }
+    }
+    return k;
+}
+
 /* 全局符号字节数（sym_size dict；未知默认 2——spill 槽即 2B） */
 static int sym_size_of(C251GenContext *ctx, const char *sym) {
     if (sym && ctx->sym_size) {
@@ -1554,6 +1642,28 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 isel_emit(isel, "MOV", sp, tbuf);
             }
         } else {
+            /* far 指针 (ctype_data==7): @DRk 间接读 (24 位地址, Keil 布局) */
+            if (is_far_ptr(ctx, ptr)) {
+                int k = load_far_addr(isel, ptr, wr);
+                int lo = (wr >= 0) ? wr : isel_temp_wr(isel, k, k + 2);
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);
+                char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", lo + 1);
+                char ind[32]; snprintf(ind, sizeof(ind), "@DR%d", k);
+                if (msz <= 1) {
+                    isel_emit(isel, "MOV", rbuf, ind);   /* 8 位 far 读 */
+                    if (!msign)
+                        isel_emit(isel, "MOVZ", wbuf, rbuf);
+                    else
+                        isel_emit(isel, "MOVS", wbuf, rbuf);
+                } else {
+                    isel_emit(isel, "MOV", wbuf, ind);   /* 16 位 far 读 */
+                }
+                if (wr < 0) {
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, wbuf);
+                }
+                break;
+            }
             /* 指针间接读: ptr 值 → WRk（16 位 EDATA 地址）→ MOV WRj,@WRk */
             int addr_wr = isel_temp_wr(isel, wr, -1);
             if (load_value_to_wr(isel, ptr, addr_wr) < 0) {
@@ -1692,6 +1802,31 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             }
         }
         if (!sym) {
+            /* far 指针 (ctype_data==7): @DRk 间接写 (24 位地址, Keil 布局)。
+             * 先物化值到寄存器 (避开 DRk 对), 再装地址, 最后 MOV @DRk,Rm。 */
+            if (is_far_ptr(ctx, ptr)) {
+                int dsz2 = (ins->mem_type && ins->mem_type->size <= 1) ? 1 : 2;
+                int r = isel_value_reg(ctx, val);
+                int tmp = -1;
+                if (r < 0) {
+                    tmp = isel_temp_wr(isel, -1, -1);
+                    if (load_value_to_wr(isel, val, tmp) < 0) {
+                        fprintf(stderr, "c251 isel: far STORE 值未物化 (v%d)\n", val);
+                        break;
+                    }
+                    r = tmp;
+                }
+                int k = load_far_addr(isel, ptr, r);
+                char ind[32]; snprintf(ind, sizeof(ind), "@DR%d", k);
+                if (dsz2 <= 1) {
+                    char rlo[16]; snprintf(rlo, sizeof(rlo), "R%d", r + 1);
+                    isel_emit(isel, "MOV", ind, rlo);   /* 8 位 far 写 */
+                } else {
+                    char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+                    isel_emit(isel, "MOV", ind, rbuf);  /* 16 位 far 写 */
+                }
+                break;
+            }
             /* 指针间接写: ptr 值 → WRk（16 位 EDATA 地址）→ 值 → MOV @WRk,WRj。
              * 写宽度按【目标内存类型】mem_type（u8 元素 → 8 位写低字节 R(t+1)），
              * 而非值宽度（`g_buf[i] = a+11` 的 RHS 是 int 16 位, 目标 u8 → 8 位写, 否则越界写邻居）。 */
@@ -1900,6 +2035,17 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
          * dest 独立寄存器/槽，避免与 src 共享寄存器导致死值释放冲突 */
         ValueName s = src1_of(ins);
         if (s < 0) break;
+        /* INTTOPTR 常量透传: (u8 volatile far *)0x7efe10 的 24 位地址必须完整保留
+         * （load_far_addr 从 value_to_const[dest] 取完整值; 16 位截断会丢空间字节） */
+        if (ins->op == IROP_INTTOPTR) {
+            char *kk = c251_key(s);
+            int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, kk);
+            free(kk);
+            if (cv && ins->dest >= 0) {
+                int64_t *nv = malloc(sizeof(int64_t)); *nv = *cv;
+                dict_put(ctx->value_to_const, c251_key(ins->dest), nv);
+            }
+        }
         int wr = isel_alloc_wr(isel, ins->dest);
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
