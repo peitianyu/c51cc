@@ -1247,8 +1247,39 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
          * 4) 返回值物化 (u8→A, u16→WR6) */
         const char *fname = (ins->labels && list_len(ins->labels) > 0)
             ? (const char*)list_get(ins->labels, 0) : NULL;
-        if (!fname || strcmp(fname, "indirect") == 0) {
-            fprintf(stderr, "c251 isel: 间接调用 (函数指针) M2.5 支持\n");
+        /* 间接调用: call *ptr @<indirect>() → labels 中含 "indirect" */
+        int is_indirect = 0;
+        if (ins->labels) {
+            for (int i = 0; i < (int)list_len(ins->labels); i++) {
+                const char *l = (const char*)list_get(ins->labels, i);
+                if (l && strcmp(l, "indirect") == 0) { is_indirect = 1; break; }
+            }
+        }
+        if (!fname || is_indirect) {
+            /* 间接调用: call *ptr @indirect() → LCALL @WRj (0089-fptr) */
+            ValueName fptr = ins->args && list_len(ins->args) > 0
+                ? *(ValueName*)list_get(ins->args, 0) : 0;
+            if (fptr > 0) {
+                int wr = isel_temp_wr(isel, -1, -1);
+                if (load_value_to_wr(isel, fptr, wr) == 0) {
+                    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+                    char ind[32]; snprintf(ind, sizeof(ind), "@%s", wbuf);
+                    isel_emit(isel, "LCALL", ind, NULL);
+                } else {
+                    fprintf(stderr, "c251 isel: 间接调用 指针值无法装载 (v%d)\n", fptr);
+                }
+            } else {
+                fprintf(stderr, "c251 isel: 间接调用 M2.5 支持\n");
+            }
+            /* 返回值: u16 → WR6 */
+            if (ins->dest > 0) {
+                int dw = isel_alloc_wr(isel, ins->dest);
+                if (dw >= 0 && dw != 6) {
+                    char db[16]; wr_name(db, sizeof(db), dw);
+                    isel_emit(isel, "MOV", db, "WR6");
+                }
+                /* dw==6: 返回值已在 WR6 */
+            }
             break;
         }
         int nargs = ins->args ? (int)list_len(ins->args) : 0;

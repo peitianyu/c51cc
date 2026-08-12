@@ -650,6 +650,7 @@ static void ensure_lvalue(Ast *ast)
     case AST_DEREF:
     case AST_STRUCT_REF:
     case AST_FUNC_DECL:  /* &func_ptr: 函数地址是左值 (0097-tentative) */
+    case AST_FUNC_DEF:   /* &zero: 已定义函数 (0091-fptr) */
         return;
     default:
         error("lvalue expected, but got %s", ast_to_string(ast));
@@ -1369,16 +1370,9 @@ static Ast *read_postfix_expr_tail(Ast *ast)
             continue;
         }
         if (is_punct(tok, '(')) {
-            if (ast->type == AST_DEREF && ast->operand &&
-                ast->operand->ctype && ast->operand->ctype->type == CTYPE_PTR) {
-                Ast *func_ptr = ast->operand;
-                if (func_ptr->type == AST_LVAR || func_ptr->type == AST_GVAR) {
-                    ast = read_func_args(func_ptr->varname, func_ptr);
-                    continue;
-                }
-            }
-            unget_token(tok);
-            return ast;
+            /* 函数调用: v.fptr() / (*fp)() 等 (0089-fptr) */
+            ast = read_func_args("<indirect>", ast);
+            continue;
         }
         if (is_punct(tok, PUNCT_INC) || is_punct(tok, PUNCT_DEC)) {
             ensure_lvalue(ast);
@@ -2789,20 +2783,27 @@ static Ast *read_decl_or_func_def(void)
     if (is_punct(tok1, '(')) {
         Token next_tok = read_token();
         if (is_punct(next_tok, '*')) {
-            // typedef函数指针: typedef type (*name)(params);
+            // type (*name)(params) — typedef 或普通变量声明 (0089/90-fptr)
             Token name_tok = read_token();
             if (get_ttype(name_tok) != TTYPE_IDENT)
-                error("Identifier expected in typedef function pointer, but got %s", token_to_string(name_tok));
+                error("Identifier expected in function pointer, but got %s", token_to_string(name_tok));
             ident = get_ident(name_tok);
             expect(')');
             expect('(');
             read_func_ptr_params();
             // 创建函数指针类型
-            ctype = make_ptr_type(ctype);
-            // 继续处理typedef
+            Ctype *fptr_type = make_ptr_type(ctype);
+            /* 非 typedef：普通全局变量声明 */
+            Token next = peek_token();
+            if (!is_punct(next, ';')) {
+                fptr_type = read_array_dimensions(fptr_type);
+                Ast *var = ast_gvar(fptr_type, ident, false);
+                return read_decl_init(var);
+            }
+            /* typedef */
             expect(';');
-            dict_put(typedefenv, ident, ctype);
-            return ast_typedef(ctype, ident);
+            dict_put(typedefenv, ident, fptr_type);
+            return ast_typedef(fptr_type, ident);
         } else {
             unget_token(next_tok);
             unget_token(tok1);

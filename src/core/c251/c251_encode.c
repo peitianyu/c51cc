@@ -196,6 +196,7 @@ static int is_symbol_arg(const char *s) {
     if (!s || s[0] == '\0' || s[0] == '#') return 0;
     if (s[0] == 'R' && s[1] >= '0' && s[1] <= '7' && s[2] == '\0') return 0;
     if (s[0] == 'W' && s[1] == 'R') return 0;
+    if (s[0] == '@' && s[1] == 'W' && s[2] == 'R') return 0;  /* @WRj 间接 */
     char *end; strtol(s, &end, 0);
     if (*end == '\0' && end != s) return 0;  /* 纯数字字面量 */
     return 1;
@@ -264,6 +265,14 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
             fx->symbol = strdup(tgt);
             list_push(st->absfixups, fx);
             return 0;
+        }
+        /* @WRj 间接调用 (0089-fptr) */
+        if (tgt && tgt[0] == '@') {
+            int w = parse_indirect_wr(tgt);
+            if (w >= 0) {
+                emit2(st, 0x99, (unsigned char)(((w / 2) << 4)));
+                return 0;
+            }
         }
         return -1;
     }
