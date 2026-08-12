@@ -787,9 +787,33 @@ static long pp_parse_logor(PPExprLexer *lx)
     return v;
 }
 
+/* 三元运算符: cond ? true_expr : false_expr */
+static long pp_parse_ternary(PPExprLexer *lx) {
+    long cond = pp_parse_logor(lx);
+    if (pp_tok_is_op(lx, "?")) {
+        pp_expr_next(lx);
+        long t = pp_parse_ternary(lx);  /* 右结合 */
+        if (!pp_tok_is_op(lx, ":")) error("Expected ':' in #if expression");
+        pp_expr_next(lx);
+        long f = pp_parse_ternary(lx);
+        return cond ? t : f;
+    }
+    return cond;
+}
+
+/* 逗号运算符: 求值左侧并丢弃, 返回右侧 */
+static long pp_parse_comma(PPExprLexer *lx) {
+    long v = pp_parse_ternary(lx);
+    while (pp_tok_is_op(lx, ",")) {
+        pp_expr_next(lx);
+        v = pp_parse_ternary(lx);
+    }
+    return v;
+}
+
 static long pp_parse_expr(PPExprLexer *lx)
 {
-    return pp_parse_logor(lx);
+    return pp_parse_comma(lx);
 }
 
 static List *clone_expanding_with(List *expanding, const char *add)

@@ -2974,6 +2974,19 @@ void ssa_print(FILE *fp, SSAUnit *unit) {
                             fprintf(fp, "0x%02X", g->init_instr->imm.blob.bytes[i]);
                         }
                         fprintf(fp, "}");
+                        /* 指针字段地址重定位: 仿真器需要知道 blob 内偏移对应哪个符号
+                         * (struct {int a; int *p;} s = {.p = &x}) — 否则 blob 中的
+                         * 指针值只能猜 0, 与后端实际重定位后的结果不一致 */
+                        if (g->init_instr->imm.blob.relocs &&
+                            g->init_instr->imm.blob.relocs->len > 0) {
+                            fprintf(fp, " ; relocs:");
+                            for (int r = 0; r < g->init_instr->imm.blob.relocs->len; ++r) {
+                                InitReloc *rel = (InitReloc *)list_get(
+                                    g->init_instr->imm.blob.relocs, r);
+                                if (!rel) continue;
+                                fprintf(fp, " +%d=@%s", rel->offset, rel->symbol);
+                            }
+                        }
                     }
                 } else {
                     fprintf(fp, " = %ld", g->init_value);

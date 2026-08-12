@@ -1035,7 +1035,19 @@ static Ast *read_prim(void)
     case TTYPE_CHAR:
         return ast_inttype(ctype_char, get_char(tok));
     case TTYPE_STRING: {
-        Ast *r = ast_string(get_strtok(tok));
+        /* 多字符串拼接: "abc" "def" → "abcdef" (0059-multistring) */
+        char *str = get_strtok(tok);
+        while (get_ttype(peek_token()) == TTYPE_STRING) {
+            Token t2 = read_token();
+            int l1 = (int)strlen(str);
+            char *s2 = get_strtok(t2);
+            int l2 = (int)strlen(s2);
+            char *cat = malloc((size_t)(l1 + l2 + 1));
+            memcpy(cat, str, (size_t)l1);
+            memcpy(cat + l1, s2, (size_t)(l2 + 1));
+            str = cat;
+        }
+        Ast *r = ast_string(str);
         list_push(strings, r);
         return r;
     }
@@ -1945,8 +1957,16 @@ static Ctype *read_decl_spec(void)
     if (!ctype && get_ttype(tok) == TTYPE_IDENT && !get_attr(attr).ctype_typedef) 
         ctype = dict_get(typedefenv, get_ident(tok));
 
-    if (!ctype) 
-        error("Type expected, but got %s", token_to_string(tok));
+    if (!ctype) {
+        /* 隐式 int 返回类型 (C89): main() { } 无类型声明时默认 int。
+         * tok 是标识符且非 typedef → 默认 int (0026-implicitret) */
+        if (get_ttype(tok) == TTYPE_IDENT && !dict_get(typedefenv, get_ident(tok))) {
+            unget_token(tok);
+            ctype = clone_ctype_with_attr(ctype_int, attr);
+        } else {
+            error("Type expected, but got %s", token_to_string(tok));
+        }
+    }
         
     while (1) {
         tok = read_token();
@@ -2728,6 +2748,8 @@ static Ast *read_decl_or_func_def(void)
     Token tok = peek_token();
     if (get_ttype(tok) == TTYPE_NULL)
         return NULL;
+    /* 隐式 int 返回类型 (C89): main() { } 无类型时默认 int。
+     * read_decl_spec 处理此情况 (标识符→默认 int) */
     Ctype *ctype = read_decl_spec();
     Token tok1 = read_token();
     char *ident;
