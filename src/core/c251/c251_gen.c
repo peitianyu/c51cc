@@ -250,14 +250,17 @@ ObjFile *c251_gen(SSAUnit *unit) {
 
                 /* M3: 中断向量表 — interrupt N → 地址 0x0003+N*8 放 LJMP ISR_N。
                  * stub 占 0x0000-0x0002, 向量在 0x0003 起 (N=0 的向量紧接 stub)。
-                 * 用 NOP 填充向量间空隙, 最多 8 个向量 (0x0003-0x003B)。 */
+                 * 无中断时省掉 0x40 填充 (00-09 系列 72B vs Keil 30B 的主因):
+                 * LJMP main 后直接接函数代码。 */
                 {
                     int vec_pos = 3;  /* 第一个向量地址 */
+                    bool any_vec = false;
                     for (int i = 0; i < (int)list_len(unit->funcs); i++) {
                         Func *ff = (Func*)list_get(unit->funcs, i);
                         if (!ff || !ff->is_interrupt) continue;
                         int vaddr = 3 + ff->interrupt_id * 8;  /* 0x0003 + N*8 */
                         if (vaddr < 0x0040) {
+                            any_vec = true;
                             /* NOP 填充到向量地址 */
                             while (vec_pos < vaddr && vec_pos < 0x0040) {
                                 AsmInstr *nop = calloc(1, sizeof(AsmInstr));
@@ -275,12 +278,14 @@ ObjFile *c251_gen(SSAUnit *unit) {
                             vec_pos += 3;
                         }
                     }
-                    /* 填充到 0x0040 (向量区结束), 保持函数对齐 */
-                    while (vec_pos < 0x0040) {
-                        AsmInstr *nop = calloc(1, sizeof(AsmInstr));
-                        nop->op = strdup("NOP");
-                        list_push(nl, nop);
-                        vec_pos++;
+                    /* 有向量时填充到 0x0040 保持对齐; 无向量时直接接函数代码 */
+                    if (any_vec) {
+                        while (vec_pos < 0x0040) {
+                            AsmInstr *nop = calloc(1, sizeof(AsmInstr));
+                            nop->op = strdup("NOP");
+                            list_push(nl, nop);
+                            vec_pos++;
+                        }
                     }
                 }
                 if (sec->asminstrs) {
