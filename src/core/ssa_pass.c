@@ -1500,14 +1500,18 @@ static bool pass_cse_ext(Func *f, Stats *s) {
 static bool pass_const_merge(Func *f, Stats *s) {
     bool changed = false;
     #define MAX_CONSTS 64
-    int64_t const_vals[MAX_CONSTS];
-    ValueName const_names[MAX_CONSTS];
-    int const_count = 0;
-
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
         if (!b) continue;
         if (b != f->entry && (!b->preds || b->preds->len == 0)) continue;
+        /* 每块独立 const 表：跨块合并会让保留的 const 定义依赖其他块的存活，
+         * 若该块随后被删除（const_branch 折叠等），跨块 use（如 CALL 参数）
+         * 会悬空引用已删 const（34_short_circuit 根因：v53 合并到 v22，b5 块删除后
+         * v22 消失，v54 = call @side_effect(v22) 参数悬空 → side_effect 收到垃圾值）。
+         * 同块合并仍有效（块内重复 const 可合并），且无跨块依赖风险。 */
+        int64_t const_vals[MAX_CONSTS];
+        ValueName const_names[MAX_CONSTS];
+        int const_count = 0;
         for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
             Instr *i = iter_next(&jt);
             if (!i || i->op != IROP_CONST) continue;
