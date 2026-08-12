@@ -32,9 +32,14 @@ def run(t, outdir):
     """编译单个 execute 测试并跑 sim251, 返回 (判定, 分类, 说明)。"""
     src = os.path.join(SRC, t + '.c')
     hexf = os.path.join(outdir, t + '.hex')
-    cmd = [C251CC, OPT, '-hex', '-o', hexf, src]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', timeout=TIMEOUT)
+    libc = os.path.join(ROOT, 'src', 'core', 'c251', 'c251_libc.c')
+
+    def compile_with(sources):
+        return subprocess.run([C251CC, OPT, '-hex', '-o', hexf] + sources,
+                              capture_output=True, text=True, encoding='utf-8',
+                              errors='replace', timeout=TIMEOUT)
+
+    r = compile_with([src])
     if r.returncode != 0:
         err = (r.stderr or r.stdout or '')
         cat = 'ERR'
@@ -43,6 +48,14 @@ def run(t, outdir):
         elif 'error:' in err or 'expected' in err or 'failed' in err:
             cat = 'FRONTEND'
         return 'COMPILE-ERR', cat, (err.splitlines()[-1] if err else '')[:100]
+
+    # 未定义函数调用 (strlen/calloc/...) → 附加系统库 c251_libc.c 重编译 (0025/0041)
+    err_all = (r.stderr or '') + (r.stdout or '')
+    if 'unknown abs target' in err_all or 'unknown symbol' in err_all:
+        if os.path.exists(libc):
+            r2 = compile_with([src, libc])
+            if r2.returncode == 0:
+                r = r2
 
     dump = os.path.join(outdir, t + '.dump')
     p = subprocess.run([SIM, '-bios', hexf, '-d', 'cpu', '-D', dump,

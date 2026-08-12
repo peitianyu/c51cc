@@ -1,4 +1,5 @@
 #include "c251_gen.h"
+#include "c251_encode.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -63,6 +64,10 @@ static void hex_emit_line(FILE *fp, unsigned address, const unsigned char *bytes
 
 int c251_write_hex(FILE *fp, const ObjFile *obj) {
     if (!fp || !obj) return -1;
+    /* 多文件合并后重编码: obj_link 合并的是各 obj 已编码的 bytes, 跨文件函数引用
+     * (libc strlen/calloc) 在单文件 encode 时未定义 → LCALL 填 0。这里对合并后
+     * obj 重新 encode, 函数符号已全部定义, fixup 正确填充 (0025/0041-libc)。 */
+    c251_encode(NULL, (ObjFile*)obj);
     unsigned addr = 0;
     /* 1) CODE section 裸地址输出（无 type-04 记录 → sim251 默认路由到代码区） */
     for (Iter sit = list_iter(obj->sections); !iter_end(sit);) {
