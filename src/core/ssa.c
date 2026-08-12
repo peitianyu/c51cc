@@ -1269,6 +1269,17 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
                 ValueName idx = gen_expr(b, ast->left);
                 return ssa_build_offset(b, base, idx, elem_size);
             }
+            /* p - q（指针减指针）→ 地址差 / 元素大小（C 语义元素个数）
+             * (0038-ptradd: &x[1]-&x[0] 应 = 1 而非地址差 2) */
+            if (ast->type == '-' && lptr && rptr) {
+                Ctype *elem = lt ? lt->ptr : NULL;
+                int elem_size = (elem && elem->size > 0) ? elem->size : 1;
+                ValueName lhs = gen_expr(b, ast->left);
+                ValueName rhs = gen_expr(b, ast->right);
+                ValueName diff = ssa_build_binop_t(b, IROP_SUB, lhs, rhs, ast->ctype);
+                ValueName esz = ssa_build_const_t(b, elem_size, ast->ctype);
+                return ssa_build_binop_t(b, IROP_DIV, diff, esz, ast->ctype);
+            }
         }
         ValueName lhs = gen_expr(b, ast->left);
         ValueName rhs = gen_expr(b, ast->right);
@@ -1338,7 +1349,12 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
     case PUNCT_INC:
     case PUNCT_DEC: {
         IrOp op = (ast->type == PUNCT_INC) ? IROP_ADD : IROP_SUB;
-        ValueName one = ssa_build_const_t(b, 1, ast->ctype);
+        /* 指针 ++/-- 步进指向类型大小（int *p → +2），非指针 +1 */
+        long inc = 1;
+        if (ast->ctype && ast->ctype->type == CTYPE_PTR && ast->ctype->ptr) {
+            inc = ast->ctype->ptr->size > 0 ? ast->ctype->ptr->size : 1;
+        }
+        ValueName one = ssa_build_const_t(b, inc, ast->ctype);
 
         if (ast->operand && ast->operand->type == AST_LVAR) {
             ValueName cur = ssa_build_read(b, ast->operand->varname);
@@ -1367,7 +1383,13 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
     case AST_POST_INC:
     case AST_POST_DEC: {
         IrOp op = (ast->type == AST_POST_INC) ? IROP_ADD : IROP_SUB;
-        ValueName one = ssa_build_const_t(b, 1, ast->ctype);
+        /* 指针后置 ++/-- 步进指向类型大小 */
+        long inc = 1;
+        if (ast->operand && ast->operand->ctype
+            && ast->operand->ctype->type == CTYPE_PTR && ast->operand->ctype->ptr) {
+            inc = ast->operand->ctype->ptr->size > 0 ? ast->operand->ctype->ptr->size : 1;
+        }
+        ValueName one = ssa_build_const_t(b, inc, ast->ctype);
 
         if (ast->operand && ast->operand->type == AST_LVAR) {
             ValueName cur = ssa_build_read(b, ast->operand->varname);

@@ -299,7 +299,9 @@ static bool is_predefined_macro(const char *name)
            strcmp(name, "__TIME__") == 0 ||
            strcmp(name, "__STDC__") == 0 ||
            strcmp(name, "__STDC_VERSION__") == 0 ||
-           strcmp(name, "__STDC_HOSTED__") == 0;
+           strcmp(name, "__STDC_HOSTED__") == 0 ||
+           strcmp(name, "__C251__") == 0 ||
+           strcmp(name, "__C51__") == 0;
 }
 
 static void pp_init_date_time(PPContext *ctx)
@@ -389,6 +391,12 @@ static char *pp_predefined_macro_expansion(PPContext *ctx, const char *name)
     }
     if (strcmp(name, "__STDC_HOSTED__") == 0) {
         return strdup("0");
+    }
+    if (strcmp(name, "__C251__") == 0) {
+        return strdup("1");
+    }
+    if (strcmp(name, "__C51__") == 0) {
+        return strdup("1");
     }
 
     return NULL;

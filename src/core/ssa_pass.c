@@ -2129,6 +2129,23 @@ static BaseInfo *get_base_info(BaseInfo *bases, int *base_count, ValueName base,
 
 static bool pass_dead_local_store_elim(Func *f, Stats *s) {
     if (!f) return false;
+    /* 保守：函数内有“取地址 + 指针间接访问”时禁用——x[1]=7 的 store 可能被
+     * *p 读取（别名），死 store 消除会误删 (0038-ptradd FAIL 根因)。
+     * 非递归检测（简单扫描，不做值依赖分析）。 */
+    {
+        bool has_addr = false;
+        for (Iter sit = list_iter(f->blocks); !iter_end(sit);) {
+            Block *sb = iter_next(&sit);
+            if (!sb) continue;
+            for (Iter sit2 = list_iter(sb->instrs); !iter_end(sit2);) {
+                Instr *si = iter_next(&sit2);
+                if (!si) continue;
+                if (si->op == IROP_ADDR) { has_addr = true; break; }
+            }
+            if (has_addr) break;
+        }
+        if (has_addr) return false;
+    }
     bool changed = false;
     BaseInfo bases[128];
     int base_count = 0;
