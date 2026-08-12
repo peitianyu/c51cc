@@ -516,10 +516,94 @@ static bool is_unsigned_type(Ctype *t) {
     return t && get_attr(t->attr).ctype_unsigned;
 }
 
+/* 只读全局: 全 SSA 无 store @g + 所有 &g (ADDR) 只被 LOAD 消费 + 无 blob 指针 reloc 指向它。
+ * 满足时 load g 可折叠为初始化常量 (即使无 const 关键字 — 53_global_init_expr/71_ifdef)。 */
+static bool global_readonly(const char *name) {
+    if (!g_unit || !name) return false;
+    GlobalVar *g = find_global(name);
+    if (!g) return false;
+    /* static 变量 (含函数内 static 局部) 有跨调用状态 — 不可折叠 */
+    if (get_attr(g->type ? g->type->attr : 0).ctype_static) return false;
+    /* blob 指针 reloc: 其他全局初始化 (int *p = &x) 使 x 逃逸 */
+    for (Iter git = list_iter(g_unit->globals); !iter_end(git);) {
+        GlobalVar *og = iter_next(&git);
+        if (!og || !og->init_instr || !og->init_instr->imm.blob.relocs) continue;
+        for (Iter rit = list_iter(og->init_instr->imm.blob.relocs); !iter_end(rit);) {
+            InitReloc *r = iter_next(&rit);
+            if (r && r->symbol && strcmp(r->symbol, name) == 0) return false;
+        }
+    }
+    /* 全 SSA 无 store @name */
+    for (Iter it = list_iter(g_unit->funcs); !iter_end(it);) {
+        Func *f = iter_next(&it);
+        if (!f) continue;
+        for (Iter bt = list_iter(f->blocks); !iter_end(bt);) {
+            Block *b = iter_next(&bt);
+            if (!b) continue;
+            for (Iter it2 = list_iter(b->instrs); !iter_end(it2);) {
+                Instr *i = iter_next(&it2);
+                if (!i) continue;
+                if (i->op == IROP_STORE && i->labels && i->labels->len > 0) {
+                    const char *l = (const char*)list_get(i->labels, 0);
+                    if (l && l[0] == '@' && strcmp(l + 1, name) == 0) return false;
+                }
+            }
+        }
+    }
+    /* 所有 ADDR @name 的值只被 LOAD 消费 (未逃逸到 CALL/STORE 值/指针运算) */
+    for (Iter it = list_iter(g_unit->funcs); !iter_end(it);) {
+        Func *f = iter_next(&it);
+        if (!f) continue;
+        for (Iter bt = list_iter(f->blocks); !iter_end(bt);) {
+            Block *b = iter_next(&bt);
+            if (!b) continue;
+            List *lists[2] = {b->phis, b->instrs};
+            for (int li = 0; li < 2; li++) {
+                if (!lists[li]) continue;
+                for (Iter it2 = list_iter(lists[li]); !iter_end(it2);) {
+                    Instr *i = iter_next(&it2);
+                    if (!i) continue;
+                    if (i->op == IROP_ADDR && i->labels && i->labels->len > 0) {
+                        const char *l = (const char*)list_get(i->labels, 0);
+                        if (l && l[0] == '@' && strcmp(l + 1, name) == 0) {
+                            for (Iter ut = list_iter(g_unit->funcs); !iter_end(ut);) {
+                                Func *f2 = iter_next(&ut);
+                                if (!f2) continue;
+                                for (Iter bt2 = list_iter(f2->blocks); !iter_end(bt2);) {
+                                    Block *b2 = iter_next(&bt2);
+                                    if (!b2) continue;
+                                    List *l2s[2] = {b2->phis, b2->instrs};
+                                    for (int li2 = 0; li2 < 2; li2++) {
+                                        if (!l2s[li2]) continue;
+                                        for (Iter it3 = list_iter(l2s[li2]); !iter_end(it3);) {
+                                            Instr *u = iter_next(&it3);
+                                            if (!u || !u->args) continue;
+                                            for (int k = 0; k < u->args->len; ++k) {
+                                                ValueName *ap = (ValueName*)list_get(u->args, k);
+                                                if (!ap || *ap != i->dest) continue;
+                                                if (u->op != IROP_LOAD) return false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 static bool is_const_global(GlobalVar *g) {
     if (!g || !g->type) return false;
     CtypeAttr a = get_attr(g->type->attr);
-    return a.ctype_const && !a.ctype_volatile && !a.ctype_register && g->has_init && g->is_static;
+    if (a.ctype_volatile || a.ctype_register) return false;
+    if (!g->has_init) return false;
+    if (a.ctype_const && g->is_static) return true;
+    /* 非 const: 全 SSA 无写 + &g 未逃逸才可折叠 (53_global_init_expr/71_ifdef 等) */
+    return global_readonly(g->name);
 }
 
 static bool value_used(Func *f, ValueName v) {
@@ -1674,7 +1758,19 @@ static bool pass_global_load(Func *f, Stats *s) {
                 const char *name = (const char *)list_get(addr->labels, 0);
                 GlobalVar *g = name ? find_global(name) : NULL;
                 if (!is_const_global(g)) continue;
-                i->op = IROP_CONST; i->imm.ival = g->init_value;
+                /* 指针全局 (int *p = &x): 地址不可折叠 */
+                if (g->type && g->type->type == CTYPE_PTR) continue;
+                long long cval = g->init_value;
+                /* 表达式初始化走 blob (小端): {0x03,0x00} = 3 */
+                if (g->init_instr && g->init_instr->imm.blob.bytes
+                    && g->init_instr->imm.blob.len > 0) {
+                    long long v = 0;
+                    int n = g->init_instr->imm.blob.len;
+                    if (n > 8) n = 8;
+                    for (int k = n - 1; k >= 0; k--) v = (v << 8) | g->init_instr->imm.blob.bytes[k];
+                    cval = v;
+                }
+                i->op = IROP_CONST; i->imm.ival = cval;
                 i->type = g->type; i->mem_type = NULL;
                 list_clear(i->args); list_clear(i->labels);
                 ++s->fold; changed = true;
