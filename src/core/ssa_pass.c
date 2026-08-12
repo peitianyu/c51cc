@@ -2983,11 +2983,16 @@ static bool pass_const_branch(Func *f, Stats *s) {
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
         if (!b) continue;
-        Instr *term = list_empty(b->instrs) ? NULL : list_get(b->instrs, b->instrs->len - 1);
+        Instr *term = block_last_effective_instr(b);
         if (!term || term->op != IROP_BR) continue;
         ValueName cond = get_arg(term, 0);
         int64_t val;
-        if (!get_const_value(f, cond, &val)) continue;
+        if (!get_const_value(f, cond, &val)) {
+            if (getenv("C51CC_DBG_BR")) {
+                Instr *cd = find_def_instr(f, cond);
+            }
+            continue;
+        }
 
         const char *live_label = val ? list_get(term->labels, 0) : list_get(term->labels, 1);
         const char *dead_label = val ? list_get(term->labels, 1) : list_get(term->labels, 0);

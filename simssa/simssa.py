@@ -992,6 +992,87 @@ def compile_ssa(files, opt, timeout=TIMEOUT):
     return r.stdout.decode("latin-1"), ""
 
 
+
+
+def ssa_stats(files, opt="-O1"):
+    """编译并统计 Before vs Optimized 的静态指令数 (常量折叠效果量化)。
+
+    返回每部分的 (函数数, 块数, 指令数, op 分布 dict)。
+    """
+    text, err = compile_ssa(files, opt)
+    if text is None:
+        return None, "COMPILE-ERR", err.splitlines()[-1] if err else ""
+
+    def count(use_before):
+        try:
+            g, funcs = parse_ssa_text(text, use_before)
+        except (ValueError, IndexError):
+            return None
+        blocks = 0
+        insts = 0
+        op_dist = {}
+        const_br = 0    # br 条件为 CONST (可折叠但未折叠)
+        br_total = 0
+        const_phi_arms = 0  # phi 臂全为 const (可折叠)
+        for f in funcs.values():
+            consts = {}
+            # 先收集 const 定义 (单遍)
+            for bid in sorted(f.blocks):
+                b = f.blocks[bid]
+                for p in b.phis:
+                    if p.op == "const": consts[p.dest] = p.imm
+                for i in b.instrs:
+                    if i.op == "const": consts[i.dest] = i.imm
+            for bid in sorted(f.blocks):
+                b = f.blocks[bid]
+                blocks += 1
+                for p in b.phis:
+                    insts += 1
+                    op_dist[p.op] = op_dist.get(p.op, 0) + 1
+                    if p.op == "phi":
+                        arms = [a for a in p.args if a != 0 and a != p.dest]
+                        if arms and all(a in consts for a in arms):
+                            const_phi_arms += 1
+                for i in b.instrs:
+                    insts += 1
+                    op_dist[i.op] = op_dist.get(i.op, 0) + 1
+                    if i.op == "br":
+                        br_total += 1
+                        if i.args and i.args[0] in consts:
+                            const_br += 1
+        return len(funcs), blocks, insts, op_dist, const_br, br_total, const_phi_arms
+
+    before = count(True)
+    after = count(False)
+    return (before, after), "RUN", ""
+
+
+def print_stats(files, opt="-O1"):
+    """打印 Before/Optimized 指令数对比 + 每指令类型分布。"""
+    res, verdict, detail = ssa_stats(files, opt)
+    if res is None:
+        print(f"{os.path.basename(files[0])}: {verdict} {detail}")
+        return
+    before, after = res
+    print(f"{os.path.basename(files[0])} (opt={opt}):")
+    for label, st in (("Before", before), ("Optimized", after)):
+        if st is None:
+            print(f"  {label:<10} 解析失败")
+            continue
+        nf, nb, ni, dist = st[0], st[1], st[2], st[3]
+        cbr, brt, cphi = st[4], st[5], st[6]
+        extra = ""
+        if brt:
+            extra = f"  br: 条件const未折叠 {cbr}/{brt}  全const臂phi {cphi}"
+        print(f"  {label:<10} 函数={nf} 块={nb} 指令={ni}{extra}")
+    if before and after:
+        bi = before[2]; ai = after[2]
+        if bi:
+            print(f"  折叠率: {(1 - ai / bi) * 100:.1f}%  ({bi} -> {ai})")
+        if after[3]:
+            tops = sorted(after[3].items(), key=lambda kv: -kv[1])[:8]
+            print("  Optimized op 分布: " + ", ".join(f"{k}={v}" for k, v in tops))
+
 def simulate(files, opt="-O1", use_before=False, trace=False, strict=False):
     """编译 + 仿真, 返回 (ret, verdict, detail)。"""
     text, err = compile_ssa(files, opt)
@@ -1033,6 +1114,7 @@ def main():
     ap.add_argument("--before", action="store_true", help="仿真优化前 SSA")
     ap.add_argument("--trace", action="store_true", help="打印执行 trace")
     ap.add_argument("--strict", action="store_true", help="未定义值/未知符号报错")
+    ap.add_argument("--stats", action="store_true", help="统计 Before/Optimized 指令数 (常量折叠量化)")
     args = ap.parse_args()
 
     files = list(args.tests)
@@ -1049,6 +1131,11 @@ def main():
         ap.error("no input files")
     if args.filter:
         files = [f for f in files if re.search(args.filter, os.path.basename(f))]
+
+    if args.stats:
+        for src in files:
+            print_stats([src], opt=args.opt)
+        return
 
     is_suite = args.suite or (not args.execute and not args.ssa
                               and files and os.path.dirname(files[0]).endswith("suite"))
