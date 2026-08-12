@@ -9,6 +9,9 @@ static void wr_name(char *buf, size_t n, int wr) {
 
 void isel_emit(ISelContext* isel, const char* op, const char* arg1, const char* arg2) {
     if (!isel || !op) return;
+    if (getenv("C251_DEBUG_ISEL")) {
+        fprintf(stderr, "[isel] %s %s %s\n", op, arg1 ? arg1 : "", arg2 ? arg2 : "");
+    }
     AsmInstr *ai = calloc(1, sizeof(AsmInstr));
     ai->op = strdup(op);
     ai->args = make_list();
@@ -112,23 +115,34 @@ static bool value_still_used(ISelContext* isel, ValueName v, int pos) {
     return false;
 }
 
-/* 选临时寄存器：避开 avoid1/avoid2 → 空闲 → 块内死值 → 强制溢出兜底（几乎不达） */
-static int isel_temp_wr(ISelContext* isel, int avoid1, int avoid2) {
+/* 选临时寄存器：避开 avoid 列表（含 -1 忽略）→ 空闲 → 块内死值 → 强制溢出兜底。
+ * 临时不登记占用（reg_val/value_to_reg 不变），连续调用可能返回同一 WR ——
+ * 调用方需自行避免复用（emit_phi_copies 用 avoid 列表收集已用 WR）。 */
+static int isel_temp_wr_avoid_list(ISelContext* isel, const int *avoid, int navoid) {
     C251GenContext *ctx = isel->ctx;
     for (int w = 0; w <= 6; w += 2) {
-        if (w == avoid1 || w == avoid2) continue;
+        int hit = 0;
+        for (int i = 0; i < navoid; i++) if (w == avoid[i]) { hit = 1; break; }
+        if (hit) continue;
         if (isel->reg_val[w/2] < 0) return w;
     }
     for (int w = 0; w <= 6; w += 2) {
-        if (w == avoid1 || w == avoid2) continue;
+        int hit = 0;
+        for (int i = 0; i < navoid; i++) if (w == avoid[i]) { hit = 1; break; }
+        if (hit) continue;
         ValueName rv = isel->reg_val[w/2];
         if (rv >= 0 && !value_still_used(isel, rv, isel->block_instr_pos)) return w;
     }
     /* 极端兜底：强制溢出第一个非 avoid 寄存器中的值 */
     for (int w = 0; w <= 6; w += 2) {
-        if (w == avoid1 || w == avoid2) continue;
+        int hit = 0;
+        for (int i = 0; i < navoid; i++) if (w == avoid[i]) { hit = 1; break; }
+        if (hit) continue;
         ValueName rv = isel->reg_val[w/2];
         if (rv >= 0) {
+            if (getenv("C251_DEBUG_ISEL")) {
+                fprintf(stderr, "[forced-spill] WR%d holds v%d (block %d)\n", w, rv, isel->current_block_id);
+            }
             char *sp = c251_alloc_spill(ctx, rv);
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
             isel_emit(isel, "MOV", sp, wbuf);
@@ -140,6 +154,12 @@ static int isel_temp_wr(ISelContext* isel, int avoid1, int avoid2) {
         }
     }
     return 0; /* 理论不可达 */
+}
+
+/* 选临时寄存器：避开 avoid1/avoid2（旧签名包装） */
+static int isel_temp_wr(ISelContext* isel, int avoid1, int avoid2) {
+    int avoid[2] = { avoid1, avoid2 };
+    return isel_temp_wr_avoid_list(isel, avoid, 2);
 }
 
 /* 值 → 寄存器分配：已分配复用 → 空闲 → 块内死值释放 → -1（调用方走溢出） */
@@ -160,7 +180,10 @@ int isel_alloc_wr(ISelContext* isel, ValueName val) {
         }
     }
     if (w < 0) { free(key); return -1; }
-
+    if (getenv("C251_DEBUG_ISEL")) {
+        fprintf(stderr, "[alloc] v%d -> WR%d (block %d, prev=WR%d holds v%d)\n",
+                val, w, isel->current_block_id, w, isel->reg_val[w/2]);
+    }
     isel->reg_val[w/2] = val;
     int *slot = malloc(sizeof(int)); *slot = w;
     dict_put(ctx->value_to_reg, key, slot);
@@ -488,7 +511,7 @@ static void emit_phi_copies(ISelContext* isel, int succ_id) {
     PhiCopy copies[64];
     int ncopies = 0;
     int tmp_wr[64];  /* 每个拷贝的临时寄存器（-2 表示物化失败） */
-    int prev_tmp = -1;
+    int used_wr[8]; int nused = 0;  /* 已占用的临时 WR（isel_temp_wr 不登记占用, 需自行避免复用） */
     for (Iter pit = list_iter(succ->phis); !iter_end(pit);) {
         Instr *phi = iter_next(&pit);
         if (!phi || phi->op != IROP_PHI || !phi->args || !phi->labels) continue;
@@ -504,9 +527,10 @@ static void emit_phi_copies(ISelContext* isel, int succ_id) {
         if (ncopies >= 64) { fprintf(stderr, "c251 isel: phi 拷贝过多\n"); break; }
         copies[ncopies].src = src;
         copies[ncopies].slot = sp;
-        /* isel_temp_wr 不标记占用，连续调用会返回同一 WR → 用 prev_tmp 回避 */
-        int tmp = isel_temp_wr(isel, prev_tmp, -1);
-        prev_tmp = tmp;
+        /* 3+ phi 拷贝时 prev_tmp 只能避免连续 2 个 → 用 used_wr 列表避免全部已用 WR
+         * （t82d: f/width/zero 3 个 phi, 第 3 个复用第 1 个临时覆盖源值） */
+        int tmp = isel_temp_wr_avoid_list(isel, used_wr, nused);
+        used_wr[nused++] = tmp;
         char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
         if (load_value_to_wr(isel, src, tmp) == 0) {
             tmp_wr[ncopies] = tmp;
@@ -1429,6 +1453,15 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         char *sym = value_to_addr_lookup(ctx, ptr);
         int wr = isel_alloc_wr(isel, ins->dest);
         int dsz = value_size_of_ctx(ctx, ins->dest);
+        /* 读宽度/符号按【源内存类型】mem_type（u8 元素 → 8 位读 + 按元素符号扩展），
+         * 而非 dest 宽度（`int x = buf[i]` 的 dest 是 int 16 位, 但元素 u8 只读 1 字节；
+         * 否则越界读邻居字节）。long 源的 sym+2 低 16 位逻辑仍用 dsz。 */
+        int msz = dsz;
+        bool msign = !value_decl_unsigned(ctx, ins->dest);
+        if (ins->mem_type) {
+            msz = (ins->mem_type->size <= 1) ? 1 : 2;
+            msign = !get_attr(ins->mem_type->attr).ctype_unsigned;
+        }
         /* 指针目标的 LOAD（`int *p = g_arr;` 中 v2 = load v1, v1=addr @g_arr）：
          * C 语义数组名衰减为地址——加载的是符号地址而非内存数据（MOV WRj,#sym）。
          * 仅当源是数组（sym 实际大小 > 指针 2 字节）才衰减；`*pp` 读指针变量（2 字节）
@@ -1458,8 +1491,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                     isel_emit(isel, "ANL", "A", "#1");
                     isel_emit(isel, "MOV", rbuf, "A");
                     isel_emit(isel, "MOVZ", wbuf, rbuf);
-                } else if (dsz <= 1) {
-                    if (value_decl_unsigned(ctx, ins->dest))
+                } else if (msz <= 1) {
+                    if (!msign)
                         isel_emit(isel, "MOVZ", wbuf, rbuf);
                     else
                         isel_emit(isel, "MOVS", wbuf, rbuf);
@@ -1485,13 +1518,13 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                     char *sp = c251_alloc_spill(ctx, ins->dest);
                     isel_emit(isel, "MOV", sp, tbuf);
                 }
-            } else if (dsz <= 1) {
+            } else if (msz <= 1) {
                 /* char: MOV R(lo+1),SYM (8 位读) → MOVZ/MOVS WRlo,R(lo+1) */
                 int lo = (wr >= 0) ? wr : isel_temp_wr(isel, -1, -1);
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);
                 char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", lo + 1);
                 isel_emit(isel, "MOV", rbuf, sym);
-                if (value_decl_unsigned(ctx, ins->dest))
+                if (!msign)
                     isel_emit(isel, "MOVZ", wbuf, rbuf);
                 else
                     isel_emit(isel, "MOVS", wbuf, rbuf);
@@ -1539,12 +1572,12 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             }
             char abuf[16]; wr_name(abuf, sizeof(abuf), addr_wr);
             char ind[32]; snprintf(ind, sizeof(ind), "@%s", abuf);
-            if (dsz <= 1) {
+            if (msz <= 1) {
                 int lo = (wr >= 0) ? wr : isel_temp_wr(isel, addr_wr, -1);
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);
                 char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", lo + 1);
                 isel_emit(isel, "MOV", rbuf, ind);   /* 8 位间接读 */
-                if (value_decl_unsigned(ctx, ins->dest))
+                if (!msign)
                     isel_emit(isel, "MOVZ", wbuf, rbuf);
                 else
                     isel_emit(isel, "MOVS", wbuf, rbuf);
@@ -1659,7 +1692,10 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             }
         }
         if (!sym) {
-            /* 指针间接写: ptr 值 → WRk（16 位 EDATA 地址）→ 值 → MOV @WRk,WRj */
+            /* 指针间接写: ptr 值 → WRk（16 位 EDATA 地址）→ 值 → MOV @WRk,WRj。
+             * 写宽度按【目标内存类型】mem_type（u8 元素 → 8 位写低字节 R(t+1)），
+             * 而非值宽度（`g_buf[i] = a+11` 的 RHS 是 int 16 位, 目标 u8 → 8 位写, 否则越界写邻居）。 */
+            int dsz = (ins->mem_type && ins->mem_type->size <= 1) ? 1 : 2;
             int addr_wr = isel_temp_wr(isel, -1, -1);
             if (load_value_to_wr(isel, ptr, addr_wr) < 0) {
                 fprintf(stderr, "c251 isel: STORE 指针值无法装载 (v%d)\n", ptr);
@@ -1668,9 +1704,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             char abuf[16]; wr_name(abuf, sizeof(abuf), addr_wr);
             char ind[32]; snprintf(ind, sizeof(ind), "@%s", abuf);
             int r = isel_value_reg(ctx, val);
-            int vsz = value_size_of_ctx(ctx, val);
             if (r >= 0) {
-                if (vsz <= 1) {
+                if (dsz <= 1) {
                     int t = isel_temp_wr(isel, r, addr_wr);
                     char tlo[16]; snprintf(tlo, sizeof(tlo), "R%d", t + 1);
                     char rlo[16]; snprintf(rlo, sizeof(rlo), "R%d", r + 1);
@@ -1684,7 +1719,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 int tmp = isel_temp_wr(isel, addr_wr, -1);
                 char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
                 if (load_value_to_wr(isel, val, tmp) == 0) {
-                    if (vsz <= 1) {
+                    if (dsz <= 1) {
                         char tlo[16]; snprintf(tlo, sizeof(tlo), "R%d", tmp + 1);
                         isel_emit(isel, "MOV", ind, tlo);
                     } else {
@@ -2047,6 +2082,15 @@ void isel_block(ISelContext* isel, Block* block) {
     isel->br_hint_cond = -1;
     isel->br_hint_ne_skip = -1;
 
+    /* Keil 纪律 (docs/c251-寄存器分配参考-keil.md §4): 块本地寄存器模型。
+     * 块入口清空所有寄存器绑定 — 跨块值经 def 落槽 (槽权威) 在新块从槽加载;
+     * 物理寄存器内容只在本块内可信, 杜绝跨块绑定被覆写后读旧值 (82/83 FAIL 根因)。 */
+    if (isel->ctx->value_to_reg) {
+        dict_free(isel->ctx->value_to_reg, free);
+        isel->ctx->value_to_reg = make_dict(NULL);
+    }
+    for (int i = 0; i < 4; i++) isel->reg_val[i] = -1;
+
     /* 块标签：L<id>: */
     char lbl[32];
     block_label_name(lbl, sizeof(lbl), block->id);
@@ -2074,6 +2118,22 @@ void isel_block(ISelContext* isel, Block* block) {
     for (int i = 0; i < idx; i++) {
         isel->block_instr_pos = i;
         isel_instr(isel, arr[i], NULL);
+        /* Keil 纪律: global-live 值 def 时立即落槽 (槽权威)。
+         * 物理寄存器只是块内缓存; 块间读取一律走槽。
+         * 跳过 CONST (value_to_const 优先) 与 PHI (槽由边缘拷贝写)。 */
+        Instr *dins = arr[i];
+        if (dins && dins->dest >= 0 && dins->op != IROP_PHI && dins->op != IROP_NOP
+            && dins->op != IROP_CONST
+            && is_global_live(isel->global_live, dins->dest)) {
+            int r = isel_value_reg(isel->ctx, dins->dest);
+            if (r >= 0) {
+                char *sp = c251_alloc_spill(isel->ctx, dins->dest);
+                if (sp) {
+                    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), r);
+                    isel_emit(isel, "MOV", sp, wbuf);
+                }
+            }
+        }
     }
     isel->block_instrs = NULL;
     free(arr);
