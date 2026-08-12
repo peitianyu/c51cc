@@ -1392,6 +1392,30 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             if (s) sym_sz = *s;
         }
         bool array_decay = dest_is_ptr && sym && sym_sz > 2;
+        /* M3: sfr 直接地址读 — MOV A,dir8 + 转移到目标 (0xE5 xx) */
+        if (sym && ctx->sfr_addr) {
+            int *sfrp = (int*)dict_get(ctx->sfr_addr, (char*)sym);
+            if (sfrp) {
+                char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", *sfrp & 0xFF);
+                int lo = (wr >= 0) ? wr : isel_temp_wr(isel, -1, -1);
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);
+                char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", lo + 1);
+                /* 读取 SFR 到 A, 再转 Rm (u8) */
+                isel_emit(isel, "MOV", "A", dirdesc);
+                isel_emit(isel, "MOV", rbuf, "A");
+                if (dsz <= 1) {
+                    if (value_decl_unsigned(ctx, ins->dest))
+                        isel_emit(isel, "MOVZ", wbuf, rbuf);
+                    else
+                        isel_emit(isel, "MOVS", wbuf, rbuf);
+                }
+                if (wr < 0) {
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, wbuf);
+                }
+                break;
+            }
+        }
         if (sym) {
             if (array_decay) {
                 /* 指针 = &符号：物化地址立即数 */
@@ -1495,6 +1519,15 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 /* 局部变量名转换：优化格式 @x 用原始名，须映射到函数作用域槽 __loc_fn_x
                  * （与 ADDR 处理一致，否则 store 到未注册符号 x → unknown symbol） */
                 const char *raw = lab + 1;
+                /* M3: sfr 直接写 — store @P0, const → MOV dir8,A */
+                if (ctx->sfr_addr && dict_get(ctx->sfr_addr, (char*)raw)) {
+                    int *sfrp = (int*)dict_get(ctx->sfr_addr, (char*)raw);
+                    char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", *sfrp & 0xFF);
+                    char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFF);
+                    isel_emit(isel, "MOV", "A", imm);
+                    isel_emit(isel, "MOV", dirdesc, "A");
+                    break;
+                }
                 char sym[160];
                 if (!c251_obj_has_sym(ctx->obj, raw)) {
                     const char *fn = (ctx->current_func && ctx->current_func->name)
@@ -1522,6 +1555,30 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         /* store ptr, val → MOV SYMBOL,WRj（宽度按目标符号 size） */
         ValueName ptr = src1_of(ins), val = src2_of(ins);
         char *sym = value_to_addr_lookup(ctx, ptr);
+        /* M3: sfr 直接地址写 — 值→A→MOV dir8,A (0xF5 xx) */
+        if (sym && ctx->sfr_addr) {
+            int *sfrp = (int*)dict_get(ctx->sfr_addr, (char*)sym);
+            if (sfrp) {
+                char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", *sfrp & 0xFF);
+                int r = isel_value_reg(ctx, val);
+                int vsz = value_size_of_ctx(ctx, val);
+                if (r >= 0) {
+                    char rlo[8]; snprintf(rlo, sizeof(rlo), "R%d", r + 1);
+                    isel_emit(isel, "MOV", "A", rlo);
+                } else {
+                    int tmp = isel_temp_wr(isel, -1, -1);
+                    char tlo[8]; snprintf(tlo, sizeof(tlo), "R%d", tmp + 1);
+                    if (load_value_to_wr(isel, val, tmp) == 0)
+                        isel_emit(isel, "MOV", "A", tlo);
+                    else {
+                        fprintf(stderr, "c251 isel: sfr store 值无法装载 (v%d)\n", val);
+                        break;
+                    }
+                }
+                isel_emit(isel, "MOV", dirdesc, "A");
+                break;
+            }
+        }
         if (!sym) {
             /* 指针间接写: ptr 值 → WRk（16 位 EDATA 地址）→ 值 → MOV @WRk,WRj */
             int addr_wr = isel_temp_wr(isel, -1, -1);
@@ -1599,6 +1656,12 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             ? (const char*)list_get(ins->labels, 0) : NULL;
         if (sym && sym[0] == '@') sym++;
         if (sym && sym[0]) {
+            /* M3: sfr 符号 — 特殊功能寄存器 (直接地址), 不建局部槽,
+             * value_to_addr 直接用原名 (STORE/LOAD 查 sfr_addr 生成 dir8 访问) */
+            if (ctx->sfr_addr && dict_get(ctx->sfr_addr, sym)) {
+                dict_put(ctx->value_to_addr, c251_key(ins->dest), strdup(sym));
+                break;
+            }
             /* 全局符号（已注册）直接用原名；局部变量用函数名作用域修饰避免跨函数冲突 */
             if (!c251_obj_has_sym(ctx->obj, sym)) {
                 char locname[128];

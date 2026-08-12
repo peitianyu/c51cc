@@ -591,6 +591,8 @@ int main(int argc, char **argv)
     if (cpu.restarts)
         fprintf(stderr, "RESTART: %u 次 main 返回重启 (RET 目标在代码外, 非违规)\n",
                 (unsigned)cpu.restarts);
+    if (cpu.restarts && cpu.restart_retval)
+        fprintf(stderr, "RETVAL: 0x%04X\n", (unsigned)cpu.restart_retval);
     if (sfrtrace && cpu.sfr_trace) {
         FILE *tf = fopen(sfrtrace, "w");
         if (tf) {

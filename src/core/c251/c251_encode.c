@@ -368,6 +368,33 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     }
 
     if (!strcmp(op, "MOV")) {
+        if (getenv("C251_DBG_MOV")) fprintf(stderr, "MOV op args: %s %s\n", a1 ? a1 : "?", a2 ? a2 : "?");
+        /* M3: sfr 8 位访问 — MOV A,#imm (0x74) / MOV A,dir8 (0xE5 xx) / MOV dir8,A (0xF5 xx) */
+        /* dir8 无 # 前缀: 0x80-0xFF (SFR 直接地址) */
+        if (a1 && strcmp(a1, "A") == 0) {
+            if (a2 && a2[0] == '#') {
+                int ok = 0;
+                long imm = parse_imm(a2, &ok);
+                if (ok) { emit2(st, 0x74, (unsigned char)(imm & 0xFF)); return 0; }
+            }
+            { /* MOV A,dir8 */
+                char *end; long dir = strtol(a2, &end, 16);
+                if (a2 && *a2 != '#' && *end == '\0' && dir >= 0x80 && dir <= 0xFF) { emit2(st, 0xE5, (unsigned char)(dir & 0xFF)); return 0; }
+            }
+            int r2 = parse_reg(a2, &w2);
+            if (r2 >= 0 && !w2) { emit2(st, 0xE8 | (unsigned char)r2, 0x00); return 0; }  /* MOV A,Rn (0xE8+n) */
+            return -1;
+        }
+        if (a2 && strcmp(a2, "A") == 0) {
+            { /* MOV dir8,A */
+                char *end; long dir = strtol(a1, &end, 16);
+                if (a1 && *a1 != '#' && *end == '\0' && dir >= 0x80 && dir <= 0xFF) { emit2(st, 0xF5, (unsigned char)(dir & 0xFF)); return 0; }
+            }
+            { /* MOV Rn,A (0xF8+n) */
+                int r1 = parse_reg(a1, &w1);
+                if (r1 >= 0 && !w1) { emit2(st, 0xF8 | (unsigned char)r1, 0x00); return 0; }
+            }
+        }
         /* @WRj 间接目标: MOV @WRk,src (7A (k/2)A (src/2)0, decode_impl.inc case 0x9/0xA) */
         int ind1 = parse_indirect_wr(a1);
         if (ind1 >= 0) {

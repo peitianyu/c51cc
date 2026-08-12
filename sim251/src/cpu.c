@@ -650,6 +650,8 @@ int mcs251_execute_one(MCS251 *c)
                 c->ret_mismatch++;
             } else {
                 c->restarts++;   /* main 返回 → 弹到代码外 → 重启 */
+                if (c->restarts == 1)
+                    c->restart_retval = mcs251_ld_wrj16(c, 6); /* 首次重启时 WR6 = main 返回值 */
             }
         }
         /* 自校正: 返回地址所属函数即调用者 (无需维护调用栈, 抗尾跳/中断) */

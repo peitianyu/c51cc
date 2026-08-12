@@ -102,9 +102,8 @@ def main():
         src_text = open(src, encoding="utf-8", errors="replace").read()
         exp = parse_expected(src_text)
         if exp is None:
-            print(f"SKIP {os.path.basename(src):<40} (无期望值注释)")
-            skip += 1
-            continue
+            # M3 硬件测试约定: 返回 0 = 通过 (无 EXPECT 注释)
+            exp = 0
         hexp, cerr = compile_c(src, workdir.name)
         if hexp is None:
             print(f"FAIL {os.path.basename(src):<40} 编译错误: {cerr.splitlines()[-1] if cerr else ''}")

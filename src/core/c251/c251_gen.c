@@ -15,6 +15,7 @@ C251GenContext* c251_ctx_new(void) {
     ctx->value_to_addr = make_dict(NULL);
     ctx->value_to_spill = make_dict(NULL);
     ctx->sym_size = make_dict(NULL);
+    ctx->sfr_addr = make_dict(NULL);
     ctx->next_spill_id = 0;
     ctx->temp_values = make_list();
     return ctx;
@@ -144,6 +145,18 @@ static void process_global_var(C251GenContext *ctx, GlobalVar *g) {
     if (g->is_extern) return;
     int size = g->type ? g->type->size : 1;
     if (size < 1) size = 1;
+    /* M3: sfr/sbit — 特殊功能寄存器 (固定直接地址 0x80-0xFF), 不进 EDATA.
+     * ctype_register 标记 + bit_offset 存 SFR 地址; isel 用 sfr_addr 生成 MOV dir8. */
+    {
+        union { CtypeAttr a; int i; } att = {0};
+        att.i = g->type ? g->type->attr : 0;
+        if (att.a.ctype_register && g->type && g->type->bit_offset >= 0) {
+            int *addrp = malloc(sizeof(int));
+            *addrp = g->type->bit_offset;
+            dict_put(ctx->sfr_addr, strdup(g->name), addrp);
+            return;  /* 不分配 EDATA, 不注册 obj 符号 */
+        }
+    }
     int sec_idx = obj_find_or_add_section(ctx->obj, "?ED?", SEC_EDATA, 1);
     Section *sec = obj_get_section(ctx->obj, sec_idx);
     /* 首次创建时预留 C251_EDATA_BASE 字节：避开 IRAM 0x00-0x7F（寄存器文件 R0-R7/位区/数据区），

@@ -1512,7 +1512,8 @@ static bool is_type_keyword(const Token tok)
         is_ident(tok, "register") || is_ident(tok, "typedef") || is_ident(tok, "inline") || 
         is_ident(tok, "noreturn") || is_ident(tok, "short") || is_ident(tok, "data") || is_ident(tok, "idata") || 
         is_ident(tok, "pdata") || is_ident(tok, "xdata") || is_ident(tok, "edata") || 
-        is_ident(tok, "code");   
+        is_ident(tok, "code") || is_ident(tok, "sfr") || is_ident(tok, "sbit") || 
+        is_ident(tok, "bit");   
 
     if(is_keyword) 
         return true;            
@@ -2826,6 +2827,72 @@ static Ast *read_decl_or_func_def(void)
     Token tok = peek_token();
     if (get_ttype(tok) == TTYPE_NULL)
         return NULL;
+
+    /* M3: sfr / sbit / bit 声明 (8051 扩展) — 在标准声明解析前拦截
+     *   sfr P0 = 0x80;          → 特殊功能寄存器 (直接地址 8 位)
+     *   sbit P1_0 = P1 ^ 0;     → 位 (sfr 地址 ^ 位号)
+     *   bit g_bit = 0;          → 位变量
+     * 这些不是标准 C 类型, 需特殊处理: 声明注册到 globalenv,
+     * Ctype 用 ctype_register 标记 + bit_offset 存 sfr 地址 + bit_size 存位号。 */
+    if (is_ident(tok, "sfr") || is_ident(tok, "sbit") || is_ident(tok, "bit")) {
+        int kind = is_ident(tok, "sfr") ? 1 : (is_ident(tok, "sbit") ? 2 : 3);
+        read_token();  /* 消费 sfr/sbit/bit */
+        Token name_tok = read_token();
+        if (get_ttype(name_tok) != TTYPE_IDENT)
+            error("Identifier expected after %s", kind == 1 ? "sfr" : (kind == 2 ? "sbit" : "bit"));
+        char *name = get_ident(name_tok);
+        Token eq = read_token();
+        if (!is_punct(eq, '='))
+            error("'=' expected in sfr/sbit/bit declaration");
+
+        Ctype *t = malloc(sizeof(Ctype));
+        memset(t, 0, sizeof(Ctype));
+        t->type = CTYPE_INT;
+        t->size = 1;
+        t->attr = 0;
+        {
+            union { CtypeAttr a; int i; } u = {0};
+            u.a.ctype_register = 1;   /* 标记 sfr/sbit/bit */
+            u.a.ctype_unsigned = 1;   /* sfr 是 8 位无符号 (读回 MOVZ 零扩展) */
+            t->attr = u.i;
+        }
+
+        if (kind == 1) {
+            /* sfr name = 0x80: 地址 */
+            Ast *addr_expr = read_expr();
+            t->bit_offset = (int)eval_intexpr(addr_expr);  /* sfr 地址 */
+        } else if (kind == 2) {
+            /* sbit name = SFR ^ N: 读 sfr 名 + ^ 位号 */
+            Token sfr_tok = read_token();
+            if (get_ttype(sfr_tok) != TTYPE_IDENT)
+                error("Expected SFR name in sbit declaration");
+            Ast *sfr_var = dict_get(globalenv, get_ident(sfr_tok));
+            if (!sfr_var || !sfr_var->ctype)
+                error("Unknown SFR in sbit: %s", get_ident(sfr_tok));
+            t->bit_offset = sfr_var->ctype->bit_offset;  /* sfr 地址 */
+            Token caret = read_token();
+            if (!is_punct(caret, '^'))
+                error("'^' expected in sbit declaration");
+            Ast *bit_expr = read_expr();
+            t->bit_size = (int)eval_intexpr(bit_expr);    /* 位号 */
+        } else {
+            /* bit name = 0/1: 位变量 */
+            Ast *val_expr = read_expr();
+            t->bit_offset = -1;  /* 非 sfr, 普通位变量 */
+            t->bit_size = 0;
+            Ast *var = ast_gvar(t, name, false);
+            var->ginit = val_expr;
+            dict_put(globalenv, name, var);
+            expect(';');
+            return var;
+        }
+
+        Ast *var = ast_gvar(t, name, false);
+        dict_put(globalenv, name, var);
+        expect(';');
+        return ast_decl(var, NULL);  /* AST_DECL 让 ast_to_ssa 注册为 global */
+    }
+
     /* 隐式 int 返回类型 (C89): main() { } 无类型时默认 int。
      * read_decl_spec 处理此情况 (标识符→默认 int) */
     Ctype *ctype = read_decl_spec();

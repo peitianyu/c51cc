@@ -206,6 +206,7 @@ typedef struct {
     uint8_t  ret_pushed[0x10000 / 8];
     uint32_t ret_mismatch;   /* RET 目标在代码内但从未 push (真链接 bug) */
     uint32_t restarts;       /* RET 目标在代码外 (Keil main 返回 → 重启, 非违规) */
+    uint16_t restart_retval; /* 首次 RESTART 时 WR6 (main 返回值) */
     uint16_t ret_mismatch_pc;  /* 首个未命中 push 的 RET 目标 */
     uint16_t ret_mismatch_src; /* 首个违规 RET 指令自身地址 */
     uint16_t ret_mismatch_sp;  /* 首个违规 RET 时的 SP */
