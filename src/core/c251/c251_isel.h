@@ -49,6 +49,14 @@ typedef struct ISelContext {
     int br_hint_cond;        /* 免物化比较结果值名, -1 = 无 */
     char br_hint_jump[8];    /* 结果为真时的条件跳转助记符 (如 "JE"/"JSL") */
     int br_hint_ne_skip;     /* 被消费的 NE 指令 dest 值名, -1 = 无 */
+
+    /* sbit load 抑制集: 值由 CPL/JNB/JB 位操作直接重读, 不发 load 物化序列 */
+    int sbit_sup[32];
+    int sbit_sup_n;
+
+    /* 当前块 phis 数组视图 (use 扫描需含 phi — sbit 抑制误判根因) */
+    Instr **block_phis;
+    int block_phi_count;
 } ISelContext;
 
 /* 指令选择主入口 */

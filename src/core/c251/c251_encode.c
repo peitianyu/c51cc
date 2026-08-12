@@ -287,6 +287,18 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     if (!strcmp(op, "RET"))            { emit1(st, 0x22); return 0; }
     if (!strcmp(op, "RETI"))           { emit1(st, 0x32); return 0; }  /* 中断返回 */
 
+    /* SETB/CLR/CPL bit: D2/C2/B2 + bit addr (8051 位寻址; sim251 bit_8051_decode) */
+    if (!strcmp(op, "SETB") || !strcmp(op, "CLR") || !strcmp(op, "CPL")) {
+        char *end = NULL;
+        long ba = a1 ? strtol(a1, &end, 16) : -1;
+        if (a1 && *a1 != '#' && end && *end == '\0' && ba >= 0 && ba <= 0xFF) {
+            emit2(st, !strcmp(op, "SETB") ? 0xD2 : (!strcmp(op, "CLR") ? 0xC2 : 0xB2),
+                  (unsigned char)(ba & 0xFF));
+            return 0;
+        }
+        return -1;
+    }
+
     /* PUSH dir8 / POP dir8 (8051 兼容, 递归栈保护用; R0-R7 → 地址 0x00-0x07) */
     if (!strcmp(op, "PUSH") || !strcmp(op, "POP")) {
         int r1 = parse_reg(a1, &w1);
@@ -407,7 +419,50 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
         }
     }
 
+    /* JB bit,label (0x20) / JNB bit,label (0x30): bit addr + rel8;
+     * 越界降级: 反转位跳转 (rel=3) + LJMP 绝对跳转 */
+    if (!strcmp(op, "JB") || !strcmp(op, "JNB")) {
+        char *end = NULL; long ba = a1 ? strtol(a1, &end, 16) : -1;
+        if (a1 && *a1 != '#' && end && *end == '\0' && ba >= 0 && ba <= 0xFF && a2) {
+            int seq = st->jump_seq++;
+            if (seq_is_degraded(st->degraded_seqs, seq)) {
+                emit2(st, !strcmp(op, "JB") ? 0x30 : 0x20, (unsigned char)(ba & 0xFF));
+                emit1(st, 0x03);
+                emit3(st, 0x02, 0x00, 0x00);
+                AbsFixup *fx = malloc(sizeof(AbsFixup));
+                fx->offset = st->pc - 3;
+                fx->symbol = strdup(a2);
+                list_push(st->abslabfixups, fx);
+                return 0;
+            }
+            emit2(st, !strcmp(op, "JB") ? 0x20 : 0x30, (unsigned char)(ba & 0xFF));
+            emit1(st, 0x00); /* rel 占位 (必须占位, 否则下一条指令覆盖 rel 槽) */
+            RelFixup *fx = malloc(sizeof(RelFixup));
+            fx->offset = st->pc - 2;
+            fx->label = strdup(a2);
+            fx->seq = seq;
+            list_push(st->fixups, fx);
+            return 0;
+        }
+        return -1;
+    }
+
     if (!strcmp(op, "MOV")) {
+        /* 位操作: MOV C,bit (0xA2) / MOV bit,C (0x92) — 8051 位寻址 */
+        if (a1 && !strcmp(a1, "C")) {
+            char *end = NULL; long ba = a2 ? strtol(a2, &end, 16) : -1;
+            if (a2 && *a2 != '#' && end && *end == '\0' && ba >= 0 && ba <= 0xFF) {
+                emit2(st, 0xA2, (unsigned char)(ba & 0xFF)); return 0;
+            }
+            return -1;
+        }
+        if (a2 && !strcmp(a2, "C")) {
+            char *end = NULL; long ba = a1 ? strtol(a1, &end, 16) : -1;
+            if (a1 && *a1 != '#' && end && *end == '\0' && ba >= 0 && ba <= 0xFF) {
+                emit2(st, 0x92, (unsigned char)(ba & 0xFF)); return 0;
+            }
+            return -1;
+        }
         if (getenv("C251_DBG_MOV")) fprintf(stderr, "MOV op args: %s %s\n", a1 ? a1 : "?", a2 ? a2 : "?");
         /* M3: sfr 8 位访问 — MOV A,#imm (0x74) / MOV A,dir8 (0xE5 xx) / MOV dir8,A (0xF5 xx) */
         /* dir8 无 # 前缀: 0x80-0xFF (SFR 直接地址) */
@@ -666,6 +721,15 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
          * ANL/ORL/XRL WRj,#imm16: 5E/4E/6E (j/2)4 hi lo (regop2 generic case 0x4)
          * ANL/ORL/XRL Rm,#data: 5E/4E/6E m0 data (regop2 generic case 0x0) */
         int base = !strcmp(op, "ANL") ? 0x5D : (!strcmp(op, "ORL") ? 0x4D : 0x6D);
+        /* 位操作: ORL C,bit (0x72) / ANL C,bit (0x82) — 8051 位寻址 */
+        if (a1 && !strcmp(a1, "C") && (!strcmp(op, "ORL") || !strcmp(op, "ANL"))) {
+            char *end = NULL; long ba = a2 ? strtol(a2, &end, 16) : -1;
+            if (a2 && *a2 != '#' && end && *end == '\0' && ba >= 0 && ba <= 0xFF) {
+                emit2(st, !strcmp(op, "ORL") ? 0x72 : 0x82, (unsigned char)(ba & 0xFF));
+                return 0;
+            }
+            return -1;
+        }
         int r1 = parse_reg(a1, &w1);
         int r2 = parse_reg(a2, &w2);
         if (r1 >= 0 && w1 && r2 >= 0 && w2)

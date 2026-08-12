@@ -590,6 +590,19 @@ static void isel_emit_label(ISelContext* isel, const char* name) {
 /* ins->labels 含 "imm" 标记 → 常量值在 ins->imm.ival（ssa_pass 约定） */
 static bool has_imm_label(Instr* ins);
 
+/* 当前块已处理指令中找值的 def (sbit 位操作模式检测用) */
+static Instr *isel_find_def_in_block(ISelContext *isel, ValueName v);
+static const char *sbit_load_sym(ISelContext *isel, C251GenContext *ctx, ValueName v);
+static bool sbit_is_suppressed(ISelContext *isel, ValueName v);
+static bool store_target_same_sbit(C251GenContext *ctx, Instr *st, int saddr, int sbit);
+static bool sbit_all_uses_ok(ISelContext *isel, ValueName v,
+                              bool (*pred)(ISelContext*, Instr*, int, int, int),
+                              int saddr, int sbit);
+static bool sbit_use_load(ISelContext *isel, Instr *u, int k, int saddr, int sbit);
+static bool sbit_use_lnot(ISelContext *isel, Instr *u, int k, int saddr, int sbit);
+static bool sbit_use_zext(ISelContext *isel, Instr *u, int k, int saddr, int sbit);
+static bool sbit_load_suppressible(ISelContext *isel, Instr *ld, ValueName v, int saddr, int sbit);
+
 /* 值类型 unsigned 判断（def 时 value_type 已记录）；未知默认有符号（C 语义）
  * 注意：rank < int 的 uchar/ushort 会提升为 int（有符号），只有 size>=2 的原生
  * 无符号类型（uint）才按无符号比较（C 整数提升规则）。 */
@@ -1712,6 +1725,11 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 isel_emit(isel, "MOV", "A", dirdesc);
                 isel_emit(isel, "MOV", rbuf, "A");
                 if (sbit >= 0) {
+                    /* 值全部由位直接模式 (CPL/JNB/JB) 消费 → 抑制物化, 由位操作重读 */
+                    if (sbit_load_suppressible(isel, ins, ins->dest, saddr, sbit)) {
+                        if (isel->sbit_sup_n < 32) isel->sbit_sup[isel->sbit_sup_n++] = ins->dest;
+                        break;
+                    }
                     /* sbit 读: A 右移 sbit 位, AND 1 → 0/1 */
                     for (int b = 0; b < sbit; b++) isel_emit(isel, "SRL", "A", NULL);
                     isel_emit(isel, "ANL", "A", "#1");
@@ -1869,19 +1887,15 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                     int saddr = 0, sbit = -1;
                     sfr_lookup(ctx, raw, &saddr, &sbit);
                     char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", saddr);
+                    if (sbit >= 0) {
+                        /* sbit 常量写: 值&1 → SETB/CLR 位直接操作 (Keil 同款, 省 6+ 指令 RMW) */
+                        char ba[16]; snprintf(ba, sizeof(ba), "0x%02X", (unsigned char)(saddr | sbit));
+                        isel_emit(isel, (ins->imm.ival & 1) ? "SETB" : "CLR", ba, NULL);
+                        break;
+                    }
                     char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFF);
                     isel_emit(isel, "MOV", "A", imm);
-                    if (sbit >= 0) {
-                        isel_emit(isel, "MOV", "R0", "A");
-                        for (int b = 0; b < sbit; b++) isel_emit(isel, "SLL", "R0", NULL);
-                        isel_emit(isel, "MOV", "A", dirdesc);
-                        char clr[16]; snprintf(clr, sizeof(clr), "#0x%02X", (unsigned char)~(1 << sbit));
-                        isel_emit(isel, "ANL", "A", clr);
-                        isel_emit(isel, "ORL", "A", "R0");
-                        isel_emit(isel, "MOV", dirdesc, "A");
-                    } else {
-                        isel_emit(isel, "MOV", dirdesc, "A");
-                    }
+                    isel_emit(isel, "MOV", dirdesc, "A");
                     break;
                 }
                 char sym[160];
@@ -1932,16 +1946,60 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                     }
                 }
                 if (sbit >= 0) {
-                    /* sbit 写 (RMW): 新值 A → R0 (位值), 读 SFR → 清位 → OR 位值 → 写回 */
-                    isel_emit(isel, "MOV", "R0", "A");           /* 位值 0/1 */
-                    if (sbit > 0) { /* 位值左移 sbit 位 */
-                        for (int b = 0; b < sbit; b++) isel_emit(isel, "SLL", "R0", NULL);
+                    /* sbit 非 const 写: 模式检测 → 直接位操作 (Keil 同款) */
+                    char ba[16]; snprintf(ba, sizeof(ba), "0x%02X", (unsigned char)(saddr | sbit));
+                    Instr *vdef = isel_find_def_in_block(isel, val);
+                    /* 1) val = lnot(load @同 sbit) → CPL 翻转 */
+                    if (vdef && vdef->op == IROP_LNOT && vdef->args && vdef->args->len > 0) {
+                        ValueName lv = *(ValueName*)list_get(vdef->args, 0);
+                        Instr *ldef = isel_find_def_in_block(isel, lv);
+                        const char *lsym = (ldef && ldef->op == IROP_LOAD && ldef->args && ldef->args->len > 0)
+                            ? value_to_addr_lookup(ctx, *(ValueName*)list_get(ldef->args, 0)) : NULL;
+                        int lsaddr = 0, lsbit = -1;
+                        if (lsym && sfr_lookup(ctx, (char*)lsym, &lsaddr, &lsbit)
+                            && lsaddr == saddr && lsbit == sbit) {
+                            isel_emit(isel, "CPL", ba, NULL);
+                            break;
+                        }
                     }
-                    isel_emit(isel, "MOV", "A", dirdesc);          /* 读当前 SFR */
-                    char clr[16]; snprintf(clr, sizeof(clr), "#0x%02X", (unsigned char)~(1 << sbit));
-                    isel_emit(isel, "ANL", "A", clr);              /* 清位 */
-                    isel_emit(isel, "ORL", "A", "R0");            /* OR 位值 */
-                    isel_emit(isel, "MOV", dirdesc, "A");          /* 写回 */
+                    /* 2) val = or/and(load @a, load @b) → MOV C,a; ORL/ANL C,b; MOV bit,C */
+                    if (vdef && (vdef->op == IROP_OR || vdef->op == IROP_AND)
+                        && vdef->args && vdef->args->len >= 2) {
+                        const char *s1 = sbit_load_sym(isel, ctx, *(ValueName*)list_get(vdef->args, 0));
+                        const char *s2 = sbit_load_sym(isel, ctx, *(ValueName*)list_get(vdef->args, 1));
+                        int a1s = 0, a1b = -1, a2s = 0, a2b = -1;
+                        if (s1 && s2 && sfr_lookup(ctx, (char*)s1, &a1s, &a1b) && a1b >= 0
+                            && sfr_lookup(ctx, (char*)s2, &a2s, &a2b) && a2b >= 0) {
+                            char ba1[16], ba2[16];
+                            snprintf(ba1, sizeof(ba1), "0x%02X", (unsigned char)(a1s | a1b));
+                            snprintf(ba2, sizeof(ba2), "0x%02X", (unsigned char)(a2s | a2b));
+                            isel_emit(isel, "MOV", "C", ba1);
+                            isel_emit(isel, vdef->op == IROP_OR ? "ORL" : "ANL", "C", ba2);
+                            isel_emit(isel, "MOV", ba, "C");
+                            break;
+                        }
+                    }
+                    /* 3) val = load @sbitB (位拷贝) → MOV C,B; MOV bit,C */
+                    if (vdef && vdef->op == IROP_LOAD && vdef->args && vdef->args->len > 0) {
+                        const char *lsym = value_to_addr_lookup(ctx, *(ValueName*)list_get(vdef->args, 0));
+                        int lsaddr = 0, lsbit = -1;
+                        if (lsym && sfr_lookup(ctx, (char*)lsym, &lsaddr, &lsbit) && lsbit >= 0) {
+                            char ba2[16]; snprintf(ba2, sizeof(ba2), "0x%02X", (unsigned char)(lsaddr | lsbit));
+                            isel_emit(isel, "MOV", "C", ba2);
+                            isel_emit(isel, "MOV", ba, "C");
+                            break;
+                        }
+                    }
+                    /* 4) 一般 0/1 值 (已在 A): CLR 默认 + JZ 跳过 + SETB */
+                    isel_emit(isel, "CLR", ba, NULL);
+                    {
+                        char *lab = isel_new_label(isel, "sbz");
+                        isel_emit(isel, "JZ", lab, NULL);
+                        isel_emit(isel, "SETB", ba, NULL);
+                        isel_emit_label(isel, lab);
+                        free(lab);
+                    }
+                    break;
                 } else {
                     isel_emit(isel, "MOV", dirdesc, "A");
                 }
@@ -2292,6 +2350,36 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             isel_emit(isel, "SJMP", t, NULL);
             break;
         }
+        /* sbit 位分支: cond = zext(load @bit) → JB bit, 真目标 (bit 置位跳真);
+         *           cond = zext(lnot(load @bit)) → JNB bit, 真目标 (bit 清除跳真) */
+        {
+            Instr *cdef = isel_find_def_in_block(isel, cond);
+            if (cdef && cdef->op == IROP_ZEXT && cdef->args && cdef->args->len > 0) {
+                bool inv = false;
+                ValueName cv = *(ValueName*)list_get(cdef->args, 0);
+                Instr *d2 = isel_find_def_in_block(isel, cv);
+                if (d2 && d2->op == IROP_LNOT && d2->args && d2->args->len > 0) {
+                    inv = true;
+                    cv = *(ValueName*)list_get(d2->args, 0);
+                    d2 = isel_find_def_in_block(isel, cv);
+                }
+                if (d2 && d2->op == IROP_LOAD && d2->args && d2->args->len > 0) {
+                    const char *lsym = value_to_addr_lookup(ctx, *(ValueName*)list_get(d2->args, 0));
+                    int lsaddr = 0, lsbit = -1;
+                    if (lsym && sfr_lookup(ctx, (char*)lsym, &lsaddr, &lsbit) && lsbit >= 0) {
+                        char ba[16]; snprintf(ba, sizeof(ba), "0x%02X", (unsigned char)(lsaddr | lsbit));
+                        /* JNB/JB 自身已编码取反, 真目标恒为 tid */
+                        emit_phi_copies(isel, tid);
+                        char t[32]; block_label_name(isel, t, sizeof(t), tid);
+                        isel_emit(isel, inv ? "JNB" : "JB", ba, t);
+                        emit_phi_copies(isel, fid);
+                        char f[32]; block_label_name(isel, f, sizeof(f), fid);
+                        isel_emit(isel, "SJMP", f, NULL);
+                        break;
+                    }
+                }
+            }
+        }
         /* BR 免物化：条件值命中紧邻比较的 hint（比较指令已发 CMP，直接 Jcc）。
          * 模式 B（NE dest,0 → BR）中 BR 条件 = NE 结果（br_hint_ne_skip）。 */
         if (isel->br_hint_cond >= 0
@@ -2412,6 +2500,127 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     }
 }
 
+/* 当前块已处理指令中找值的 def (sbit 位操作模式检测用; 反向扫描快) */
+static Instr *isel_find_def_in_block(ISelContext *isel, ValueName v) {
+    if (!isel || v <= 0) return NULL;
+    for (int i = isel->block_instr_pos - 1; i >= 0; i--) {
+        Instr *d = isel->block_instrs[i];
+        if (d && d->dest == v && d->op != IROP_NOP) return d;
+    }
+    return NULL;
+}
+
+/* sbit 位操作: 值 def 若是 load @sbit2, 返回 sbit2 的 sfr 符号名 (否则 NULL) */
+static const char *sbit_load_sym(ISelContext *isel, C251GenContext *ctx, ValueName v) {
+    Instr *d = isel_find_def_in_block(isel, v);
+    if (!d || d->op != IROP_LOAD || !d->args || d->args->len < 1) return NULL;
+    ValueName lp = *(ValueName*)list_get(d->args, 0);
+    return value_to_addr_lookup(ctx, lp);
+}
+
+static bool sbit_is_suppressed(ISelContext *isel, ValueName v) {
+    for (int i = 0; i < isel->sbit_sup_n; i++)
+        if (isel->sbit_sup[i] == v) return true;
+    return false;
+}
+
+/* store 目标是否为指定 sbit (CPL 模式: lnot(load @X) → store @X 同一位) */
+static bool store_target_same_sbit(C251GenContext *ctx, Instr *st, int saddr, int sbit) {
+    if (!st || st->op != IROP_STORE || !st->args || st->args->len < 2) return false;
+    ValueName p = *(ValueName*)list_get(st->args, 0);
+    char *sym = value_to_addr_lookup(ctx, p);
+    int a = 0, b = -1;
+    return sym && sfr_lookup(ctx, sym, &a, &b) && a == saddr && b == sbit;
+}
+
+/* v (zext 结果) 是否只被 BR 作条件使用 (JB/JNB 模式) */
+/* 全函数 use 扫描: 检查 v 的使用是否都满足 pred (返回 false = 有不合格使用) */
+static bool sbit_all_uses_ok(ISelContext *isel, ValueName v,
+                              bool (*pred)(ISelContext*, Instr*, int, int, int),
+                              int saddr, int sbit) {
+    Func *fn = isel->ctx ? isel->ctx->current_func : NULL;
+    if (!fn || !fn->blocks) return true;
+    for (Iter it = list_iter(fn->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        List *lists[2] = {b->phis, b->instrs};
+        for (int li = 0; li < 2; li++) {
+            if (!lists[li]) continue;
+            for (Iter jt = list_iter(lists[li]); !iter_end(jt);) {
+                Instr *u = iter_next(&jt);
+                if (!u || u->op == IROP_NOP) continue;
+                for (int k = 0; u->args && k < u->args->len; k++) {
+                    if (*(ValueName*)list_get(u->args, k) == v) {
+                        if (!pred(isel, u, k, saddr, sbit)) return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+/* sbit load 值的直接使用: 仅 lnot/zext/store 位拷贝合格 (zext→br 由后续层校验) */
+static bool sbit_use_load(ISelContext *isel, Instr *u, int k, int saddr, int sbit) {
+    if (u->op == IROP_LNOT && k == 0) {
+        return sbit_all_uses_ok(isel, u->dest, sbit_use_lnot, saddr, sbit);
+    }
+    if (u->op == IROP_ZEXT && k == 0) {
+        return sbit_all_uses_ok(isel, u->dest, sbit_use_zext, saddr, sbit);
+    }
+    if (u->op == IROP_STORE && k == 1) {
+        /* 位拷贝: store 目标是 sbit → 存储侧 MOV C 重读, load 可抑制 */
+        if (u->args && u->args->len >= 2) {
+            ValueName p = *(ValueName*)list_get(u->args, 0);
+            char *sym = value_to_addr_lookup(isel->ctx, p);
+            int a = 0, b = -1;
+            return sym && sfr_lookup(isel->ctx, sym, &a, &b) && b >= 0;
+        }
+        return false;
+    }
+    return false;
+}
+
+/* lnot 结果的使用: store 同 sbit (CPL) 或 zext→br (JNB) 合格 */
+static bool sbit_use_lnot(ISelContext *isel, Instr *u, int k, int saddr, int sbit) {
+    if (u->op == IROP_STORE && k == 1)
+        return store_target_same_sbit(isel->ctx, u, saddr, sbit);
+    if (u->op == IROP_ZEXT && k == 0)
+        return sbit_all_uses_ok(isel, u->dest, sbit_use_zext, saddr, sbit);
+    return false;
+}
+
+/* zext 结果的使用: 仅 BR 条件合格 */
+static bool sbit_use_zext(ISelContext *isel, Instr *u, int k, int saddr, int sbit) {
+    (void)saddr; (void)sbit;
+    return u->op == IROP_BR && k == 0;
+}
+
+/* sbit load 值是否全部由位直接模式消费 (抑制 load 物化) */
+static bool sbit_load_suppressible(ISelContext *isel, Instr *ld, ValueName v, int saddr, int sbit) {
+    int uses = 0;
+    Func *fn = isel->ctx ? isel->ctx->current_func : NULL;
+    if (!fn || !fn->blocks) return false;
+    for (Iter it = list_iter(fn->blocks); !iter_end(it);) {
+        Block *b = iter_next(&it);
+        if (!b) continue;
+        List *lists[2] = {b->phis, b->instrs};
+        for (int li = 0; li < 2; li++) {
+            if (!lists[li]) continue;
+            for (Iter jt = list_iter(lists[li]); !iter_end(jt);) {
+                Instr *u = iter_next(&jt);
+                if (!u || u->op == IROP_NOP || u == ld) continue;
+                for (int k = 0; u->args && k < u->args->len; k++) {
+                    if (*(ValueName*)list_get(u->args, k) != v) continue;
+                    uses++;
+                    if (!sbit_use_load(isel, u, k, saddr, sbit)) return false;
+                }
+            }
+        }
+    }
+    return uses > 0;
+}
+
 void isel_block(ISelContext* isel, Block* block) {
     if (!isel || !block) return;
     isel->current_block_id = block->id;
@@ -2453,13 +2662,27 @@ void isel_block(ISelContext* isel, Block* block) {
     }
     isel->block_instrs = arr;
     isel->block_instr_count = idx;
+    isel->sbit_sup_n = 0;   /* 每块重置 sbit 抑制集 */
+    /* phis 数组视图 (use 扫描含 phi) */
+    Instr **parr = NULL;
+    int pn = 0;
+    if (block->phis && block->phis->len > 0) {
+        parr = malloc(sizeof(Instr*) * block->phis->len);
+        for (Iter pit = list_iter(block->phis); !iter_end(pit);) parr[pn++] = iter_next(&pit);
+    }
+    isel->block_phis = parr;
+    isel->block_phi_count = pn;
     for (int i = 0; i < idx; i++) {
         isel->block_instr_pos = i;
+        Instr *dins = arr[i];
+        /* sbit 抑制值: LNOT/ZEXT 由 CPL/JNB/JB 位操作重读, 跳过物化 */
+        if (dins && (dins->op == IROP_LNOT || dins->op == IROP_ZEXT)
+            && sbit_is_suppressed(isel, dins->dest))
+            continue;
         isel_instr(isel, arr[i], NULL);
         /* Keil 纪律: global-live 值 def 时立即落槽 (槽权威)。
          * 物理寄存器只是块内缓存; 块间读取一律走槽。
          * 跳过 CONST (value_to_const 优先) 与 PHI (槽由边缘拷贝写)。 */
-        Instr *dins = arr[i];
         if (dins && dins->dest >= 0 && dins->op != IROP_PHI && dins->op != IROP_NOP
             && dins->op != IROP_CONST
             && is_global_live(isel->global_live, dins->dest)) {
@@ -2474,7 +2697,10 @@ void isel_block(ISelContext* isel, Block* block) {
         }
     }
     isel->block_instrs = NULL;
+    isel->block_phis = NULL;
+    isel->block_phi_count = 0;
     free(arr);
+    free(parr);
 }
 
 void isel_function(C251GenContext* ctx, Func* func) {
