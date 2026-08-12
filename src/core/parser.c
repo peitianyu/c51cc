@@ -1553,7 +1553,10 @@ static Ast *read_decl_array_init_recurse(Ctype *ctype)
         Ast *one_row;
         if (ctype->ptr->type == CTYPE_ARRAY)
             one_row = read_decl_array_init_recurse(ctype->ptr);
-        else {
+        else if (ctype->ptr->type == CTYPE_STRUCT) {
+            /* struct 元素用结构体初始化器 (0093-arrayinit: S a[1]={{1,{2,3}}}) */
+            one_row = read_decl_struct_init(ctype->ptr);
+        } else {
             Token t = read_token();
             unget_token(t);
             one_row = read_expr();

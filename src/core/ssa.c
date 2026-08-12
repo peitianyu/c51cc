@@ -46,6 +46,7 @@ static ValueName ssa_build_const(SSABuild *b, int64_t val);
 static ValueName ssa_build_const_t(SSABuild *b, int64_t val, Ctype *type);
 static ValueName ssa_build_offset(SSABuild *b, ValueName ptr, ValueName idx, int elem_size);
 static void ssa_build_store(SSABuild *b, ValueName ptr, ValueName val, Ctype *mem_type);
+static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items, List *relocs);
 static ValueName gen_type_cast(SSABuild *b, ValueName val, Ctype *from, Ctype *to);
 static bool is_const(List *consts, ValueName val);
 static int64_t get_const_val(List *consts, ValueName val);
@@ -378,6 +379,9 @@ static void fill_array_init_bytes(unsigned char *buf, int size, Ctype *elem, Lis
         if (!one) { offset += elem->size; continue; }
         if (elem->type == CTYPE_ARRAY && one->type == AST_ARRAY_INIT) {
             fill_array_init_bytes(buf + offset, elem->size, elem->ptr, one->arrayinit, relocs);
+        } else if (elem->type == CTYPE_STRUCT && one->type == AST_STRUCT_INIT) {
+            /* 数组元素为结构体 (0093-arrayinit: S a[1]={{1,{2,3}}}) */
+            fill_struct_init_bytes(buf + offset, elem, one->structinit, relocs);
         } else if (is_inttype(elem) && one->type == AST_LITERAL) {
             write_scalar_bytes(buf, offset, elem->size, one->ival);
         } else if (elem->type == CTYPE_PTR && one->type == AST_ADDR &&
@@ -2988,6 +2992,11 @@ void ssa_print(FILE *fp, SSAUnit *unit) {
                             }
                         }
                     }
+                } else if (g->init_instr && g->init_instr->labels &&
+                           g->init_instr->labels->len > 0) {
+                    /* 标量指针 = &全局符号: init_instr labels[0] 是目标符号名
+                     * (int *p = &x) — 仿真器靠它把指针字段解析成目标地址 */
+                    fprintf(fp, " = &@%s", (char *)list_get(g->init_instr->labels, 0));
                 } else {
                     fprintf(fp, " = %ld", g->init_value);
                 }
