@@ -179,16 +179,34 @@ static Symbol *c251_find_symbol(const ObjFile *obj, const char *name) {
 
 /* 符号地址 = sym->value（EDATA 从 0 布局，value 即地址，与 hex 输出一致） */
 static unsigned symbol_addr(EncodeState *st, const char *name) {
-    Symbol *s = c251_find_symbol(st->obj, name);
+    /* 支持 (sym + N) 地址偏移语法: 提取符号名与偏移 (0046-inits: long 低 16 位) */
+    int addend = 0;
+    const char *symname = name;
+    if (name && name[0] == '(') {
+        const char *p = name + 1;
+        const char *plus = strchr(p, '+');
+        if (plus) {
+            int len = (int)(plus - p);
+            while (len > 0 && (p[len-1] == ' ' || p[len-1] == '\t')) len--;
+            char buf[128];
+            if (len > 0 && len < (int)sizeof(buf)) {
+                memcpy(buf, p, (size_t)len);
+                buf[len] = '\0';
+                symname = buf;
+                addend = (int)strtol(plus + 1, NULL, 0);
+            }
+        }
+    }
+    Symbol *s = c251_find_symbol(st->obj, symname);
     if (!s || s->section < 0) {
         fprintf(stderr, "c251_encode: unknown symbol: %s\n", name);
         return 0;
     }
     if (getenv("C251_DEBUG_SYM")) {
         fprintf(stderr, "c251_encode: sym %s value=%d sec=%d kind=%d\n",
-                name, s->value, s->section, s->kind);
+                symname, s->value, s->section, s->kind);
     }
-    return (unsigned)s->value;
+    return (unsigned)(s->value + addend);
 }
 
 /* 判定操作数是否为符号名：非 #imm、非 R0-R7、非 WRj、非纯数字 */

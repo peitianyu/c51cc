@@ -553,7 +553,10 @@ static int value_size_of_ctx(C251GenContext *ctx, ValueName v) {
         char *k = c251_key(v);
         Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
         free(k);
-        if (t) return t->size <= 1 ? 1 : 2;
+        if (t) {
+            int sz = t->size;
+            return sz <= 1 ? 1 : (sz > 2 ? sz : 2);  /* 保留 long (4) 尺寸 */
+        }
     }
     return 2;
 }
@@ -1419,11 +1422,22 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 }
             } else if (wr >= 0) {
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
-                isel_emit(isel, "MOV", wbuf, sym);
+                if (dsz > 2) {
+                    /* long (4B): 16 位加载取低 16 位 (大端偏移 +2) (0046-inits: y=6) */
+                    char symlo[64]; snprintf(symlo, sizeof(symlo), "(%s + 2)", sym);
+                    isel_emit(isel, "MOV", wbuf, symlo);
+                } else {
+                    isel_emit(isel, "MOV", wbuf, sym);
+                }
             } else {
                 int tmp = isel_temp_wr(isel, -1, -1);
                 char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
-                isel_emit(isel, "MOV", tbuf, sym);
+                if (dsz > 2) {
+                    char symlo[64]; snprintf(symlo, sizeof(symlo), "(%s + 2)", sym);
+                    isel_emit(isel, "MOV", tbuf, symlo);
+                } else {
+                    isel_emit(isel, "MOV", tbuf, sym);
+                }
                 char *sp = c251_alloc_spill(ctx, ins->dest);
                 isel_emit(isel, "MOV", sp, tbuf);
             }
