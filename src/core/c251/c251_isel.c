@@ -1348,10 +1348,18 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         int dsz = value_size_of_ctx(ctx, ins->dest);
         /* 指针目标的 LOAD（`int *p = g_arr;` 中 v2 = load v1, v1=addr @g_arr）：
          * C 语义数组名衰减为地址——加载的是符号地址而非内存数据（MOV WRj,#sym）。
-         * 非指针（int/char 等数据读）才读内存（MOV WRj,SYM）。 */
+         * 仅当源是数组（sym 实际大小 > 指针 2 字节）才衰减；`*pp` 读指针变量（2 字节）
+         * 应读内存值（MOV WRj,SYM），否则 `**pp` 错误物化地址 (0005-ifstmt FAIL)。
+         * 注意用原始大小（sym_size_of 截断到 1/2，数组 10 字节会被误判为 2）。 */
         bool dest_is_ptr = (ins->type && ins->type->type == CTYPE_PTR);
+        int sym_sz = 0;
+        if (sym && ctx->sym_size) {
+            int *s = (int*)dict_get(ctx->sym_size, (char*)sym);
+            if (s) sym_sz = *s;
+        }
+        bool array_decay = dest_is_ptr && sym && sym_sz > 2;
         if (sym) {
-            if (dest_is_ptr) {
+            if (array_decay) {
                 /* 指针 = &符号：物化地址立即数 */
                 char saddr[64]; snprintf(saddr, sizeof(saddr), "#%s", sym);
                 if (wr >= 0) {
@@ -1439,7 +1447,17 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         if (ins->labels && list_len(ins->labels) > 0) {
             const char *lab = (const char*)list_get(ins->labels, 0);
             if (lab && lab[0] == '@') {
-                const char *sym = lab + 1;
+                /* 局部变量名转换：优化格式 @x 用原始名，须映射到函数作用域槽 __loc_fn_x
+                 * （与 ADDR 处理一致，否则 store 到未注册符号 x → unknown symbol） */
+                const char *raw = lab + 1;
+                char sym[160];
+                if (!c251_obj_has_sym(ctx->obj, raw)) {
+                    const char *fn = (ctx->current_func && ctx->current_func->name)
+                        ? ctx->current_func->name : "?";
+                    snprintf(sym, sizeof(sym), "__loc_%s_%s", fn, raw);
+                } else {
+                    snprintf(sym, sizeof(sym), "%s", raw);
+                }
                 int ssz = sym_size_of(ctx, sym);
                 int tmp = isel_temp_wr(isel, -1, -1);
                 char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);

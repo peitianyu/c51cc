@@ -122,6 +122,9 @@ typedef struct SSABuild {
     struct CFContext *cf_ctx;  // 控制流上下文，定义在ssa.c中
     int          next_value;
     uint32_t     next_block;
+    /* 已取地址的局部变量集合：取地址后值可被指针写改变，
+     * 后续 read 必须走内存 load 而非 var_map SSA 值 (0005-ifstmt 根因)。 */
+    Dict        *taken_addr;   /* char* 变量名 -> int* 1 */
 } SSABuild;
 
 /* ============================================================

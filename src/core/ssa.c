@@ -340,6 +340,7 @@ SSABuild* ssa_build_create(void) {
     b->unit->funcs = make_list();
     b->unit->globals = make_list();
     b->unit->asm_blocks = make_list();
+    b->taken_addr = make_dict(NULL);
     return b;
 }
 
@@ -873,7 +874,31 @@ static ValueName gen_logical_short_circuit(SSABuild *b, Ast *ast, bool is_and) {
     return ssa_build_read(b, tmp_name);
 }
 
-static ValueName ssa_build_addr_typed(SSABuild *b, const char *var, Ctype *result_type, Ctype *mem_type) {
+static ValueName ssa_build_addr_typed(SSABuild *b, const char *var, Ctype *result_type, Ctype *mem_type, int sync_value) {
+    /* 标记已取地址：值可被指针写改变，后续 read 走内存 load */
+    if (b && b->taken_addr && var) {
+        if (!dict_get(b->taken_addr, (char*)var)) {
+            int *one = ssa_alloc(sizeof(int)); *one = 1;
+            dict_put(b->taken_addr, ssa_strdup(var), one);
+        }
+    }
+    /* 取地址时（sync_value=1）若当前 SSA 值存在（已赋值），store 到槽同步内存：
+     * `x = 0; p = &x;` 中 x 的值流在 SSA 值 v，但 *p 经指针读内存槽。
+     * 读路径 (sync_value=0) 不 store——var_map 值可能是旧值，
+     * 覆盖指针刚写入的新值 (0014-assignidx: p[0]=0 后 return x)。 */
+    if (sync_value && b->cur_block) {
+        ValueName *pv = dict_get(b->cur_block->var_map, (char*)var);
+        if (pv && *pv > 0) {
+            Instr *addr = ssa_make_instr(b, IROP_ADDR);
+            addr->dest = ssa_new_value(b);
+            addr->type = result_type ? result_type : ctype_ptr;
+            addr->mem_type = mem_type;
+            ssa_add_label(addr, var);
+            ssa_emit(b, addr);
+            ssa_build_store(b, addr->dest, *pv, mem_type);
+            return addr->dest;
+        }
+    }
     Instr *i = ssa_make_instr(b, IROP_ADDR);
     i->dest = ssa_new_value(b);
     i->type = result_type ? result_type : ctype_ptr;
@@ -908,7 +933,14 @@ static Ctype *make_pointer_type_for_mem(Ctype *mem_type) {
 
 static ValueName ssa_build_addr(SSABuild *b, const char *var, Ctype *mem_type) {
     Ctype *result_type = make_pointer_type_for_mem(mem_type);
-    return ssa_build_addr_typed(b, var, result_type, mem_type);
+    return ssa_build_addr_typed(b, var, result_type, mem_type, 1);
+}
+
+/* 读路径取地址（不 store 当前值）：taken_addr 变量读走内存 load，
+ * 但 addr 不应同步 var_map 旧值（可能已过时）。 */
+static ValueName ssa_build_addr_read(SSABuild *b, const char *var, Ctype *mem_type) {
+    Ctype *result_type = make_pointer_type_for_mem(mem_type);
+    return ssa_build_addr_typed(b, var, result_type, mem_type, 0);
 }
 
 static Ctype* expr_value_type(Ast* ast) {
@@ -1101,7 +1133,7 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
 
     case AST_FUNC_DECL:
     case AST_FUNC_DEF:
-        return ssa_build_addr_typed(b, ast->fname, ctype_func_ptr, ctype_func_ptr);
+        return ssa_build_addr_typed(b, ast->fname, ctype_func_ptr, ctype_func_ptr, 0);
         
     case AST_LVAR: {
         if (ast->ctype && ast->ctype->type == CTYPE_ARRAY) {
@@ -1111,6 +1143,12 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
          * 不能走 var_map 的 SSA 值 (会被常量折叠/寄存器化, 违反 volatile 语义) */
         if (ast->ctype && get_attr(ast->ctype->attr).ctype_volatile) {
             ValueName vaddr = ssa_build_addr(b, ast->varname, ast->ctype);
+            return ssa_build_load(b, vaddr, ast->ctype, ast->ctype);
+        }
+        /* 已取地址变量：值可被指针写改变，读必须走内存 load（非 var_map 值）
+         * (0005-ifstmt: x=0; p=&x; **pp=1; if(x) — x 读槽非旧 SSA 值) */
+        if (b->taken_addr && dict_get(b->taken_addr, (char*)ast->varname)) {
+            ValueName vaddr = ssa_build_addr_read(b, ast->varname, ast->ctype);
             return ssa_build_load(b, vaddr, ast->ctype, ast->ctype);
         }
         return ssa_build_read(b, ast->varname);
@@ -1362,6 +1400,11 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
             if (ast->left->ctype && get_attr(ast->left->ctype->attr).ctype_volatile) {
                 ValueName vaddr = ssa_build_addr(b, ast->left->varname, ast->left->ctype);
                 ssa_build_store(b, vaddr, val, ast->left->ctype);
+            } else if (b->taken_addr && dict_get(b->taken_addr, (char*)ast->left->varname)) {
+                /* 已取地址变量：写须同步到内存槽（指针可读），不能只写 var_map */
+                ValueName vaddr = ssa_build_addr(b, ast->left->varname, ast->left->ctype);
+                ssa_build_store(b, vaddr, val, ast->left->ctype);
+                ssa_build_write(b, ast->left->varname, val);
             } else {
                 ssa_build_write(b, ast->left->varname, val);
             }
