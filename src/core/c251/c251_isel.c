@@ -1346,8 +1346,25 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         char *sym = value_to_addr_lookup(ctx, ptr);
         int wr = isel_alloc_wr(isel, ins->dest);
         int dsz = value_size_of_ctx(ctx, ins->dest);
+        /* 指针目标的 LOAD（`int *p = g_arr;` 中 v2 = load v1, v1=addr @g_arr）：
+         * C 语义数组名衰减为地址——加载的是符号地址而非内存数据（MOV WRj,#sym）。
+         * 非指针（int/char 等数据读）才读内存（MOV WRj,SYM）。 */
+        bool dest_is_ptr = (ins->type && ins->type->type == CTYPE_PTR);
         if (sym) {
-            if (dsz <= 1) {
+            if (dest_is_ptr) {
+                /* 指针 = &符号：物化地址立即数 */
+                char saddr[64]; snprintf(saddr, sizeof(saddr), "#%s", sym);
+                if (wr >= 0) {
+                    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+                    isel_emit(isel, "MOV", wbuf, saddr);
+                } else {
+                    int tmp = isel_temp_wr(isel, -1, -1);
+                    char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+                    isel_emit(isel, "MOV", tbuf, saddr);
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, tbuf);
+                }
+            } else if (dsz <= 1) {
                 /* char: MOV R(lo+1),SYM (8 位读) → MOVZ/MOVS WRlo,R(lo+1) */
                 int lo = (wr >= 0) ? wr : isel_temp_wr(isel, -1, -1);
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);

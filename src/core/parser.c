@@ -1971,9 +1971,14 @@ static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
         
         // 允许数组名直接赋值给指针（数组退化为指向首元素的指针）
         if(init->ctype->type == CTYPE_ARRAY) {
-            // 将数组类型转换为指针类型
-            init->ctype = make_ptr_type(init->ctype->ptr);
-            return ast_decl(var, init);
+            // 将数组类型转换为指针类型。注意: 不能就地修改 init->ctype——
+            // 若 init 是全局变量节点（如 `int *p = g_arr;` 中 g_arr 的 AST_GVAR
+            // 直接取自 globalenv），就地降级会破坏 g_arr 的声明类型
+            // （数组→指针, size 10→2, 初始化丢失）。克隆节点再降级。
+            Ast *decayed = malloc(sizeof(Ast));
+            *decayed = *init;
+            decayed->ctype = make_ptr_type(init->ctype->ptr);
+            return ast_decl(var, decayed);
         }
         
         // 允许函数名赋值给函数指针
