@@ -1467,29 +1467,120 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             }
         }
         if (!fname || is_indirect) {
-            /* 间接调用: call *ptr @indirect() → LCALL @WRj (0089-fptr) */
+            /* 间接调用: call *ptr @indirect() → LCALL @WRj (0089-fptr)
+             * args[0] = 函数指针, args[1..] = 实参 (与直接调用同 ABI 寄存器约定) */
             ValueName fptr = ins->args && list_len(ins->args) > 0
                 ? *(ValueName*)list_get(ins->args, 0) : 0;
-            if (fptr > 0) {
-                int wr = isel_temp_wr(isel, -1, -1);
-                if (load_value_to_wr(isel, fptr, wr) == 0) {
-                    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
-                    char ind[32]; snprintf(ind, sizeof(ind), "@%s", wbuf);
-                    isel_emit(isel, "LCALL", ind, NULL);
+            /* 实参计数 = args-1 (扣除指针) */
+            int nargs = (ins->args && ins->args->len > 0) ? (int)list_len(ins->args) - 1 : 0;
+            int used[16] = { 0 };
+            int u8i = 0, u16i = 0;
+            int abi_regs[32], abi_sz[32];
+            int nabi = 0, fail = 0;
+            for (int i = 0; i < nargs && !fail; i++) {
+                ValueName av = *(ValueName*)list_get(ins->args, i + 1);
+                int asz = value_size_of(isel, av);
+                int reg = abi_param_reg(used, asz, &u8i, &u16i);
+                if (reg == -2) { fprintf(stderr, "c251 isel: 间接调用 实参 %d 宽度>16位 M3 支持\n", i); fail = 1; break; }
+                if (reg < 0) { fprintf(stderr, "c251 isel: 间接调用 实参 %d 寄存器不足 (M3 栈传参)\n", i); fail = 1; break; }
+                abi_regs[nabi] = reg;
+                abi_sz[nabi] = asz;
+                nabi++;
+            }
+            /* ② 预转存：源值寄存器命中其他实参的 ABI 目标 → 溢出到独立槽并解除绑定
+             *   (防逆序装载互相覆盖; 间接调用实参 args[1..]) */
+            for (int i = 0; i < nargs && !fail; i++) {
+                ValueName av = *(ValueName*)list_get(ins->args, i + 1);
+                int r = isel_value_reg(ctx, av);
+                if (r < 0 || r == abi_regs[i]) continue;  /* 常量/槽 或 已就位 */
+                int hit = 0;
+                for (int j = 0; j < nargs; j++)
+                    if (abi_regs[j] == r || abi_regs[j] == r + 1) { hit = 1; break; }
+                if (!hit) continue;                       /* 源不在 ABI 目标集, 直接装载安全 */
+                char *sp = c251_alloc_spill(ctx, av);
+                char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+                isel_emit(isel, "MOV", sp, rbuf);
+                char *k = c251_key(av);
+                dict_remove(ctx->value_to_reg, k); free(k);
+                isel->reg_val[r/2] = -1;
+            }
+            /* ① 活值压栈 (参数装载会覆盖 ABI 寄存器) */
+            save_live_regs_stack(isel);
+            /* ② 指针物化: 必须在参数装载前取到独立 WR (防被参数覆盖), 但 LCALL 用
+             *    WRj 指针会被参数装载覆盖 → 指针暂存槽, LCALL 前再载入 */
+            char *fptr_spill = NULL;
+            int fwr = -1;
+            if (fptr > 0 && !fail) {
+                /* 装载到临时 WR (不受 ABI 分配影响) */
+                fwr = isel_temp_wr(isel, -1, -1);
+                if (load_value_to_wr(isel, fptr, fwr) == 0) {
+                    char fbuf[16]; wr_name(fbuf, sizeof(fbuf), fwr);
+                    fptr_spill = c251_alloc_spill(ctx, -1);
+                    isel_emit(isel, "MOV", fptr_spill, fbuf);
                 } else {
                     fprintf(stderr, "c251 isel: 间接调用 指针值无法装载 (v%d)\n", fptr);
+                    fwr = -1;
                 }
-            } else {
-                fprintf(stderr, "c251 isel: 间接调用 M2.5 支持\n");
             }
-            /* 返回值: u16 → WR6 */
+            /* ③ 逆序装载实参 (防互相覆盖) */
+            for (int i = nargs - 1; i >= 0 && !fail; i--) {
+                ValueName av = *(ValueName*)list_get(ins->args, i + 1);
+                int reg = abi_regs[i], asz = abi_sz[i];
+                if (asz <= 1) load_u8_to_r(isel, av, reg);
+                else          load_value_to_wr(isel, av, reg);
+            }
+            /* ④ 指针载入临时 WR (避开已装载的 ABI 参数寄存器) + LCALL */
+            int call_wr = -1;
+            if (fptr_spill) {
+                /* 避免列表: 所有 ABI 参数 WR (参数在调用时被被调方消费, 不能覆盖) */
+                int avoid[32]; int nav = 0;
+                for (int i = 0; i < nabi; i++) {
+                    int r = abi_regs[i];
+                    int already = 0;
+                    for (int j = 0; j < nav; j++) if (avoid[j] == r || avoid[j] == r + 1) { already = 1; break; }
+                    if (!already) {
+                        if (nav < 30) { avoid[nav++] = r; }
+                        if (abi_sz[i] > 1 && nav < 30) avoid[nav++] = r + 1;
+                    }
+                }
+                call_wr = isel_temp_wr_avoid_list(isel, avoid, nav);
+                if (call_wr < 0) call_wr = isel_temp_wr(isel, -1, -1);
+                char cbuf[16]; wr_name(cbuf, sizeof(cbuf), call_wr);
+                isel_emit(isel, "MOV", cbuf, fptr_spill);
+                char ind[32]; snprintf(ind, sizeof(ind), "@%s", cbuf);
+                isel_emit(isel, "LCALL", ind, NULL);
+            } else if (fwr >= 0) {
+                char fbuf[16]; wr_name(fbuf, sizeof(fbuf), fwr);
+                char ind[32]; snprintf(ind, sizeof(ind), "@%s", fbuf);
+                isel_emit(isel, "LCALL", ind, NULL);
+            } else {
+                fprintf(stderr, "c251 isel: 间接调用 指针无法物化, 发射 LCALL @WR0 兜底\n");
+                isel_emit(isel, "LCALL", "@WR0", NULL);
+            }
+            /* ⑤ 返回值暂存 (u16 在 WR6) */
+            bool r_u8 = ins->type && ins->type->size <= 1;
+            char *ret_spill = NULL;
+            if (ins->dest > 0 && !r_u8) {
+                ret_spill = c251_alloc_spill(ctx, ins->dest);
+                isel_emit(isel, "MOV", ret_spill, "WR6");
+            }
+            /* ⑥ 恢复活值 */
+            restore_live_regs_stack(isel);
+            /* ⑦ dest 物化 */
             if (ins->dest > 0) {
                 int dw = isel_alloc_wr(isel, ins->dest);
-                if (dw >= 0 && dw != 6) {
+                if (dw >= 0) {
                     char db[16]; wr_name(db, sizeof(db), dw);
-                    isel_emit(isel, "MOV", db, "WR6");
+                    if (r_u8) isel_emit(isel, "MOVZ", db, "A");
+                    else isel_emit(isel, "MOV", db, ret_spill ? ret_spill : "WR6");
+                } else if (r_u8) {
+                    int t = isel_temp_wr(isel, -1, -1);
+                    char tbuf[16]; wr_name(tbuf, sizeof(tbuf), t);
+                    isel_emit(isel, "MOVZ", tbuf, "A");
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, tbuf);
                 }
-                /* dw==6: 返回值已在 WR6 */
+                /* u16 且 dest 溢出: 值已在 ret_spill=dest 槽 */
             }
             break;
         }

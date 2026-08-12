@@ -74,6 +74,24 @@ static inline void *list_pop(List *list)
     return r;
 }
 
+/* 在 pos 节点前插入 elem (pos==NULL → 追加到尾部) */
+static inline void list_insert_before(List *list, ListNode *pos, void *elem)
+{
+    ListNode *node = make_node(elem);
+    if (!pos) {
+        list_push(list, elem);
+        return;
+    }
+    node->prev = pos->prev;
+    node->next = pos;
+    if (pos->prev)
+        pos->prev->next = node;
+    else
+        list->head = node;
+    pos->prev = node;
+    list->len++;
+}
+
 static inline void list_set(List *list, int idx, void *elem)
 {
     if (idx < 0 || idx >= list->len)

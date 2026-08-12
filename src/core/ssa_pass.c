@@ -533,7 +533,7 @@ static bool global_readonly(const char *name) {
             if (r && r->symbol && strcmp(r->symbol, name) == 0) return false;
         }
     }
-    /* 全 SSA 无 store @name */
+    /* 全 SSA 无 store @name (含常规 `store ptr, val` 与优化 `store @sym, const` 两种格式) */
     for (Iter it = list_iter(g_unit->funcs); !iter_end(it);) {
         Func *f = iter_next(&it);
         if (!f) continue;
@@ -542,10 +542,22 @@ static bool global_readonly(const char *name) {
             if (!b) continue;
             for (Iter it2 = list_iter(b->instrs); !iter_end(it2);) {
                 Instr *i = iter_next(&it2);
-                if (!i) continue;
-                if (i->op == IROP_STORE && i->labels && i->labels->len > 0) {
+                if (!i || i->op != IROP_STORE) continue;
+                /* 优化格式: store @sym, const */
+                if (i->labels && i->labels->len > 0) {
                     const char *l = (const char*)list_get(i->labels, 0);
                     if (l && l[0] == '@' && strcmp(l + 1, name) == 0) return false;
+                }
+                /* 常规格式: store ptr, val — 解析 base 符号 */
+                if (i->args && i->args->len >= 1) {
+                    ValueName base = 0; int64_t off = 0;
+                    if (resolve_base_offset(f, get_arg(i, 0), &base, &off)) {
+                        Instr *bdef = find_def_instr(f, base);
+                        if (bdef && bdef->op == IROP_ADDR && bdef->labels && bdef->labels->len > 0) {
+                            const char *l = (const char*)list_get(bdef->labels, 0);
+                            if (l && strcmp(l, name) == 0) return false;
+                        }
+                    }
                 }
             }
         }
@@ -2138,10 +2150,11 @@ static bool pass_local_opts(Func *f, Stats *s) {
 /*---------- 存储到加载转发 ----------*/
 static bool pass_store_load_forwarding(Func *f, Stats *s) {
     bool changed = false;
+    int next_val = max_value_in_func(f) + 1;
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
         Block *b = iter_next(&it);
         if (!b) continue;
-        typedef struct { bool use_name; const char *name; ValueName base; int64_t offset; ValueName val; } StoreMap;
+        typedef struct { bool use_name; const char *name; ValueName base; int64_t offset; ValueName val; int width; Ctype *val_type; } StoreMap;
         StoreMap stores[64];
         int store_count = 0;
 
@@ -2158,14 +2171,20 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
                     Instr *bdef = find_def_instr(f, base);
                     if (bdef && bdef->op == IROP_ADDR && bdef->labels && bdef->labels->len > 0)
                         name = (const char *)list_get(bdef->labels, 0);
+                    /* store 宽度: 取 val 定义指令的类型宽度 (无则按 0 处理 → 仅同宽转发) */
+                    int sw = 0;
+                    Ctype *vt = NULL;
+                    Instr *vdef = find_def_instr(f, get_arg(i, 1));
+                    if (vdef && vdef->type && vdef->type->size > 0) { sw = vdef->type->size; vt = vdef->type; }
+                    if (i->mem_type && i->mem_type->size > 0) { sw = i->mem_type->size; if (!vt) vt = i->mem_type; }
                     bool found = false;
                     for (int k = 0; k < store_count; k++) {
                         if (stores[k].offset != off) continue;
                         if (name && stores[k].use_name && stores[k].name && !strcmp(stores[k].name, name)) {
-                            stores[k].val = get_arg(i, 1); found = true; break;
+                            stores[k].val = get_arg(i, 1); stores[k].width = sw; stores[k].val_type = vt; found = true; break;
                         }
                         if (!name && !stores[k].use_name && stores[k].base == base) {
-                            stores[k].val = get_arg(i, 1); found = true; break;
+                            stores[k].val = get_arg(i, 1); stores[k].width = sw; stores[k].val_type = vt; found = true; break;
                         }
                     }
                     if (!found && store_count < 64) {
@@ -2174,6 +2193,8 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
                         stores[store_count].base = base;
                         stores[store_count].offset = off;
                         stores[store_count].val = get_arg(i, 1);
+                        stores[store_count].width = sw;
+                        stores[store_count].val_type = vt;
                         store_count++;
                     }
                 }
@@ -2192,17 +2213,54 @@ static bool pass_store_load_forwarding(Func *f, Stats *s) {
                     bool is_global = (bdef && bdef->op == IROP_ADDR && name && !is_local_var(f, name));
                     
                     if (!is_global) {
+                        /* load 宽度 */
+                        int lw = (i->type && i->type->size > 0) ? i->type->size : 0;
                         for (int k = 0; k < store_count; k++) {
                             if (stores[k].offset != off) continue;
                             bool match = (name && stores[k].use_name && stores[k].name && !strcmp(stores[k].name, name)) ||
                                          (!name && !stores[k].use_name && stores[k].base == base);
                             if (match) {
-                                i->op = IROP_TRUNC;
-                                list_clear(i->args);
-                                ValueName *p = pass_alloc(sizeof *p); *p = stores[k].val;
-                                list_push(i->args, p);
-                                changed = true; s->fold++;
-                                break;
+                                /* 同宽: 直接转发 (原行为) */
+                                if (stores[k].width == 0 || lw == 0 || stores[k].width == lw) {
+                                    i->op = IROP_TRUNC;
+                                    list_clear(i->args);
+                                    ValueName *p = pass_alloc(sizeof *p); *p = stores[k].val;
+                                    list_push(i->args, p);
+                                    changed = true; s->fold++;
+                                    break;
+                                }
+                                /* 窄读 (lw < sw): C251 大端字节序 — 低地址存高字节
+                                 * store 值 val (sw 字节, 大端): 地址 off 对应最高字节
+                                 * load @off+d 读 lw 字节 = val 中 [sw-lw-d .. sw-1] 字节
+                                 *   = (val >> (8*(sw-lw-d))) 截断到 lw
+                                 */
+                                if (lw < stores[k].width) {
+                                    int64_t d = off - stores[k].offset;
+                                    int64_t shift_bits = 8 * (stores[k].width - lw - d);
+                                    if (d >= 0 && shift_bits >= 0) {
+                                        /* 生成 SHR 指令插到 load 前 */
+                                        Instr *shr = pass_alloc(sizeof(Instr));
+                                        memset(shr, 0, sizeof(Instr));
+                                        shr->op = IROP_SHR;
+                                        shr->dest = next_val++;
+                                        shr->type = stores[k].val_type ? stores[k].val_type : i->type;
+                                        shr->args = make_list();
+                                        ValueName *a0 = pass_alloc(sizeof *a0); *a0 = stores[k].val;
+                                        list_push(shr->args, a0);
+                                        shr->labels = make_list();
+                                        char *tag = pass_alloc(4); strcpy(tag, "imm");
+                                        list_push(shr->labels, tag);
+                                        shr->imm.ival = shift_bits;
+                                        list_insert_before(b->instrs, jt.ptr, shr);
+                                        /* load → trunc(shr_tmp) */
+                                        i->op = IROP_TRUNC;
+                                        list_clear(i->args);
+                                        ValueName *p = pass_alloc(sizeof *p); *p = shr->dest;
+                                        list_push(i->args, p);
+                                        changed = true; s->fold++;
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }

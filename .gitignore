@@ -21,3 +21,4 @@ __pycache__/
 test/stc32g/**/list/
 *.LIB
 sim251/tests/periph/report.txt
+test/tcc/

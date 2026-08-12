@@ -26,12 +26,46 @@ MAX_CYCLES = int(os.environ.get("C251_MAX_CYCLES", "2000000"))
 
 
 def parse_expected(src_text):
+    """期望值解析, 优先级从高到低:
+    1. `/* EXPECT N */`
+    2. `return EXPR; /* ... = N ... */` (紧跟 return 的注释, 取注释内最后一个 `= N`)
+    3. 无检查点模式时 (`? 0 : N` 硬件测试风格), 独立注释行 `/* ... = N */` 取最后一个
+    4. 返回 None → 调用方走 M3 约定 (编号 >=72 或检查点风格, 期望 0)
+    """
+    def nums_in_comment(comment):
+        # 注释内所有 `= N` (排除十六进制 0x.., 取最后一个)
+        nums = re.findall(r"=\s*(?!0[xX])(-?\d+)", comment)
+        return int(nums[-1]) if nums else None
+
     m = re.search(r"/\*\s*EXPECT\s+(-?\d+)\s*\*/", src_text)
     if m:
         return int(m.group(1))
+    # return 行后紧跟的纯数字注释
     m = re.search(r"return\s+[^;]*;\s*/\*\s*(-?\d+)\s*\*/", src_text)
     if m:
         return int(m.group(1))
+    # return 行后紧跟的 `... = N` 注释
+    for cm in re.finditer(r"return\s+[^;]*;\s*/\*(.*?)\*/", src_text, re.S):
+        v = nums_in_comment(cm.group(1))
+        if v is not None:
+            return v
+    # 检查点风格 → 硬件测试, 期望 0:
+    #   a) `return expr ? 0 : N`
+    #   b) `if (...) return N;` 多个检查点 + 末尾 `return 0;`
+    if re.search(r"return\s+[^;]*\?\s*0\s*:", src_text):
+        return 0
+    rets = re.findall(r"return\s+(-?\d+)\s*;", src_text)
+    if len(rets) >= 2 and rets[-1] == "0":
+        return 0
+    # 独立注释行 `/* ... = N ... */` (取最后一个, 通常离 return 最近)
+    main_body = src_text[src_text.find("main"):]
+    best = None
+    for cm in re.finditer(r"/\*(.*?)\*/", main_body, re.S):
+        v = nums_in_comment(cm.group(1))
+        if v is not None:
+            best = v
+    if best is not None:
+        return best
     return None
 
 
