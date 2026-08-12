@@ -460,13 +460,23 @@ static void restore_spill_slots_stack(ISelContext* isel, List *slots) {
 }
 
 /* 边缘 phi 拷贝：为跳转到 succ_id 的边发射 MOV __spill_phiN, param
- * （phi dest 在 isel_block 块首分配 EDATA 槽；参数按来源块选择） */
+ * （phi dest 在 isel_block 块首分配 EDATA 槽；参数按来源块选择）。
+ * 两阶段并行拷贝语义：先读全部源到临时寄存器，再写目标槽——
+ * 避免多 phi 时后写覆盖先读（gcd 循环 v8=phi[v3] 读到已更新的 v3 槽）。 */
 static void emit_phi_copies(ISelContext* isel, int succ_id) {
     C251GenContext *ctx = isel->ctx;
     Block *succ = find_block_by_id(isel, succ_id);
     if (!succ || !succ->phis) return;
     char pred_label[32];
     snprintf(pred_label, sizeof(pred_label), "block%d", isel->current_block_id);
+
+    /* 阶段 1：收集 (src, dest_slot) 对，并把源值快照到独立临时寄存器
+     * （load_value_to_wr 处理源在寄存器/槽/常量三种情况；每个拷贝独立临时，互不干扰） */
+    typedef struct PhiCopy { ValueName src; char *slot; } PhiCopy;
+    PhiCopy copies[64];
+    int ncopies = 0;
+    int tmp_wr[64];  /* 每个拷贝的临时寄存器（-2 表示物化失败） */
+    int prev_tmp = -1;
     for (Iter pit = list_iter(succ->phis); !iter_end(pit);) {
         Instr *phi = iter_next(&pit);
         if (!phi || phi->op != IROP_PHI || !phi->args || !phi->labels) continue;
@@ -478,22 +488,27 @@ static void emit_phi_copies(ISelContext* isel, int succ_id) {
         if (idx < 0 || idx >= (int)list_len(phi->args)) continue;
         ValueName src = *(ValueName*)list_get(phi->args, idx);
         char *sp = c251_value_spill(ctx, phi->dest);
-        if (!sp) { /* 块首未分配（不应发生） */
-            sp = c251_alloc_spill(ctx, phi->dest);
-        }
-        int r = isel_value_reg(ctx, src);
-        if (r >= 0) {
-            char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
-            isel_emit(isel, "MOV", sp, rbuf);
+        if (!sp) sp = c251_alloc_spill(ctx, phi->dest);
+        if (ncopies >= 64) { fprintf(stderr, "c251 isel: phi 拷贝过多\n"); break; }
+        copies[ncopies].src = src;
+        copies[ncopies].slot = sp;
+        /* isel_temp_wr 不标记占用，连续调用会返回同一 WR → 用 prev_tmp 回避 */
+        int tmp = isel_temp_wr(isel, prev_tmp, -1);
+        prev_tmp = tmp;
+        char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+        if (load_value_to_wr(isel, src, tmp) == 0) {
+            tmp_wr[ncopies] = tmp;
         } else {
-            int tmp = isel_temp_wr(isel, -1, -1);
-            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
-            if (load_value_to_wr(isel, src, tmp) == 0) {
-                isel_emit(isel, "MOV", sp, tbuf);
-            } else {
-                fprintf(stderr, "c251 isel: phi 参数无法物化 (v%d)", src);
-            }
+            fprintf(stderr, "c251 isel: phi 参数无法物化 (v%d)\n", src);
+            tmp_wr[ncopies] = -2;  /* 跳过 */
         }
+        ncopies++;
+    }
+    /* 阶段 2：统一写目标槽（源值已快照在临时寄存器，槽覆盖不再互相干扰） */
+    for (int i = 0; i < ncopies; i++) {
+        if (tmp_wr[i] == -2) continue;
+        char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp_wr[i]);
+        isel_emit(isel, "MOV", copies[i].slot, tbuf);
     }
 }
 
