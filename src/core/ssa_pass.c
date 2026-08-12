@@ -516,6 +516,38 @@ static bool is_unsigned_type(Ctype *t) {
     return t && get_attr(t->attr).ctype_unsigned;
 }
 
+/* ADDR 值链 (经 OFFSET) 是否最终只被 LOAD 消费 — 数组元素访问不逃逸 */
+static bool addr_chain_loads_only(ValueName v, int depth) {
+    if (depth > 8 || v <= 0) return false;
+    for (Iter it = list_iter(g_unit->funcs); !iter_end(it);) {
+        Func *f = iter_next(&it);
+        if (!f) continue;
+        for (Iter bt = list_iter(f->blocks); !iter_end(bt);) {
+            Block *b = iter_next(&bt);
+            if (!b) continue;
+            List *lists[2] = {b->phis, b->instrs};
+            for (int li = 0; li < 2; li++) {
+                if (!lists[li]) continue;
+                for (Iter it2 = list_iter(lists[li]); !iter_end(it2);) {
+                    Instr *u = iter_next(&it2);
+                    if (!u || !u->args) continue;
+                    for (int k = 0; k < u->args->len; ++k) {
+                        ValueName *ap = (ValueName*)list_get(u->args, k);
+                        if (!ap || *ap != v) continue;
+                        if (u->op == IROP_LOAD) continue;
+                        if (u->op == IROP_OFFSET) {
+                            if (!addr_chain_loads_only(u->dest, depth + 1)) return false;
+                            continue;
+                        }
+                        return false; /* CALL/STORE 值/算术/比较 = 逃逸 */
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 /* 只读全局: 全 SSA 无 store @g + 所有 &g (ADDR) 只被 LOAD 消费 + 无 blob 指针 reloc 指向它。
  * 满足时 load g 可折叠为初始化常量 (即使无 const 关键字 — 53_global_init_expr/71_ifdef)。 */
 static bool global_readonly(const char *name) {
@@ -562,7 +594,8 @@ static bool global_readonly(const char *name) {
             }
         }
     }
-    /* 所有 ADDR @name 的值只被 LOAD 消费 (未逃逸到 CALL/STORE 值/指针运算) */
+    /* 所有 ADDR @name 的值只被 LOAD (或 OFFSET 链最终只被 LOAD) 消费
+     * (未逃逸到 CALL/STORE 值/指针运算) — 101_fold_offset 数组元素访问 */
     for (Iter it = list_iter(g_unit->funcs); !iter_end(it);) {
         Func *f = iter_next(&it);
         if (!f) continue;
@@ -576,29 +609,12 @@ static bool global_readonly(const char *name) {
                     Instr *i = iter_next(&it2);
                     if (!i) continue;
                     if (i->op == IROP_ADDR && i->labels && i->labels->len > 0) {
+                        /* ADDR labels 无 @ 前缀 (打印时加); 兼容优化格式 */
                         const char *l = (const char*)list_get(i->labels, 0);
-                        if (l && l[0] == '@' && strcmp(l + 1, name) == 0) {
-                            for (Iter ut = list_iter(g_unit->funcs); !iter_end(ut);) {
-                                Func *f2 = iter_next(&ut);
-                                if (!f2) continue;
-                                for (Iter bt2 = list_iter(f2->blocks); !iter_end(bt2);) {
-                                    Block *b2 = iter_next(&bt2);
-                                    if (!b2) continue;
-                                    List *l2s[2] = {b2->phis, b2->instrs};
-                                    for (int li2 = 0; li2 < 2; li2++) {
-                                        if (!l2s[li2]) continue;
-                                        for (Iter it3 = list_iter(l2s[li2]); !iter_end(it3);) {
-                                            Instr *u = iter_next(&it3);
-                                            if (!u || !u->args) continue;
-                                            for (int k = 0; k < u->args->len; ++k) {
-                                                ValueName *ap = (ValueName*)list_get(u->args, k);
-                                                if (!ap || *ap != i->dest) continue;
-                                                if (u->op != IROP_LOAD) return false;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        if (!l) continue;
+                        const char *base = (l[0] == '@') ? l + 1 : l;
+                        if (strcmp(base, name) == 0) {
+                            if (!addr_chain_loads_only(i->dest, 0)) return false;
                         }
                     }
                 }
@@ -1919,13 +1935,9 @@ static bool pass_global_load(Func *f, Stats *s) {
                  * 注意：C字符串字面量类型是 char[]（非 const char[]），但实际不可修改；
                  * 因此这里不严格要求 ctype_const，只需是静态初始化的非extern全局即可。
                  * 同时要求类型在 code 段（ctype_data==6，只读ROM），防止折叠可变全局数组。 */
-                if (!g || !g->has_init || g->is_extern || !g->is_static) continue;
-                {
-                    CtypeAttr ga = get_attr(g->type ? g->type->attr : 0);
-                    bool in_code = (ga.ctype_data == 6);            /* CODE 段 = 只读ROM */
-                    bool is_const = ga.ctype_const && !ga.ctype_volatile;
-                    if (!in_code && !is_const) continue;            /* 可变全局数组不折叠 */
-                }
+                if (!g || !g->has_init || g->is_extern) continue;
+                /* const+static / code 段 / 或全 SSA 只读 (global_readonly) — 101_fold_offset 非 static 数组 */
+                if (!is_const_global(g)) continue;
                 /* 必须有 blob 初始化数据 */
                 if (!g->init_instr) continue;
                 Instr *init = g->init_instr;
@@ -1948,8 +1960,16 @@ static bool pass_global_load(Func *f, Stats *s) {
                 }
                 int64_t byte_off = idx * elem_sz;
                 if (byte_off < 0 || byte_off >= init->imm.blob.len) continue;
-                /* 读取 elem_sz 个字节（小端序组合） */
-                int load_sz = elem_sz > 0 ? (int)elem_sz : 1;
+                /* blob 指针 reloc 字段: 地址值在链接期才确定, 折叠读到占位 (0050-inits s.p=&x) */
+                if (init->imm.blob.relocs) {
+                    for (Iter rt = list_iter(init->imm.blob.relocs); !iter_end(rt);) {
+                        InitReloc *r = iter_next(&rt);
+                        if (r && byte_off <= r->offset && r->offset < byte_off + (elem_sz > 0 ? elem_sz : 1)) {
+                            goto next_global_case2;
+                        }
+                    }
+                }
+                /* 读取 elem_sz 个字节（小端序组合） */                int load_sz = elem_sz > 0 ? (int)elem_sz : 1;
                 if (load_sz > 8) continue; /* 只处理基本类型 */
                 int64_t val = 0;
                 for (int b = 0; b < load_sz && (byte_off + b) < init->imm.blob.len; b++) {
@@ -1967,6 +1987,7 @@ static bool pass_global_load(Func *f, Stats *s) {
                 ++s->fold; changed = true;
                 continue;
             }
+        next_global_case2:;
         }
     }
     return changed;
