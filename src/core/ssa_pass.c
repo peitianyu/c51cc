@@ -600,8 +600,8 @@ static bool fold_binary_op(IrOp op, int64_t a, int64_t b, bool u, int64_t *r) {
     case IROP_XOR: *r = (int64_t)(ua ^ ub); return true;
     case IROP_SHL: *r = (int64_t)(ua << ub); return true;
     case IROP_SHR: *r = u ? (int64_t)(ua >> ub) : (a >> b); return true;
-    case IROP_EQ:  *r = (a == b); return true;
-    case IROP_NE:  *r = (a != b); return true;
+    case IROP_EQ:  *r = u ? ((int64_t)((uint64_t)a == (uint64_t)b)) : (a == b ? 1 : 0); return true;
+    case IROP_NE:  *r = u ? ((int64_t)((uint64_t)a != (uint64_t)b)) : (a != b ? 1 : 0); return true;
     case IROP_LT:  *r = u ? (ua < ub) : (a < b); return true;
     case IROP_GT:  *r = u ? (ua > ub) : (a > b); return true;
     case IROP_LE:  *r = u ? (ua <= ub) : (a <= b); return true;
@@ -944,6 +944,18 @@ static bool pass_const_fold(Func *f, Stats *s) {
             bool ha = get_const_value(f, get_arg(i, 0), &a);
             bool hb = get_const_value(f, get_arg(i, 1), &b_val);
             bool u = is_unsigned_type(i->type);
+            /* 比较运算 (EQ/NE/LT/GT/LE/GE) 的符号性由操作数类型决定：
+             * 任一操作数为 unsigned 则比较按无符号 (0106-bnot: -1 vs 65535U) */
+            bool is_cmp = (i->op == IROP_EQ || i->op == IROP_NE ||
+                           i->op == IROP_LT || i->op == IROP_GT ||
+                           i->op == IROP_LE || i->op == IROP_GE);
+            if (is_cmp) {
+                Instr *d1 = find_def_instr(f, get_arg(i, 0));
+                Instr *d2 = find_def_instr(f, get_arg(i, 1));
+                if ((d1 && is_unsigned_type(d1->type)) ||
+                    (d2 && is_unsigned_type(d2->type)))
+                    u = true;
+            }
             bool ok = false;
 
 
@@ -972,7 +984,30 @@ static bool pass_const_fold(Func *f, Stats *s) {
             case IROP_AND: case IROP_OR: case IROP_XOR:
             case IROP_SHL: case IROP_SHR:
             case IROP_EQ: case IROP_NE: case IROP_LT: case IROP_GT: case IROP_LE: case IROP_GE:
-                ok = (ha && hb) && fold_binary_op(i->op, a, b_val, u, &r); break;
+                ok = (ha && hb) && fold_binary_op(i->op, a, b_val, u, &r);
+                /* 无符号比较截断：类型宽度 (16/32 位) 掩码后比较
+                 * (uint64_t)(-1)≠65535, 但 16 位 unsigned(-1=65535)==65535) */
+                if (ok && u) {
+                    Instr *d1 = find_def_instr(f, get_arg(i, 0));
+                    Instr *d2 = find_def_instr(f, get_arg(i, 1));
+                    int sz1 = (d1 && d1->type) ? d1->type->size : 4;
+                    int sz2 = (d2 && d2->type) ? d2->type->size : 4;
+                    int sz = sz1 > sz2 ? sz1 : sz2;
+                    if (sz <= 4) {
+                        uint64_t mask = (1ULL << (sz * 8)) - 1;
+                        uint64_t ma = (uint64_t)a & mask;
+                        uint64_t mb = (uint64_t)b_val & mask;
+                        switch (i->op) {
+                        case IROP_EQ: r = (ma == mb ? 1 : 0); break;
+                        case IROP_NE: r = (ma != mb ? 1 : 0); break;
+                        case IROP_LT: r = (ma <  mb ? 1 : 0); break;
+                        case IROP_GT: r = (ma >  mb ? 1 : 0); break;
+                        case IROP_LE: r = (ma <= mb ? 1 : 0); break;
+                        case IROP_GE: r = (ma >= mb ? 1 : 0); break;
+                        }
+                    }
+                }
+                break;
             case IROP_NEG: ok = ha; r = u ? (int64_t)(0ULL - (uint64_t)a) : -a; break;
             case IROP_NOT: ok = ha; r = ~a; break;
             case IROP_LNOT: ok = ha; r = !a; break;

@@ -1010,6 +1010,22 @@ static Ast *read_prim(void)
             long val = atol(number);
             if (val & ~(long) UINT_MAX)
                 return ast_inttype(ctype_long, val);
+            /* 16 位 int 后端 (ctype_int->size=2): 值超出 int 范围 (≥32768)
+             * 按 C 规则字面量为 unsigned（0xFFFF → 65535 而非 -1）
+             * (0106-bnot: ~0 = -1, 0xFFFF unsigned 则比较正确) */
+            if (ctype_int->size <= 2 && val > 0) {
+                long lo = 1L << (ctype_int->size * 8 - 1);  /* 16 位: 32768 */
+                if (val >= lo) {
+                    Ctype *uc = malloc(sizeof(Ctype));
+                    memcpy(uc, ctype_int, sizeof(Ctype));
+                    union { CtypeAttr a; int i; } un = {0};
+                    un.i = uc->attr;
+                    un.a.ctype_unsigned = 1;
+                    uc->attr = un.i;
+                    list_push(ctypes, uc);
+                    return ast_inttype(uc, val);
+                }
+            }
             return ast_inttype(ctype_int, val);
         }
         if (is_float_token(number))
