@@ -649,6 +649,7 @@ static void ensure_lvalue(Ast *ast)
     case AST_GVAR:
     case AST_DEREF:
     case AST_STRUCT_REF:
+    case AST_FUNC_DECL:  /* &func_ptr: 函数地址是左值 (0097-tentative) */
         return;
     default:
         error("lvalue expected, but got %s", ast_to_string(ast));

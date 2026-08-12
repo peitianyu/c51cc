@@ -203,6 +203,7 @@ PPContext *pp_init(void)
     pp_init_date_time(ctx);
     
     list_push(ctx->include_paths, strdup("."));
+    list_push(ctx->include_paths, strdup("test/execute"));
 #ifdef _WIN32
     /* Windows: TCC 自带头文件，无需添加 /usr/include */
 #else

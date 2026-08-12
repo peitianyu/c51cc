@@ -332,11 +332,28 @@ static Token read_token_int(void)
         update_token_info(start_line, start_col, &tok);
         return tok;
     case 'a' ... 'z':
-    case 'A' ... 'Z':
+    case 'A' ... 'K':
+    case 'M' ... 'Z':
     case '_':
         tok = read_ident(c);
         update_token_info(start_line, start_col, &tok);
         return tok;
+    case 'L': {
+        /* L'x' 宽字符: 忽略 L 前缀当普通字符处理 (0100-wcharlit) */
+        int nxt = getc_with_pos();
+        if (nxt == '\'') {
+            int val = read_escaped_char();
+            int c2 = getc_with_pos();
+            if (c2 != '\'') error("Malformed char literal");
+            tok = make_char(val);
+            update_token_info(start_line, start_col, &tok);
+            return tok;
+        }
+        ungetc_with_pos(nxt);
+        tok = read_ident(c);
+        update_token_info(start_line, start_col, &tok);
+        return tok;
+    }
     case '/': {
         c = getc_with_pos();
         if (c == '/') {
