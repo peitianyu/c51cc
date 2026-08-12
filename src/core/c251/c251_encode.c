@@ -274,8 +274,15 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     /* PUSH dir8 / POP dir8 (8051 兼容, 递归栈保护用; R0-R7 → 地址 0x00-0x07) */
     if (!strcmp(op, "PUSH") || !strcmp(op, "POP")) {
         int r1 = parse_reg(a1, &w1);
-        if (r1 >= 0 && !w1 && r1 <= 7) {
-            emit2(st, !strcmp(op, "PUSH") ? 0xC0 : 0xD0, (unsigned char)r1);
+        if (r1 >= 0 && !w1) {
+            if (r1 <= 7) {
+                /* 8051 风格: PUSH Rn = C0+n / POP Rn = D0+n */
+                emit2(st, !strcmp(op, "PUSH") ? 0xC0 : 0xD0, (unsigned char)r1);
+            } else {
+                /* 251 源模式 (WR8-14 扩展): PUSH op1 = CA (idx<<4|8) / POP = DA */
+                emit2(st, !strcmp(op, "PUSH") ? 0xCA : 0xDA,
+                      (unsigned char)((r1 << 4) | 8));
+            }
             return 0;
         }
         /* PUSH/POP dir8 (SFR 地址, 如 PSW=0xD0) */

@@ -120,13 +120,13 @@ static bool value_still_used(ISelContext* isel, ValueName v, int pos) {
  * 调用方需自行避免复用（emit_phi_copies 用 avoid 列表收集已用 WR）。 */
 static int isel_temp_wr_avoid_list(ISelContext* isel, const int *avoid, int navoid) {
     C251GenContext *ctx = isel->ctx;
-    for (int w = 0; w <= 6; w += 2) {
+    for (int w = 0; w <= 14; w += 2) {
         int hit = 0;
         for (int i = 0; i < navoid; i++) if (w == avoid[i]) { hit = 1; break; }
         if (hit) continue;
         if (isel->reg_val[w/2] < 0) return w;
     }
-    for (int w = 0; w <= 6; w += 2) {
+    for (int w = 0; w <= 14; w += 2) {
         int hit = 0;
         for (int i = 0; i < navoid; i++) if (w == avoid[i]) { hit = 1; break; }
         if (hit) continue;
@@ -134,7 +134,7 @@ static int isel_temp_wr_avoid_list(ISelContext* isel, const int *avoid, int navo
         if (rv >= 0 && !value_still_used(isel, rv, isel->block_instr_pos)) return w;
     }
     /* 极端兜底：强制溢出第一个非 avoid 寄存器中的值 */
-    for (int w = 0; w <= 6; w += 2) {
+    for (int w = 0; w <= 14; w += 2) {
         int hit = 0;
         for (int i = 0; i < navoid; i++) if (w == avoid[i]) { hit = 1; break; }
         if (hit) continue;
@@ -171,10 +171,10 @@ int isel_alloc_wr(ISelContext* isel, ValueName val) {
 
     int pos = isel->block_instr_pos;
     int w = -1;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 8; i++)
         if (isel->reg_val[i] < 0) { w = i * 2; break; }
     if (w < 0) {
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 8; i++) {
             ValueName rv = isel->reg_val[i];
             if (rv >= 0 && !value_still_used(isel, rv, pos)) { w = i * 2; break; }
         }
@@ -202,19 +202,19 @@ static int wr_conflicts_abi(int w, const int *bytes, int n) {
 static int isel_temp_wr_avoid_bytes(ISelContext* isel, int avoid1, int avoid2,
                                     const int *bytes, int n) {
     C251GenContext *ctx = isel->ctx;
-    for (int w = 0; w <= 6; w += 2) {
+    for (int w = 0; w <= 14; w += 2) {
         if (w == avoid1 || w == avoid2) continue;
         if (wr_conflicts_abi(w, bytes, n)) continue;
         if (isel->reg_val[w/2] < 0) return w;
     }
-    for (int w = 0; w <= 6; w += 2) {
+    for (int w = 0; w <= 14; w += 2) {
         if (w == avoid1 || w == avoid2) continue;
         if (wr_conflicts_abi(w, bytes, n)) continue;
         ValueName rv = isel->reg_val[w/2];
         if (rv >= 0 && !value_still_used(isel, rv, isel->block_instr_pos)) return w;
     }
     /* 极端兜底：强制溢出第一个非 avoid 且不冲突寄存器中的值 */
-    for (int w = 0; w <= 6; w += 2) {
+    for (int w = 0; w <= 14; w += 2) {
         if (w == avoid1 || w == avoid2) continue;
         if (wr_conflicts_abi(w, bytes, n)) continue;
         ValueName rv = isel->reg_val[w/2];
@@ -241,13 +241,13 @@ static int isel_alloc_wr_avoid(ISelContext* isel, ValueName val, const int *byte
     if (exist) { free(key); return *exist; }
     int pos = isel->block_instr_pos;
     int w = -1;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
         int ww = i * 2;
         if (isel->reg_val[i] >= 0) continue;
         if (wr_conflicts_abi(ww, bytes, n)) continue;
         w = ww; break;
     }
-    if (w < 0) for (int i = 0; i < 4; i++) {
+    if (w < 0) for (int i = 0; i < 8; i++) {
         int ww = i * 2;
         ValueName rv = isel->reg_val[i];
         if (rv < 0 || value_still_used(isel, rv, pos)) continue;
@@ -437,7 +437,7 @@ static void load_u8_to_r(ISelContext* isel, ValueName v, int r) {
 /* 调用前活值压栈（caller-saves + 递归安全）：逆序 PUSH 活值 WR 对（WR6,WR4,WR2,WR0）
  * 字节序: WRj 大端 = Rj(高):R(j+1)(低)，PUSH 高字节在前（栈顶=低字节，POP 先取低） */
 static void save_live_regs_stack(ISelContext* isel) {
-    for (int i = 3; i >= 0; i--) {
+    for (int i = 7; i >= 0; i--) {
         if (isel->reg_val[i] >= 0) {
             char rh[8], rl[8];
             snprintf(rh, sizeof(rh), "R%d", i * 2);
@@ -450,7 +450,7 @@ static void save_live_regs_stack(ISelContext* isel) {
 
 /* 调用后恢复：正序 POP（先低字节后高字节，逆压栈序） */
 static void restore_live_regs_stack(ISelContext* isel) {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
         if (isel->reg_val[i] >= 0) {
             char rh[8], rl[8];
             snprintf(rh, sizeof(rh), "R%d", i * 2);
@@ -2266,7 +2266,7 @@ void isel_block(ISelContext* isel, Block* block) {
         dict_free(isel->ctx->value_to_reg, free);
         isel->ctx->value_to_reg = make_dict(NULL);
     }
-    for (int i = 0; i < 4; i++) isel->reg_val[i] = -1;
+    for (int i = 0; i < 8; i++) isel->reg_val[i] = -1;
 
     /* 块标签：L<id>: */
     char lbl[32];
@@ -2354,7 +2354,7 @@ void isel_function(C251GenContext* ctx, Func* func) {
     isel.sec = sec;
     isel.label_counter = 0;
     isel.next_wr = 0;
-    for (int i = 0; i < 4; i++) isel.reg_val[i] = -1;
+    for (int i = 0; i < 8; i++) isel.reg_val[i] = -1;
     isel.global_live = global_live;
     isel.block_map = make_dict(NULL);
     /* Keil ABI 参数分配状态（每函数重置） */

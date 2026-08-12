@@ -10,8 +10,8 @@ typedef struct ISelContext {
     int label_counter;
     int next_wr;            /* 下一个可分配 WR 索引: 0/2/4/6 */
 
-    /* 寄存器占用表：reg_val[w/2] = 占用 WRw 的值名，-1 空闲（w = 0/2/4/6） */
-    int reg_val[4];
+    /* 寄存器占用表：reg_val[w/2] = 占用 WRw 的值名，-1 空闲（w = 0..14 偶） */
+    int reg_val[8];
 
     /* 当前块的指令数组视图（isel_block 构建，isel_instr 内只读） */
     Instr** block_instrs;

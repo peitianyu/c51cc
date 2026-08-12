@@ -110,11 +110,17 @@ def main():
             OPT = '-O2'
     prefix = ''.join(args)
     want_report = '--report' in flags
+    include_slow = '--include-slow' in flags
+
+    # 慢测试 (0041-queen 需 ~3G cycles/30s): 默认跳过, --include-slow 才跑
+    SLOW = {'0041-queen'}
 
     tests = sorted(os.path.basename(f)[:-2]
                    for f in glob.glob(os.path.join(SRC, '*.c')))
     if prefix:
         tests = [t for t in tests if prefix in t]
+    if not include_slow:
+        tests = [t for t in tests if t not in SLOW]
     if limit:
         tests = tests[:limit]
 
