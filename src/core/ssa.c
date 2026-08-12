@@ -448,7 +448,7 @@ static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items,
     int written_offs[MAX_OFFSETS];
     int written_sz[MAX_OFFSETS];
     int nw = 0;
-    for (Iter it = list_iter(type->fields->list); !iter_end(it); ++idx) {
+    for (Iter it = list_iter(type->fields->list); !iter_end(it);) {
         DictEntry *e = iter_next(&it);
         if (!e) continue;
         Ctype *field = dict_get(type->fields, e->key);
@@ -456,15 +456,16 @@ static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items,
         if (!field) continue;
 
         int off = field->offset;
-        /* 匿名 union 成员: 同 offset 已被前驱写入 → 跳过 (0051-inits) */
+        /* 匿名 union 成员: 同 offset 已被前驱写入 → 跳过字段但推进 init 索引
+         * (该位置有 nil 占位值, 不覆写已写的 c) (0051-inits) */
         {
             int skip = 0;
             for (int w = 0; w < nw; w++)
                 if (off == written_offs[w] && field->size == written_sz[w])
                     { skip = 1; break; }
-            if (skip && (!init || init->type != AST_LITERAL)) continue;
+            if (skip) { idx++; continue; }
         }
-        if (!init) continue;
+        if (!init) { continue; }
         if (field->bit_size > 0) {
             if (init->type == AST_LITERAL) {
                 int bit = field->bit_offset;
@@ -505,6 +506,7 @@ static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items,
             list_push(relocs, r);
         }
         if (nw < MAX_OFFSETS) { written_offs[nw] = off; written_sz[nw] = field->size; nw++; }
+        idx++;  /* 只在写入后推进 init 索引 (union 成员跳过时不推进) */
 
         if (type->is_union)
             break;

@@ -1895,8 +1895,10 @@ static Ctype *read_struct_def(void)
         }
         if (cur_gid) { offset += union_max; union_max = 0; cur_gid = 0; }
         int size = (fieldtype->size < MAX_ALIGN) ? fieldtype->size : MAX_ALIGN;
-        if (size > 0 && offset % size != 0)
-            offset += size - offset % size;
+        if (fieldtype->type != CTYPE_STRUCT && fieldtype->type != CTYPE_ARRAY) {
+            if (size > 0 && offset % size != 0)
+                offset += size - offset % size;
+        }
         fieldtype->offset = offset;
         offset += fieldtype->size;
     }

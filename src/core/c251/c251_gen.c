@@ -86,11 +86,15 @@ static void emit_blob_be(Section *sec, int offset, Ctype *type,
     }
     case CTYPE_STRUCT: {
         if (!type->fields) break;
+        int prev_off = -1;
         for (Iter it = list_iter(type->fields->list); !iter_end(it);) {
             DictEntry *e = iter_next(&it);
             if (!e) continue;
             Ctype *field = dict_get(type->fields, e->key);
             if (!field) continue;
+            /* 匿名 union 非首成员 (同 offset): 跳过, 不推进 consumed (0051-inits) */
+            if (field->offset == prev_off) { prev_off = field->offset; continue; }
+            prev_off = field->offset;
             emit_blob_be(sec, offset + field->offset, field, blob, blob_len, consumed);
             if (type->is_union) break;
         }
