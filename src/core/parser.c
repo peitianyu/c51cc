@@ -2103,13 +2103,10 @@ static Ast *read_decl_init_val(Ast *var, bool consume_semicolon)
         }
 
         // FIXME: 注意这里直接填地址有危险, 不建议这么做, 程序可能会飞, 后期将这部分限制住????
-        // 仅对整型常量表达式做常量折叠; 变量/解引用/调用等运行时值跳过
-        // (eval_intexpr 对 AST_LVAR 会直接报错, 导致 `char *p = q;` 无法编译)
-        if (init->type != AST_LVAR && init->type != AST_DEREF &&
-            init->type != AST_FUNCALL && init->type != AST_STRUCT_REF &&
-            init->type != AST_BIT_REF) {
-            ast_inttype(ctype_int, eval_intexpr(init));
-        }
+        // 常量折叠结果被丢弃 (死代码), 且对含 LVAR/数组衰减的 binop
+        // (如 `unsigned char *f = fmt + 1;`) 会递归 eval_intexpr 报错。
+        // 全局指针初始化的整型常量折叠由 SSA 层完成 (ginit 保持原始 AST)。
+        // 直接移除：消除崩溃路径, 无语义变化。
         if (var->type == AST_GVAR) var->ginit = init;
         return ast_decl(var, init);
     }
