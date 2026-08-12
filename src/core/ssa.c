@@ -444,14 +444,27 @@ static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items,
 {
     if (!buf || !type || !items || type->type != CTYPE_STRUCT) return;
     int idx = 0;
+    #define MAX_OFFSETS 64
+    int written_offs[MAX_OFFSETS];
+    int written_sz[MAX_OFFSETS];
+    int nw = 0;
     for (Iter it = list_iter(type->fields->list); !iter_end(it); ++idx) {
         DictEntry *e = iter_next(&it);
         if (!e) continue;
         Ctype *field = dict_get(type->fields, e->key);
         Ast *init = list_get(items, idx);
-        if (!field || !init) continue;
+        if (!field) continue;
 
         int off = field->offset;
+        /* 匿名 union 成员: 同 offset 已被前驱写入 → 跳过 (0051-inits) */
+        {
+            int skip = 0;
+            for (int w = 0; w < nw; w++)
+                if (off == written_offs[w] && field->size == written_sz[w])
+                    { skip = 1; break; }
+            if (skip && (!init || init->type != AST_LITERAL)) continue;
+        }
+        if (!init) continue;
         if (field->bit_size > 0) {
             if (init->type == AST_LITERAL) {
                 int bit = field->bit_offset;
@@ -475,14 +488,23 @@ static void fill_struct_init_bytes(unsigned char *buf, Ctype *type, List *items,
         } else if (is_inttype(field) && init->type == AST_LITERAL) {
             write_scalar_bytes(buf, off, field->size, init->ival);
         } else if (field->type == CTYPE_PTR && init->type == AST_ADDR &&
-                   init->operand && init->operand->type == AST_GVAR && relocs) {
-            /* 指针字段 = &全局符号：blob 填 0 占位 + 记录重定位 */
+                   init->operand && relocs &&
+                   (init->operand->type == AST_GVAR ||
+                    init->operand->type == AST_FUNC_DECL ||
+                    init->operand->type == AST_FUNC_DEF)) {
+            /* 指针字段 = &全局符号/&函数：blob 填 0 占位 + 记录重定位 */
+            const char *tgt = NULL;
+            if (init->operand->type == AST_GVAR) tgt = init->operand->varname;
+            else if (init->operand->type == AST_FUNC_DECL ||
+                     init->operand->type == AST_FUNC_DEF)
+                tgt = init->operand->fname;
             memset(buf + off, 0, (size_t)field->size);
             InitReloc *r = ssa_alloc(sizeof(InitReloc));
             r->offset = off;
-            r->symbol = ssa_strdup(init->operand->varname);
+            r->symbol = ssa_strdup(tgt ? tgt : "");
             list_push(relocs, r);
         }
+        if (nw < MAX_OFFSETS) { written_offs[nw] = off; written_sz[nw] = field->size; nw++; }
 
         if (type->is_union)
             break;

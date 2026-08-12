@@ -110,12 +110,14 @@ static void emit_blob_be(Section *sec, int offset, Ctype *type,
     }
 }
 
-/* 查全局符号在 EDATA 段的绝对偏移（value 含 C251_EDATA_BASE 基址；未找到返回 -1） */
+/* 查全局符号在 EDATA 段的绝对偏移（value 含 C251_EDATA_BASE 基址；未找到返回 -1）
+ * SYM_FUNC (函数) 也返回其代码偏移 (函数指针初始化, 0091-fptr) */
 static int c251_find_sym_offset(C251GenContext *ctx, const char *name) {
     if (!ctx || !name) return -1;
     for (Iter it = list_iter(ctx->obj->symbols); !iter_end(it);) {
         Symbol *s = iter_next(&it);
-        if (s && s->name && strcmp(s->name, name) == 0 && s->kind == SYM_DATA)
+        if (s && s->name && strcmp(s->name, name) == 0 &&
+            (s->kind == SYM_DATA || s->kind == SYM_FUNC))
             return s->value;
     }
     return -1;
@@ -242,6 +244,33 @@ ObjFile *c251_gen(SSAUnit *unit) {
     }
 
     c251_encode(ctx, ctx->obj);
+
+    /* 全局 init 指针重定位（延迟到函数符号注册后）:
+     * process_global_var 早于函数 isel, &func 的 reloc 当时解析不到函数符号 → 填 0。
+     * 这里在全部函数处理后重填 (0091-fptr: struct s = { &zero }) */
+    for (Iter git2 = list_iter(unit->globals); !iter_end(git2);) {
+        GlobalVar *g = iter_next(&git2);
+        if (!g || !g->has_init || !g->init_instr) continue;
+        int sec_idx = obj_find_or_add_section(ctx->obj, "?ED?", SEC_EDATA, 0);
+        if (sec_idx < 0) continue;
+        Section *sec = obj_get_section(ctx->obj, sec_idx);
+        Symbol *sg = NULL;
+        for (Iter sit = list_iter(ctx->obj->symbols); !iter_end(sit);) {
+            Symbol *s = iter_next(&sit);
+            if (s && s->name && strcmp(s->name, g->name) == 0 && s->kind == SYM_DATA) {
+                sg = s; break;
+            }
+        }
+        if (!sg) continue;
+        if (g->init_instr->imm.blob.relocs) {
+            for (Iter rit = list_iter(g->init_instr->imm.blob.relocs); !iter_end(rit);) {
+                InitReloc *r = iter_next(&rit);
+                if (r && r->symbol && r->offset >= 0) {
+                    c251_fill_ptr_addr(ctx, sec, sg->value + r->offset, r->symbol);
+                }
+            }
+        }
+    }
 
     ObjFile* obj = ctx->obj;
     ctx->obj = NULL;
