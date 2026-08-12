@@ -1,3 +1,4 @@
+/* EXPECT 680 */
 /* pre-decrement --n loop 回归 */
 unsigned char g_buf[16];
 int main(void) {

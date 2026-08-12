@@ -1,3 +1,4 @@
+/* EXPECT 850 */
 /* while(n--) post-decrement loop — 回归: 循环计数变量比较寄存器错误 */
 unsigned int g_n = 5;
 volatile unsigned char g_buf[16];

@@ -1,3 +1,4 @@
+/* EXPECT 850 */
 /* post-decrement n-- loop 回归 */
 volatile unsigned int g_n;
 unsigned char g_buf[16];
