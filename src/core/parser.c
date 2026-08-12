@@ -1731,6 +1731,31 @@ static Dict *read_struct_union_fields(bool is_struct_type)
         Ctype *ctype = read_decl_spec();
         Token name = read_token();
         
+        /* 匿名 struct/union (非递归): 无名成员透传到父层
+         *   匿名 struct (0047-anonexport): 顺序布局
+         *   匿名 union   (0051-inits):   成员共享同一偏移 (重叠) */
+        if (is_punct(name, ';') && ctype->type == CTYPE_STRUCT) {
+            Dict *inner = ctype->fields;
+            if (inner) {
+                for (Iter fi = list_iter(inner->list); !iter_end(fi);) {
+                    DictEntry *e = iter_next(&fi);
+                    Ctype *field = dict_get(inner, e->key);
+                    if (field) {
+                        Ctype *fcopy = malloc(sizeof(Ctype));
+                        memcpy(fcopy, field, sizeof(Ctype));
+                        /* 匿名 union 成员标记: 布局循环按哨兵共享偏移 */
+                        if (ctype->is_union) {
+                            fcopy->offset = 0;
+                            fcopy->bit_offset = -1;  /* 普通字段 bit_offset>=0 */
+                        }
+                        dict_put(r, e->key, fcopy);
+                    }
+                }
+            }
+            bit_offset += ctype->size;
+            continue;  /* 已消费 ';' */
+        }
+
         // 检查是否是函数指针语法: type (*name)(params)
         if (is_punct(name, '(')) {
             Token next_tok = read_token();
@@ -1842,14 +1867,30 @@ static Ctype *read_struct_def(void)
     int offset = 0;
     Iter i = list_iter(dict_values(fields));
     Ctype *fieldtype = NULL;
+    int union_max = 0;
+    bool in_union = false;
     for (; !iter_end(i);) {
         fieldtype = iter_next(&i);
+        /* 匿名 union 成员 (bit_offset==-1): 共享当前 offset, 重叠布局 (0051-inits) */
+        if (fieldtype->bit_offset == -1) {
+            if (!in_union) {
+                int sz = (fieldtype->size < MAX_ALIGN) ? fieldtype->size : MAX_ALIGN;
+                if (sz > 0 && offset % sz != 0)
+                    offset += sz - offset % sz;
+                in_union = true;
+            }
+            fieldtype->offset = offset;
+            if (fieldtype->size > union_max) union_max = fieldtype->size;
+            continue;
+        }
+        if (in_union) { offset += union_max; union_max = 0; in_union = false; }
         int size = (fieldtype->size < MAX_ALIGN) ? fieldtype->size : MAX_ALIGN;
         if (size > 0 && offset % size != 0)
             offset += size - offset % size;
         fieldtype->offset = offset;
         offset += fieldtype->size;
     }
+    if (in_union) offset += union_max;
     if (fieldtype && fieldtype->bit_size) {
         offset = (fieldtype->bit_offset+fieldtype->bit_size)/8;
         if((fieldtype->bit_offset+fieldtype->bit_size)%8) offset++;
