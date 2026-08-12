@@ -2854,6 +2854,7 @@ static Ast *read_decl_or_func_def(void)
             union { CtypeAttr a; int i; } u = {0};
             u.a.ctype_register = 1;   /* 标记 sfr/sbit/bit */
             u.a.ctype_unsigned = 1;   /* sfr 是 8 位无符号 (读回 MOVZ 零扩展) */
+            u.a.ctype_volatile = 1;   /* sfr/sbit 是内存映射, 优化器不可删除/折叠访问 */
             t->attr = u.i;
         }
 
@@ -2861,6 +2862,7 @@ static Ast *read_decl_or_func_def(void)
             /* sfr name = 0x80: 地址 */
             Ast *addr_expr = read_expr();
             t->bit_offset = (int)eval_intexpr(addr_expr);  /* sfr 地址 */
+            t->bit_size = -1;  /* 标记 sfr 整字节 (非 sbit) */
         } else if (kind == 2) {
             /* sbit name = SFR ^ N: 读 sfr 名 + ^ 位号 */
             Token sfr_tok = read_token();
@@ -2884,7 +2886,7 @@ static Ast *read_decl_or_func_def(void)
             var->ginit = val_expr;
             dict_put(globalenv, name, var);
             expect(';');
-            return var;
+            return ast_decl(var, val_expr);  /* AST_DECL 注册为 global */
         }
 
         Ast *var = ast_gvar(t, name, false);

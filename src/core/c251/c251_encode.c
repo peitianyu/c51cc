@@ -577,9 +577,12 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
         /* 移位 1 位 (shift_single): SLL=3E SRL=1E SRA=0E (j/2)4 (lo=4 表示 WRj!)
          * 第二字节 = (j/2)<<4 | 0x4，lo=4 才是 word 移位 (lo=0 是 Rm 字节移位) */
         int r1 = parse_reg(a1, &w1);
+        unsigned char code = !strcmp(op, "SLL") ? 0x3E : (!strcmp(op, "SRL") ? 0x1E : 0x0E);
         if (r1 >= 0 && w1) {
-            unsigned char code = !strcmp(op, "SLL") ? 0x3E : (!strcmp(op, "SRL") ? 0x1E : 0x0E);
             emit2(st, code, (unsigned char)(((r1 / 2) << 4) | 0x4));
+        } else if (r1 >= 0) {
+            /* Rm 字节移位 (lo=0): SRL A = 0x1E B0 */
+            emit2(st, code, (unsigned char)((r1 << 4) | 0x0));
         }
         else return -1;
         return 0;

@@ -278,6 +278,18 @@ static char* value_to_addr_lookup(C251GenContext* ctx, ValueName val) {
     return sym;
 }
 
+/* M3: 查 sfr/sbit 编码值 (低 8 位 = SFR 地址, bit16+ = 位号, -1 = sfr 整字节)。
+ * 返回 1 且 *addr/*bit 置值; 非 sfr/sbit 返回 0。 */
+static int sfr_lookup(C251GenContext *ctx, const char *sym, int *addr, int *bit) {
+    if (!ctx || !ctx->sfr_addr || !sym || !addr) return 0;
+    int *v = (int*)dict_get(ctx->sfr_addr, (char*)sym);
+    if (!v) return 0;
+    *addr = (*v) & 0xFF;
+    *bit = (*v) >> 16;
+    if (*bit == 0xFFFF) *bit = -1;
+    return 1;
+}
+
 /* 从 SSA 指令取 src1/src2 值名 */
 static ValueName src1_of(Instr* ins) {
     if (!ins->args || list_len(ins->args) < 1) return -1;
@@ -1028,6 +1040,33 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         break;
     }
+    case IROP_LNOT: {
+        /* !x: x==0 → 1, 否则 0。CMP x,#0; 物化 */
+        ValueName s1 = src1_of(ins);
+        int wr = isel_alloc_wr(isel, ins->dest);
+        char *l1 = isel_new_label(isel, "?L");
+        if (wr >= 0) {
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+            load_value_to_wr(isel, s1, wr);
+            isel_emit(isel, "CMP", wbuf, "#0");
+            isel_emit(isel, "MOV", wbuf, "#0");   /* MOV 不破坏标志 */
+            isel_emit(isel, "JNE", l1, NULL);
+            isel_emit(isel, "MOV", wbuf, "#1");
+        } else {
+            int tmp = isel_temp_wr(isel, -1, -1);
+            char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
+            load_value_to_wr(isel, s1, tmp);
+            isel_emit(isel, "CMP", tbuf, "#0");
+            isel_emit(isel, "MOV", tbuf, "#0");
+            isel_emit(isel, "JNE", l1, NULL);
+            isel_emit(isel, "MOV", tbuf, "#1");
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            isel_emit(isel, "MOV", sp, tbuf);
+        }
+        isel_emit_label(isel, l1);
+        free(l1);
+        break;
+    }
     case IROP_SHL:
     case IROP_SHR: {
         /* 移位：251 SLL/SRL/SRA 为移位 1 位指令（regop2_shift, 第二字段忽略）。
@@ -1392,18 +1431,24 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
             if (s) sym_sz = *s;
         }
         bool array_decay = dest_is_ptr && sym && sym_sz > 2;
-        /* M3: sfr 直接地址读 — MOV A,dir8 + 转移到目标 (0xE5 xx) */
+        /* M3: sfr 直接地址读 — MOV A,dir8 + 转移到目标 (0xE5 xx); sbit 提取位 */
         if (sym && ctx->sfr_addr) {
-            int *sfrp = (int*)dict_get(ctx->sfr_addr, (char*)sym);
-            if (sfrp) {
-                char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", *sfrp & 0xFF);
+            int saddr = 0, sbit = -1;
+            if (sfr_lookup(ctx, sym, &saddr, &sbit)) {
+                char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", saddr);
                 int lo = (wr >= 0) ? wr : isel_temp_wr(isel, -1, -1);
                 char wbuf[16]; wr_name(wbuf, sizeof(wbuf), lo);
                 char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", lo + 1);
                 /* 读取 SFR 到 A, 再转 Rm (u8) */
                 isel_emit(isel, "MOV", "A", dirdesc);
                 isel_emit(isel, "MOV", rbuf, "A");
-                if (dsz <= 1) {
+                if (sbit >= 0) {
+                    /* sbit 读: A 右移 sbit 位, AND 1 → 0/1 */
+                    for (int b = 0; b < sbit; b++) isel_emit(isel, "SRL", "A", NULL);
+                    isel_emit(isel, "ANL", "A", "#1");
+                    isel_emit(isel, "MOV", rbuf, "A");
+                    isel_emit(isel, "MOVZ", wbuf, rbuf);
+                } else if (dsz <= 1) {
                     if (value_decl_unsigned(ctx, ins->dest))
                         isel_emit(isel, "MOVZ", wbuf, rbuf);
                     else
@@ -1519,13 +1564,24 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 /* 局部变量名转换：优化格式 @x 用原始名，须映射到函数作用域槽 __loc_fn_x
                  * （与 ADDR 处理一致，否则 store 到未注册符号 x → unknown symbol） */
                 const char *raw = lab + 1;
-                /* M3: sfr 直接写 — store @P0, const → MOV dir8,A */
+                /* M3: sfr 直接写 — store @P0, const → MOV dir8,A; sbit 用 RMW */
                 if (ctx->sfr_addr && dict_get(ctx->sfr_addr, (char*)raw)) {
-                    int *sfrp = (int*)dict_get(ctx->sfr_addr, (char*)raw);
-                    char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", *sfrp & 0xFF);
+                    int saddr = 0, sbit = -1;
+                    sfr_lookup(ctx, raw, &saddr, &sbit);
+                    char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", saddr);
                     char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFF);
                     isel_emit(isel, "MOV", "A", imm);
-                    isel_emit(isel, "MOV", dirdesc, "A");
+                    if (sbit >= 0) {
+                        isel_emit(isel, "MOV", "R0", "A");
+                        for (int b = 0; b < sbit; b++) isel_emit(isel, "SLL", "R0", NULL);
+                        isel_emit(isel, "MOV", "A", dirdesc);
+                        char clr[16]; snprintf(clr, sizeof(clr), "#0x%02X", (unsigned char)~(1 << sbit));
+                        isel_emit(isel, "ANL", "A", clr);
+                        isel_emit(isel, "ORL", "A", "R0");
+                        isel_emit(isel, "MOV", dirdesc, "A");
+                    } else {
+                        isel_emit(isel, "MOV", dirdesc, "A");
+                    }
                     break;
                 }
                 char sym[160];
@@ -1555,11 +1611,11 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         /* store ptr, val → MOV SYMBOL,WRj（宽度按目标符号 size） */
         ValueName ptr = src1_of(ins), val = src2_of(ins);
         char *sym = value_to_addr_lookup(ctx, ptr);
-        /* M3: sfr 直接地址写 — 值→A→MOV dir8,A (0xF5 xx) */
+        /* M3: sfr 直接地址写 — 值→A→MOV dir8,A (0xF5 xx); sbit 用 RMW */
         if (sym && ctx->sfr_addr) {
-            int *sfrp = (int*)dict_get(ctx->sfr_addr, (char*)sym);
-            if (sfrp) {
-                char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", *sfrp & 0xFF);
+            int saddr = 0, sbit = -1;
+            if (sfr_lookup(ctx, sym, &saddr, &sbit)) {
+                char dirdesc[32]; snprintf(dirdesc, sizeof(dirdesc), "0x%02X", saddr);
                 int r = isel_value_reg(ctx, val);
                 int vsz = value_size_of_ctx(ctx, val);
                 if (r >= 0) {
@@ -1575,7 +1631,20 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                         break;
                     }
                 }
-                isel_emit(isel, "MOV", dirdesc, "A");
+                if (sbit >= 0) {
+                    /* sbit 写 (RMW): 新值 A → R0 (位值), 读 SFR → 清位 → OR 位值 → 写回 */
+                    isel_emit(isel, "MOV", "R0", "A");           /* 位值 0/1 */
+                    if (sbit > 0) { /* 位值左移 sbit 位 */
+                        for (int b = 0; b < sbit; b++) isel_emit(isel, "SLL", "R0", NULL);
+                    }
+                    isel_emit(isel, "MOV", "A", dirdesc);          /* 读当前 SFR */
+                    char clr[16]; snprintf(clr, sizeof(clr), "#0x%02X", (unsigned char)~(1 << sbit));
+                    isel_emit(isel, "ANL", "A", clr);              /* 清位 */
+                    isel_emit(isel, "ORL", "A", "R0");            /* OR 位值 */
+                    isel_emit(isel, "MOV", dirdesc, "A");          /* 写回 */
+                } else {
+                    isel_emit(isel, "MOV", dirdesc, "A");
+                }
                 break;
             }
         }

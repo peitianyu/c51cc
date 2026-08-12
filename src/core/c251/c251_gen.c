@@ -146,13 +146,15 @@ static void process_global_var(C251GenContext *ctx, GlobalVar *g) {
     int size = g->type ? g->type->size : 1;
     if (size < 1) size = 1;
     /* M3: sfr/sbit — 特殊功能寄存器 (固定直接地址 0x80-0xFF), 不进 EDATA.
-     * ctype_register 标记 + bit_offset 存 SFR 地址; isel 用 sfr_addr 生成 MOV dir8. */
+     * ctype_register 标记 + bit_offset 存 SFR 地址; isel 用 sfr_addr 生成 MOV dir8.
+     * sfr_addr 值编码: 低 8 位 = SFR 地址, bit16+ = sbit 位号 (-1 表示 sfr 整字节). */
     {
         union { CtypeAttr a; int i; } att = {0};
         att.i = g->type ? g->type->attr : 0;
         if (att.a.ctype_register && g->type && g->type->bit_offset >= 0) {
             int *addrp = malloc(sizeof(int));
-            *addrp = g->type->bit_offset;
+            int bit = (g->type->bit_size >= 0) ? g->type->bit_size : -1;
+            *addrp = (g->type->bit_offset & 0xFF) | ((bit & 0xFFFF) << 16);
             dict_put(ctx->sfr_addr, strdup(g->name), addrp);
             return;  /* 不分配 EDATA, 不注册 obj 符号 */
         }
