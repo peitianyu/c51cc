@@ -1958,6 +1958,15 @@ static Ctype *read_decl_spec(void)
         is_ident(tok, "union") ? read_union_def() : 
         is_ident(tok, "enum") ? read_enum_def() : get_ctype(tok);
 
+    /* long long → 按 long (32 位) 处理 (0083/84-longlong, C251 无 64 位) */
+    if (ctype == ctype_long) {
+        Token next = peek_token();
+        if (is_ident(next, "long")) {
+            read_token();  /* 消费第二个 long */
+            /* ctype 保持 ctype_long (32 位) */
+        }
+    }
+
     if (!ctype && get_ttype(tok) == TTYPE_IDENT && !get_attr(attr).ctype_typedef) 
         ctype = dict_get(typedefenv, get_ident(tok));
 
