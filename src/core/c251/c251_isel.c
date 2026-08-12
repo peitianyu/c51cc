@@ -2161,11 +2161,9 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         if (size < 1) size = 1;
         /* @WRj+dis16 折叠前提: dest 只被 LOAD/STORE 当 ptr 消费 (否则地址不含偏移会错);
          * 且不跨块 (块内 use 才可扫描)。
-         * sim251 mov_dis 只实现字节级 (0x09/0x19); 字级 (MOV WRj,@WRj+dis16, 0x29/0x39)
-         * 未实现 → 字访问 (int 数组) 折叠会触发 unsupported → 指令丢弃 (48_ptr_arith FAIL)。
-         * 故只折叠字节访问 (LOAD/STORE 目标 dsz<=1 且 mem_type 字节)。 */
+         * 字节级 0x09/0x19 + 字级 0x49/0x59 (sim251 已实现) → size<=2 可折叠。 */
         bool fold_ok = ins->dest >= 0 && !is_global_live(isel->global_live, ins->dest)
-            && ins->type && ins->type->size <= 1;
+            && ins->type && ins->type->size <= 2;
         if (fold_ok && isel->block_instrs) {
             for (int fi = isel->block_instr_pos + 1; fi < isel->block_instr_count; fi++) {
                 Instr *u = isel->block_instrs[fi];

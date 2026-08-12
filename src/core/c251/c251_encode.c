@@ -524,11 +524,17 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
             }
             return -1;
         }
-        /* @WRj+dis16 间接目标 (Keil 位移寻址): MOV @WRj+dis16,Rm = 19 (m<<4|j/2) hi lo */
+        /* @WRj+dis16 间接目标 (Keil 位移寻址): MOV @WRj+dis16,Rm = 19 (m<<4|j/2) hi lo;
+         * 字级 MOV @WRj+dis16,WRk = 59 ((k/2)<<4|j/2) hi lo */
         int off1 = 0;
         int indo1 = parse_indirect_wr_off(a1, &off1);
         if (indo1 >= 0) {
             int r2 = parse_reg(a2, &w2);
+            if (r2 >= 0 && w2) {
+                emit4(st, 0x59, (unsigned char)(((r2 / 2) << 4) | (indo1 / 2)),
+                      (unsigned char)((off1 >> 8) & 0xFF), (unsigned char)(off1 & 0xFF));
+                return 0;
+            }
             if (r2 >= 0 && !w2 && r2 <= 15) {
                 emit4(st, 0x19, (unsigned char)((r2 << 4) | (indo1 / 2)),
                       (unsigned char)((off1 >> 8) & 0xFF), (unsigned char)(off1 & 0xFF));
@@ -552,11 +558,17 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
             }
             return -1;
         }
-        /* @WRj+dis16 间接源: MOV Rm,@WRj+dis16 = 09 (m<<4|j/2) hi lo */
+        /* @WRj+dis16 间接源: MOV Rm,@WRj+dis16 = 09 (m<<4|j/2) hi lo;
+         * 字级 MOV WRk,@WRj+dis16 = 49 ((k/2)<<4|j/2) hi lo */
         int off2 = 0;
         int indo2 = parse_indirect_wr_off(a2, &off2);
         if (indo2 >= 0) {
             int r1b = parse_reg(a1, &w1);
+            if (r1b >= 0 && w1) {
+                emit4(st, 0x49, (unsigned char)(((r1b / 2) << 4) | (indo2 / 2)),
+                      (unsigned char)((off2 >> 8) & 0xFF), (unsigned char)(off2 & 0xFF));
+                return 0;
+            }
             if (r1b >= 0 && !w1 && r1b <= 15) {
                 emit4(st, 0x09, (unsigned char)((r1b << 4) | (indo2 / 2)),
                       (unsigned char)((off2 >> 8) & 0xFF), (unsigned char)(off2 & 0xFF));

@@ -691,6 +691,14 @@ static void mov_dis(MCS251 *c, uint8_t op0)
         uint32_t addr = (mcs251_ld_wrj16(c, lo * 2) + dis) & 0xFFFF;
         mcs251_st_mem8(c, addr, mcs251_ld_reg8(c, hi));
         break; }
+    case 0x49: { /* MOV WRj,@WRj+dis16 (字级位移读, int 数组折叠) */
+        uint32_t addr = (mcs251_ld_wrj16(c, lo * 2) + dis) & 0xFFFF;
+        mcs251_st_wrj16(c, hi * 2, mcs251_ld_mem16(c, addr));
+        break; }
+    case 0x59: { /* MOV @WRj+dis16,WRj (字级位移写, int 数组折叠) */
+        uint32_t addr = (mcs251_ld_wrj16(c, lo * 2) + dis) & 0xFFFF;
+        mcs251_st_mem16(c, addr, mcs251_ld_wrj16(c, hi * 2));
+        break; }
     case 0x69: { /* MOV WRj,@DRk+dis16 (far: 路由 XFR/code) */
         uint32_t addr = (mcs251_ld_drk32(c, lo * 4) + dis) & 0xFFFFFF;
         mcs251_st_wrj16(c, hi * 2, mcs251_ld_far16(c, addr));
