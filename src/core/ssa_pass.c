@@ -2570,6 +2570,342 @@ static bool pass_offset_imm_inline(Func *f, Stats *s) {
 }
 
 /*---------- 内联函数调用 ----------*/
+/*---------- 多块函数内联 (常量参数 + 简单控制流, 无 phi) ----------
+ * 三个已知 bug 区 (探索后回退) 的修复:
+ *   tail_id 分配: 先算 tail_id=max_block_id(f)+1, 再 base=tail_id+1 分配新块 id;
+ *                 所有块建好后才克隆, 无 id 冲突/悬空
+ *   跨块 vmap : Pass A 全量预映射 (entry+非 entry 所有 dest), 克隆只查表不新增;
+ *                 非 entry 块引用 entry 值也可解析
+ *   ret 值替换 : 每 ret 一臂 phi (臂值定义在 pred 块), call->dest → phi dest;
+ *                 单路 ret 直接替换; 无值 void ret 不建臂
+ * 配套: pass_const_branch 递归清空死分支子树 → 死 ret 路径块被清空 → phi 臂可剪 → 折叠收敛
+ */
+typedef struct { int from; int to; } BlockMapEntry;
+
+static int block_map_get(BlockMapEntry *map, int count, int from) {
+    for (int i = 0; i < count; ++i)
+        if (map[i].from == from) return map[i].to;
+    return -1;
+}
+
+/* 克隆指令: dest/args 已在 vmap 中预分配 (Pass A); labels 中 blockN 经 bmap 重定向。
+ * 返回 NULL = 未映射 (理论上不会; 0 视为 undef 原样保留)。 */
+static Instr *clone_instr_inline(Instr *i, ValueMapEntry *vmap, int vmap_count,
+                                 BlockMapEntry *bmap, int bmap_count) {
+    Instr *ni = pass_alloc(sizeof(Instr));
+    memset(ni, 0, sizeof(*ni));
+    ni->op = i->op;
+    ni->type = i->type;
+    ni->mem_type = i->mem_type;
+    ni->imm = i->imm;
+    if (i->dest) {
+        bool found = false;
+        ValueName to = vmap_get(vmap, vmap_count, i->dest, &found);
+        if (!found) return NULL;
+        ni->dest = to;
+    }
+    if (i->args && i->args->len > 0) {
+        ni->args = make_list();
+        for (int k = 0; k < i->args->len; ++k) {
+            ValueName v = *(ValueName *)list_get(i->args, k);
+            ValueName mv = 0;
+            if (v != 0) {
+                bool found = false;
+                mv = vmap_get(vmap, vmap_count, v, &found);
+                if (!found) return NULL;
+            }
+            ValueName *p = pass_alloc(sizeof(ValueName));
+            *p = mv;
+            list_push(ni->args, p);
+        }
+    }
+    if (i->labels && i->labels->len > 0) {
+        ni->labels = make_list();
+        for (int k = 0; k < i->labels->len; ++k) {
+            char *orig = (char *)list_get(i->labels, k);
+            char *dup = orig ? pass_alloc(strlen(orig) + 1) : NULL;
+            if (dup) strcpy(dup, orig);
+            if (dup && bmap) {
+                int bid = -1;
+                if (sscanf(dup, "block%d", &bid) == 1) {
+                    int to = block_map_get(bmap, bmap_count, bid);
+                    if (to >= 0) {
+                        char rep[32];
+                        snprintf(rep, sizeof(rep), "block%d", to);
+                        strcpy(dup, rep);
+                    }
+                }
+            }
+            list_push(ni->labels, dup);
+        }
+    }
+    return ni;
+}
+
+/* 多块无 phi 内联:
+ * - 前置: 2-16 块 + 无 phi + 无 CALL + 非递归 + 指令白名单 + 至少一个 ret
+ * - entry 指令 → out_instrs (调用点); 其他块 → f->blocks 新块; ret → JMP tail_id
+ * - tail_instrs (调用点块在 call 之后的指令) → 新尾块 tail_id
+ * - 多路返回: 尾块建 phi 合并; 单路: 直接替换 call->dest
+ * 所有 fallible 克隆先在临时列表完成, 全部成功后才提交 (避免中途失败留残渣)。 */
+static bool inline_multi_block(Func *f, Instr *call, int *next_val, Stats *s,
+                               List *out_instrs, List *tail_instrs, int caller_bid) {
+    if (!f || !call || call->op != IROP_CALL || !call->labels || call->labels->len < 1) return false;
+    if (call->labels->len > 1) return false; /* 间接调用不内联 */
+    if (!tail_instrs || tail_instrs->len == 0) return false; /* 调用点无后续指令 */
+    const char *callee_name = (const char *)list_get(call->labels, 0);
+    Func *callee = find_func_in_unit(callee_name);
+    if (!callee || callee->is_interrupt || callee->is_noreturn) return false;
+    if (callee == f) return false; /* 递归不内联 */
+    if (!callee->blocks || callee->blocks->len < 2 || !callee->entry) return false;
+    if (callee->blocks->len > 16) return false;
+
+    int total_eff = 0;
+    bool has_ret = false;
+    for (Iter it = list_iter(callee->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        if (!blk) continue;
+        if (blk->phis && blk->phis->len > 0) return false;
+        if (!blk->instrs) continue; /* 空块 (优化残留) 允许, 克隆为空块 */
+        for (Iter it2 = list_iter(blk->instrs); !iter_end(it2);) {
+            Instr *ii = iter_next(&it2);
+            if (!ii || ii->op == IROP_NOP || ii->op == IROP_PARAM) continue;
+            if (ii->op == IROP_CALL) return false;
+            if (ii->op == IROP_RET) { has_ret = true; continue; }
+            if (ii->op == IROP_JMP || ii->op == IROP_BR) continue; /* 终止指令 */
+            if (!inline_allowed_op(ii->op)) return false;
+            total_eff++;
+        }
+    }
+    if (!has_ret) return false;
+    if (!callee->is_inline && total_eff > 20) return false;
+
+    int argc = call->args ? call->args->len : 0;
+    ValueName params[32];
+    int param_count = 0;
+    for (Iter it = list_iter(callee->entry->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (i && i->op == IROP_PARAM) {
+            if (param_count < 32) params[param_count++] = i->dest;
+            else return false;
+        }
+    }
+    if (param_count != argc) return false;
+
+    ValueMapEntry vmap[256];
+    int vmap_count = 0;
+    for (int i = 0; i < param_count; ++i) {
+        ValueName arg = *(ValueName *)list_get(call->args, i);
+        if (!vmap_put(vmap, &vmap_count, 256, params[i], arg)) return false;
+    }
+
+    /* Pass A: 全量值映射 (跨块引用依赖完整 vmap; PARAM/RET/JMP/BR 无新名) */
+    for (Iter it = list_iter(callee->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        if (!blk) continue;
+        for (Iter jt = list_iter(blk->instrs); !iter_end(jt);) {
+            Instr *i = iter_next(&jt);
+            if (!i || i->op == IROP_NOP || i->op == IROP_PARAM ||
+                i->op == IROP_RET || i->op == IROP_JMP || i->op == IROP_BR) continue;
+            if (i->dest) {
+                if (!vmap_put(vmap, &vmap_count, 256, i->dest, (*next_val)++)) return false;
+            }
+        }
+    }
+
+    /* 块 id 分配: tail 块 = 调用点后续指令; 新块 = callee 非 entry 块 */
+    int tail_id = max_block_id(f) + 1;
+    int base = tail_id + 1;
+    int nnew = 0;
+    for (Iter it = list_iter(callee->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        if (blk && blk != callee->entry) nnew++;
+    }
+    BlockMapEntry bmap[32];
+    int bmap_count = 0;
+    int bbi = 0;
+    for (Iter it = list_iter(callee->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        if (!blk || blk == callee->entry) continue;
+        if (bmap_count < 32) { bmap[bmap_count].from = (int)blk->id; bmap[bmap_count].to = base + bbi; bmap_count++; }
+        bbi++;
+    }
+    if (bmap_count < 32) { bmap[bmap_count].from = (int)callee->entry->id; bmap[bmap_count].to = caller_bid; bmap_count++; }
+
+    /* ret 臂收集 (每块至多一臂) */
+    ValueName arm_vals[16];
+    int arm_blocks[16];
+    int narm = 0;
+
+    /* 先克隆到临时列表 (全部 fallible 操作在此, 失败可安全返回) */
+    List *entry_list = make_list();
+    List **nb_lists = pass_alloc(sizeof(List *) * (nnew > 0 ? nnew : 1));
+    int bi = 0;
+    for (Iter it = list_iter(callee->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        if (!blk || blk == callee->entry) continue;
+        List *nl = make_list();
+        for (Iter it2 = list_iter(blk->instrs); !iter_end(it2);) {
+            Instr *i = iter_next(&it2);
+            if (!i || i->op == IROP_NOP || i->op == IROP_PARAM) continue;
+            if (i->op == IROP_RET) {
+                ValueName vv = 0;
+                bool is_imm = false;
+                long immv = 0;
+                if (i->labels && i->labels->len > 0) {
+                    char *tag = (char *)list_get(i->labels, 0);
+                    if (tag && strcmp(tag, "imm") == 0) { is_imm = true; immv = i->imm.ival; }
+                }
+                if (is_imm) {
+                    Instr *c = pass_alloc(sizeof(Instr));
+                    memset(c, 0, sizeof(*c));
+                    c->op = IROP_CONST;
+                    c->dest = (*next_val)++;
+                    c->type = call->type;
+                    c->imm.ival = immv;
+                    list_push(nl, c);
+                    vv = c->dest;
+                } else if (i->args && i->args->len > 0) {
+                    ValueName v = *(ValueName *)list_get(i->args, 0);
+                    bool found = false;
+                    vv = vmap_get(vmap, vmap_count, v, &found);
+                    if (!found) return false;
+                }
+                Instr *ji = pass_alloc(sizeof(Instr));
+                memset(ji, 0, sizeof(*ji));
+                ji->op = IROP_JMP;
+                ji->labels = make_list();
+                char lb[32];
+                snprintf(lb, sizeof(lb), "block%d", tail_id);
+                char *lb2 = pass_alloc(strlen(lb) + 1);
+                strcpy(lb2, lb);
+                list_push(ji->labels, lb2);
+                list_push(nl, ji);
+                if (narm < 16 && vv != 0) {
+                    /* 无值 void ret 不建臂 (ub 路径; 避免 undef 臂污染 phi) */
+                    int nb_id = block_map_get(bmap, bmap_count, (int)blk->id);
+                    if (nb_id >= 0) { arm_vals[narm] = vv; arm_blocks[narm] = nb_id; narm++; }
+                }
+                continue;
+            }
+            Instr *ni = clone_instr_inline(i, vmap, vmap_count, bmap, bmap_count);
+            if (!ni) return false;
+            list_push(nl, ni);
+        }
+        nb_lists[bi] = nl;
+        bi++;
+    }
+
+    /* entry 克隆 → 临时 entry_list */
+    for (Iter it = list_iter(callee->entry->instrs); !iter_end(it);) {
+        Instr *i = iter_next(&it);
+        if (!i || i->op == IROP_NOP || i->op == IROP_PARAM) continue;
+        if (i->op == IROP_RET) {
+            ValueName vv = 0;
+            bool is_imm = false;
+            long immv = 0;
+            if (i->labels && i->labels->len > 0) {
+                char *tag = (char *)list_get(i->labels, 0);
+                if (tag && strcmp(tag, "imm") == 0) { is_imm = true; immv = i->imm.ival; }
+            }
+            if (is_imm) {
+                Instr *c = pass_alloc(sizeof(Instr));
+                memset(c, 0, sizeof(*c));
+                c->op = IROP_CONST;
+                c->dest = (*next_val)++;
+                c->type = call->type;
+                c->imm.ival = immv;
+                list_push(entry_list, c);
+                vv = c->dest;
+            } else if (i->args && i->args->len > 0) {
+                ValueName v = *(ValueName *)list_get(i->args, 0);
+                bool found = false;
+                vv = vmap_get(vmap, vmap_count, v, &found);
+                if (!found) return false;
+            }
+            Instr *ji = pass_alloc(sizeof(Instr));
+            memset(ji, 0, sizeof(*ji));
+            ji->op = IROP_JMP;
+            ji->labels = make_list();
+            char lb[32];
+            snprintf(lb, sizeof(lb), "block%d", tail_id);
+            char *lb2 = pass_alloc(strlen(lb) + 1);
+            strcpy(lb2, lb);
+            list_push(ji->labels, lb2);
+            list_push(entry_list, ji);
+            if (narm < 16 && vv != 0) { arm_vals[narm] = vv; arm_blocks[narm] = caller_bid; narm++; }
+            continue;
+        }
+        Instr *ni = clone_instr_inline(i, vmap, vmap_count, bmap, bmap_count);
+        if (!ni) return false;
+        list_push(entry_list, ni);
+    }
+
+    /* 提交 (此后无 fallible 操作): 建新块 + 尾块 */
+    Block **newblks = pass_alloc(sizeof(Block *) * (nnew > 0 ? nnew : 1));
+    bi = 0;
+    for (Iter it = list_iter(callee->blocks); !iter_end(it);) {
+        Block *blk = iter_next(&it);
+        if (!blk || blk == callee->entry) continue;
+        Block *nb = pass_alloc(sizeof(Block));
+        memset(nb, 0, sizeof(*nb));
+        nb->id = (uint32_t)(base + bi);
+        nb->phis = make_list();
+        nb->instrs = nb_lists[bi];
+        nb->preds = make_list();
+        list_push(f->blocks, nb);
+        newblks[bi] = nb;
+        bi++;
+    }
+    Block *tail = pass_alloc(sizeof(Block));
+    memset(tail, 0, sizeof(*tail));
+    tail->id = (uint32_t)tail_id;
+    tail->phis = make_list();
+    tail->instrs = tail_instrs;
+    tail->preds = make_list();
+    list_push(f->blocks, tail);
+
+    for (Iter it = list_iter(entry_list); !iter_end(it);)
+        list_push(out_instrs, iter_next(&it));
+    list_clear_shallow(entry_list);
+
+    /* 返回值: 多路 → 尾块 phi; 单路 → 直接替换 */
+    if (call->dest) {
+        if (narm == 1) {
+            bool dummy = false;
+            replace_all_uses(f, call->dest, arm_vals[0], &dummy);
+        } else if (narm > 1) {
+            Instr *phi = pass_alloc(sizeof(Instr));
+            memset(phi, 0, sizeof(*phi));
+            phi->op = IROP_PHI;
+            phi->dest = (*next_val)++;
+            phi->type = call->type;
+            phi->mem_type = call->mem_type;
+            phi->args = make_list();
+            phi->labels = make_list();
+            for (int i = 0; i < narm; ++i) {
+                ValueName *p = pass_alloc(sizeof(ValueName));
+                *p = arm_vals[i];
+                list_push(phi->args, p);
+                char lb[32];
+                snprintf(lb, sizeof(lb), "block%d", arm_blocks[i]);
+                char *lb2 = pass_alloc(strlen(lb) + 1);
+                strcpy(lb2, lb);
+                list_push(phi->labels, lb2);
+            }
+            list_push(tail->phis, phi);
+            bool dummy = false;
+            replace_all_uses(f, call->dest, phi->dest, &dummy);
+        }
+    }
+
+    call->op = IROP_NOP;
+    if (call->args) list_clear(call->args);
+    if (call->labels) list_clear(call->labels);
+    if (s) s->fold++;
+    return true;
+}
+
 static bool inline_single_call(Func *f, Instr *call, int *next_val, Stats *s, List *out_instrs) {
     if (!f || !call || call->op != IROP_CALL || !call->labels || call->labels->len < 1) return false;
     const char *callee_name = (const char *)list_get(call->labels, 0);
@@ -2721,13 +3057,25 @@ static bool pass_inline_func_call(Func *f, Stats *s) {
 
         List *new_instrs = make_list();
         bool block_changed = false;
-        for (Iter jt = list_iter(b->instrs); !iter_end(jt);) {
-            Instr *i = iter_next(&jt);
+        int n = b->instrs->len;
+        for (int k = 0; k < n; ++k) {
+            Instr *i = list_get(b->instrs, k);
             if (i && i->op == IROP_CALL) {
+                /* 先试多块 (成功则 call 之后的指令移入尾块, 跳过剩余) */
+                List *tail = make_list();
+                for (int m = k + 1; m < n; ++m) list_push(tail, list_get(b->instrs, m));
+                if (inline_multi_block(f, i, &next_val, s, new_instrs, tail, (int)b->id)) {
+                    block_changed = true;
+                    k = n; /* tail 已移入尾块, 本块剩余指令不再保留 */
+                    continue;
+                }
+                list_clear_shallow(tail);
                 if (inline_single_call(f, i, &next_val, s, new_instrs)) {
                     block_changed = true;
                     continue;
                 }
+                list_push(new_instrs, i);
+                continue;
             }
             list_push(new_instrs, i);
         }
@@ -3132,6 +3480,35 @@ static bool pass_br_same_target(Func *f, Stats *s) {
 }
 
 /*---------- 常量分支消除 ----------*/
+/* 递归清空死分支子树: 被判定不可达的死块, 其终止指令指向的后继若再无其他前驱
+ * (preds_remove 后为空) 同样不可达 → 清空并递归。
+ * 只清空 instrs/phis (标签引用随之被 phi_prune 剪除), 不删除块对象。
+ * 多块内联的死 ret 路径块正是靠此被清空 → 尾块 phi 臂可剪 → 常量折叠收敛。 */
+static void clear_dead_subtree(Func *f, Block *dead) {
+    if (!f || !dead) return;
+    Instr *term = block_last_effective_instr(dead);
+    if (!term || !term->labels) return;
+    int tids[16];
+    int n = 0;
+    for (int k = 0; k < term->labels->len && n < 16; ++k) {
+        int tid = -1;
+        sscanf((char *)list_get(term->labels, k), "block%d", &tid);
+        if (tid >= 0) tids[n++] = tid;
+    }
+    for (int i = 0; i < n; ++i) {
+        Block *t = find_block_by_id(f, tids[i]);
+        if (!t || t == f->entry) continue;
+        if (t->preds) t->preds = preds_remove(t->preds, dead);
+        if (t->preds && t->preds->len == 0) {
+            clear_dead_subtree(f, t); /* 先递归: t 的指令尚未清空 */
+            list_clear_shallow(t->instrs);
+            t->instrs = make_list();
+            list_clear_shallow(t->phis);
+            t->phis = make_list();
+        }
+    }
+}
+
 static bool pass_const_branch(Func *f, Stats *s) {
     bool changed = false;
     for (Iter it = list_iter(f->blocks); !iter_end(it);) {
@@ -3168,8 +3545,9 @@ static bool pass_const_branch(Func *f, Stats *s) {
                 /* 从死块的前驱列表中移除当前块 */
                 if (dead_blk->preds) {
                     dead_blk->preds = preds_remove(dead_blk->preds, b);
-                    /* 如果死块没有其他前驱了，清空它 */
+                    /* 如果死块没有其他前驱了，清空它 (连同其死分支子树) */
                     if (dead_blk->preds->len == 0) {
+                        clear_dead_subtree(f, dead_blk);
                         list_clear_shallow(dead_blk->instrs);
                         dead_blk->instrs = make_list();
                         list_clear_shallow(dead_blk->phis);
