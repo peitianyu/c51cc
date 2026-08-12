@@ -185,7 +185,9 @@ version: 0.2.0 (C251 后端 M1-M3)
 
 当前基线 (M3 阶段, 2026-08-12):
 - Suite: 64 OK / 0 FAIL / 37 SKIP (全绿)
-- Execute: 104 PASS / 3 FAIL / 0 CE
+- Execute: 107 PASS / 0 FAIL / 0 CE (全绿)
 - STC32G: 历史基线 34/34（当前分支无验证脚本, 待恢复）
 - M3 全部达成: far 指针 (77) / 存储类 idata/xdata (87/88/96) / 循环后置递减 (79/80/81)
   / 前端缺口 (82/83) / 布局敏感根修 — 寄存器分配对齐 Keil XSMALL+Source 纪律
+- execute 全绿: 0041-queen (MUL partner + 标签前缀 + SP 动态) / 0042-prime (DIV partner)
+  / 0057-duff (phi 降级 TRUNC 移 instrs)
