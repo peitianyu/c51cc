@@ -1551,19 +1551,37 @@ static Ast *read_decl_array_init_recurse(Ctype *ctype)
             break;
 
         Ast *one_row;
-        if (ctype->ptr->type == CTYPE_ARRAY)
+        if (ctype->ptr->type == CTYPE_ARRAY) {
             one_row = read_decl_array_init_recurse(ctype->ptr);
-        else if (ctype->ptr->type == CTYPE_STRUCT) {
+            list_push(row_list, one_row); actual_rows++;
+        } else if (ctype->ptr->type == CTYPE_STRUCT) {
             /* struct 元素用结构体初始化器 (0093-arrayinit: S a[1]={{1,{2,3}}}) */
             one_row = read_decl_struct_init(ctype->ptr);
+            list_push(row_list, one_row); actual_rows++;
         } else {
             Token t = read_token();
-            unget_token(t);
-            one_row = read_expr();
-            result_type('=', one_row->ctype, ctype->ptr);
+            /* C99 指定初始化器: [index] = value (0095-arrayselector) */
+            if (is_punct(t, '[')) {
+                Ast *idx_ast = read_expr();
+                expect(']');
+                expect('=');
+                Ast *val = read_expr();
+                result_type('=', val->ctype, ctype->ptr);
+                int idx = (int)eval_intexpr(idx_ast);
+                /* 填充 row_list 到 idx+1 长度 (缺位填 0) */
+                while (list_len(row_list) <= idx) {
+                    list_push(row_list, ast_inttype(ctype->ptr, 0));
+                    actual_rows++;
+                }
+                list_set(row_list, idx, val);
+            } else {
+                unget_token(t);
+                one_row = read_expr();
+                result_type('=', one_row->ctype, ctype->ptr);
+                list_push(row_list, one_row);
+                actual_rows++;
+            }
         }
-        list_push(row_list, one_row);
-        actual_rows++;
 
         if (is_punct(peek_token(), ',')) {
             read_token();
