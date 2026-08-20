@@ -1426,8 +1426,14 @@ static ValueName gen_expr(SSABuild *b, Ast *ast) {
         ValueName val = gen_expr(b, ast->operand);
         IrOp op = (ast->type == '~') ? IROP_NOT : IROP_LNOT;
         /* LNOT result is always 0/1 → use char (1 byte) to avoid 2-byte register waste */
-        Ctype *lnot_type = (op == IROP_LNOT) ? ctype_char : ast->ctype;
-        return ssa_build_unop_t(b, op, val, lnot_type);
+        Ctype *not_type = (op == IROP_LNOT) ? ctype_char : ast->ctype;
+        /* ~ 结果类型 = 操作数提升类型 (parser 对 long 的 ~ 可能错误收窄为 int) */
+        if (op == IROP_NOT) {
+            Instr *d = ssa_find_def_instr_current_func(b, val);
+            Ctype *vt = d ? d->type : (ast->operand ? ast->operand->ctype : NULL);
+            if (vt && (!not_type || vt->size > not_type->size)) not_type = vt;
+        }
+        return ssa_build_unop_t(b, op, val, not_type);
     }
 
     case PUNCT_INC:

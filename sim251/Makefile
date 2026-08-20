@@ -47,7 +47,9 @@ clean:
 
 # Run the 25-instruction regression suite against the standalone emulator.
 test: $(BIN)
-	$(PYTHON) ../c251/tests/run_tests.py --qemu ./$(BIN) --dir ../c251/tests/firmware
+	cd .. && cmd.exe //c "scripts\\build_compiler.bat scripts\\c251cc.exe"
+	$(PYTHON) ../scripts/c251/c251_sim.py
+	$(PYTHON) ../scripts/c251/execute_runner.py --limit 12
 
 # Run the STC32G LED demo (P7 running light) and verify the 8-value cycle.
 # Expected P7 values over the run: fe fd fb f7 ef df bf 7f (then wraps).

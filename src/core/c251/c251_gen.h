@@ -33,9 +33,10 @@ typedef struct C251GenContext {
 /* 值名 → dict key（公共，跨文件共享；返回 strdup，dict_free/remove 负责释放） */
 char* c251_key(int n);
 
-/* 溢出槽管理：为值分配/查询 EDATA 临时槽（每槽 2 字节，符号 __spill_N）。
- * 返回符号名（strdup，ctx 持有）；已分配过则复用 */
+/* 溢出槽管理：为值分配/查询 EDATA 临时槽（u8/u16 每槽 2 字节, long 4 字节,
+ * 符号 __spill_N）。返回符号名（strdup，ctx 持有）；已分配过则复用 */
 char* c251_alloc_spill(C251GenContext* ctx, ValueName val);
+char* c251_alloc_spill_sz(C251GenContext* ctx, ValueName val, int sz);
 char* c251_value_spill(C251GenContext* ctx, ValueName val);
 
 /* 主入口 */

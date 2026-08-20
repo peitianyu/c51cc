@@ -90,6 +90,14 @@ static int parse_reg(const char *s, int *is_word) {
     return -1;
 }
 
+/* DRk → k (0/4/8/12/.../60, 32 位双字寄存器), 失败返回 -1 */
+static int parse_dr(const char *s) {
+    if (!s || s[0] != 'D' || s[1] != 'R') return -1;
+    char *end; long v = strtol(s + 2, &end, 10);
+    if (*end != '\0' || v < 0 || v > 60 || (v % 4) != 0) return -1;
+    return (int)v;
+}
+
 /* @WRn → WR 索引（16 位间接地址寄存器），失败返回 -1 */
 static int parse_indirect_wr(const char *s) {
     if (!s || s[0] != '@' || s[1] != 'W' || s[2] != 'R') return -1;
@@ -203,6 +211,7 @@ static Symbol *c251_find_symbol(const ObjFile *obj, const char *name) {
 
 /* 符号地址 = sym->value（EDATA 从 0 布局，value 即地址，与 hex 输出一致） */
 static unsigned symbol_addr(EncodeState *st, const char *name) {
+    if (getenv("C251_DBG_SYM")) fprintf(stderr, "[sym] resolve: %s\n", name ? name : "?");
     /* 支持 (sym + N) 地址偏移语法: 提取符号名与偏移 (0046-inits: long 低 16 位) */
     int addend = 0;
     const char *symname = name;
@@ -477,7 +486,14 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
                 if (a2 && *a2 != '#' && *end == '\0' && dir >= 0x80 && dir <= 0xFF) { emit2(st, 0xE5, (unsigned char)(dir & 0xFF)); return 0; }
             }
             int r2 = parse_reg(a2, &w2);
-            if (r2 >= 0 && !w2) { emit2(st, 0xE8 | (unsigned char)r2, 0x00); return 0; }  /* MOV A,Rn (0xE8+n) */
+            if (r2 >= 0 && !w2) { emit2(st, 0xE8 + (unsigned char)r2, 0x00); return 0; }  /* MOV A,Rn (0xE8+n) — R8-R15: 必须加法非 OR */
+            if (is_symbol_arg(a2)) {
+                /* MOV A,dir16 (EDATA 符号): 7E B3 hi lo (32 位 divmod 符号字节读) */
+                unsigned addr = symbol_addr(st, a2);
+                emit4(st, 0x7E, 0xB3,
+                      (unsigned char)((addr >> 8) & 0xFF), (unsigned char)(addr & 0xFF));
+                return 0;
+            }
             return -1;
         }
         if (a2 && strcmp(a2, "A") == 0) {
@@ -485,9 +501,9 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
                 char *end; long dir = strtol(a1, &end, 16);
                 if (a1 && *a1 != '#' && *end == '\0' && dir >= 0x80 && dir <= 0xFF) { emit2(st, 0xF5, (unsigned char)(dir & 0xFF)); return 0; }
             }
-            { /* MOV Rn,A (0xF8+n) */
+            { /* MOV Rn,A (0xF8+n) — R8-R15: 必须加法非 OR */
                 int r1 = parse_reg(a1, &w1);
-                if (r1 >= 0 && !w1) { emit2(st, 0xF8 | (unsigned char)r1, 0x00); return 0; }
+                if (r1 >= 0 && !w1) { emit2(st, 0xF8 + (unsigned char)r1, 0x00); return 0; }
             }
         }
         /* @DRk 间接目标 (far 指针写): MOV @DRk,Rm = 7A (k/4)B (m)0;
@@ -686,6 +702,12 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     }
 
     if (!strcmp(op, "ADD")) {
+        /* 32 位: ADD DRk,DRk = 2F (k1/4)4|(k2/4) (regop2 dword) */
+        int d1 = parse_dr(a1), d2 = parse_dr(a2);
+        if (d1 >= 0 && d2 >= 0) {
+            emit2(st, 0x2F, (unsigned char)(((d1 / 4) << 4) | (d2 / 4)));
+            return 0;
+        }
         int r1 = parse_reg(a1, &w1);
         int r2 = parse_reg(a2, &w2);
         if (r1 >= 0 && w1 && r2 >= 0 && w2)
@@ -704,6 +726,12 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     }
 
     if (!strcmp(op, "SUB")) {
+        /* 32 位: SUB DRk,DRk = 9F (k1/4)4|(k2/4) */
+        int d1 = parse_dr(a1), d2 = parse_dr(a2);
+        if (d1 >= 0 && d2 >= 0) {
+            emit2(st, 0x9F, (unsigned char)(((d1 / 4) << 4) | (d2 / 4)));
+            return 0;
+        }
         int r1 = parse_reg(a1, &w1);
         int r2 = parse_reg(a2, &w2);
         if (r1 >= 0 && w1 && r2 >= 0 && w2)
@@ -731,7 +759,8 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     if (!strcmp(op, "ANL") || !strcmp(op, "ORL") || !strcmp(op, "XRL")) {
             /* ANL/ORL/XRL WRj,WRk: 5D/4D/6D (j/2)4|(k/2) (regop2 word)
          * ANL/ORL/XRL WRj,#imm16: 5E/4E/6E (j/2)4 hi lo (regop2 generic case 0x4)
-         * ANL/ORL/XRL Rm,#data: 5E/4E/6E m0 data (regop2 generic case 0x0) */
+         * ANL/ORL/XRL Rm,#data: 5E/4E/6E m0 data (regop2 generic case 0x0)
+         * 32 位: ANL/ORL/XRL DRk,DRk = 5F/4F/6F (k1/4)4|(k2/4) (regop2 dword) */
         int base = !strcmp(op, "ANL") ? 0x5D : (!strcmp(op, "ORL") ? 0x4D : 0x6D);
         /* 位操作: ORL C,bit (0x72) / ANL C,bit (0x82) — 8051 位寻址 */
         if (a1 && !strcmp(a1, "C") && (!strcmp(op, "ORL") || !strcmp(op, "ANL"))) {
@@ -741,6 +770,11 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
                 return 0;
             }
             return -1;
+        }
+        int d1 = parse_dr(a1), d2 = parse_dr(a2);
+        if (d1 >= 0 && d2 >= 0) {
+            emit2(st, (unsigned char)(base + 2), (unsigned char)(((d1 / 4) << 4) | (d2 / 4)));
+            return 0;
         }
         int r1 = parse_reg(a1, &w1);
         int r2 = parse_reg(a2, &w2);
@@ -765,10 +799,14 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
 
     if (!strcmp(op, "SLL") || !strcmp(op, "SRL") || !strcmp(op, "SRA")) {
         /* 移位 1 位 (shift_single): SLL=3E SRL=1E SRA=0E (j/2)4 (lo=4 表示 WRj!)
-         * 第二字节 = (j/2)<<4 | 0x4，lo=4 才是 word 移位 (lo=0 是 Rm 字节移位) */
+         * 第二字节 = (j/2)<<4 | 0x4，lo=4 才是 word 移位 (lo=0 是 Rm 字节移位)
+         * 32 位: lo=0xC → DRk 移位 (shift_single dword 分支) */
         int r1 = parse_reg(a1, &w1);
         unsigned char code = !strcmp(op, "SLL") ? 0x3E : (!strcmp(op, "SRL") ? 0x1E : 0x0E);
-        if (r1 >= 0 && w1) {
+        int d = parse_dr(a1);
+        if (d >= 0) {
+            emit2(st, code, (unsigned char)(((d / 4) << 4) | 0xC));
+        } else if (r1 >= 0 && w1) {
             emit2(st, code, (unsigned char)(((r1 / 2) << 4) | 0x4));
         } else if (r1 >= 0) {
             /* Rm 字节移位 (lo=0): SRL A = 0x1E B0 */
@@ -789,7 +827,13 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     }
 
     if (!strcmp(op, "INC")) {
-        /* INC WRj,#1: 0B (j/2)4 (sel=1 word, ss=0 shortv=1; functional.py inc_wr_1) */
+        /* INC WRj,#1: 0B (j/2)4 (sel=1 word, ss=0 shortv=1; functional.py inc_wr_1)
+         * INC DRk: 0B (k/4)C (sel=3 dword, ss=0 → shortv=1) */
+        int d = parse_dr(a1);
+        if (d >= 0) {
+            emit2(st, 0x0B, (unsigned char)(((d / 4) << 4) | 0xC));
+            return 0;
+        }
         int r1 = parse_reg(a1, &w1);
         if (r1 >= 0 && w1)
             emit2(st, 0x0B, (unsigned char)(((r1 / 2) << 4) | 0x4));
@@ -798,6 +842,12 @@ static int encode_instr(EncodeState *st, AsmInstr *ins) {
     }
 
     if (!strcmp(op, "CMP")) {
+        /* 32 位: CMP DRk,DRk = BF (k1/4)4|(k2/4) (regop2 dword) */
+        int d1 = parse_dr(a1), d2 = parse_dr(a2);
+        if (d1 >= 0 && d2 >= 0) {
+            emit2(st, 0xBF, (unsigned char)(((d1 / 4) << 4) | (d2 / 4)));
+            return 0;
+        }
         int r1 = parse_reg(a1, &w1);
         int r2 = parse_reg(a2, &w2);
         if (r1 >= 0 && w1 && r2 >= 0 && w2)
@@ -928,6 +978,13 @@ static void free_absfixups(List *list) {
 void c251_encode(C251GenContext* ctx, ObjFile* obj) {
     if (!obj) return;
     (void)ctx;
+    if (getenv("C251_DBG_SYMS")) {
+        for (Iter sit = list_iter(obj->symbols); !iter_end(sit);) {
+            Symbol *s = iter_next(&sit);
+            if (s && s->name && strstr(s->name, "spill_"))
+                fprintf(stderr, "[sym] %s value=%d sec=%d\n", s->name, s->value, s->section);
+        }
+    }
     for (Iter sit = list_iter(obj->sections); !iter_end(sit);) {
         Section *sec = iter_next(&sit);
         if (!sec || sec->kind != SEC_CODE || !sec->asminstrs) continue;
@@ -940,7 +997,19 @@ void c251_encode(C251GenContext* ctx, ObjFile* obj) {
             for (Iter ait = list_iter(sec->asminstrs); !iter_end(ait);) {
                 AsmInstr *ai = iter_next(&ait);
                 if (encode_instr(&st, ai) < 0) {
-                    fprintf(stderr, "c251_encode: unsupported instruction: %s\n", ai->op ? ai->op : "?");
+                    fprintf(stderr, "c251_encode: unsupported instruction: %s", ai->op ? ai->op : "?");
+                    if (ai->args) {
+                        fprintf(stderr, " (");
+                        int _k = 0;
+                        for (Iter _it = list_iter(ai->args); !iter_end(_it);) {
+                            const char *_a = iter_next(&_it);
+                            if (_k) fprintf(stderr, ",");
+                            fprintf(stderr, "%s", _a);
+                            _k++;
+                        }
+                        fprintf(stderr, ")");
+                    }
+                    fprintf(stderr, "\n");
                 }
             }
             int before = list_len(degraded_seqs);

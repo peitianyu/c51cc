@@ -49,26 +49,43 @@ char* c251_value_spill(C251GenContext* ctx, ValueName val) {
     return sp;
 }
 
-char* c251_alloc_spill(C251GenContext* ctx, ValueName val) {
+/* 溢出槽: 2 字节 (u8/u16) 或 4 字节 (long)。值类型可从 value_type 查 (spill 调用时
+ * 可能早于 def 类型记录 — phi dest 在 isel_block 预分配; 调用方用 sz 显式指定)。
+ * 32 位槽布局: 大端, slot=高字 (MSB 起), slot+2=低字。 */
+char* c251_alloc_spill_sz(C251GenContext* ctx, ValueName val, int sz) {
     if (!ctx) return NULL;
+    if (sz < 2) sz = 2;
+    if (sz > 4) sz = 4;
     char *key = c251_key(val);
     char *exist = (char*)dict_get(ctx->value_to_spill, key);
     if (exist) { free(key); return exist; }
-    /* EDATA 段追加 2 字节槽 + 符号（与全局变量同段；无全局变量时首次预留 0x80） */
+    /* EDATA 段追加 2/4 字节槽 + 符号（与全局变量同段；无全局变量时首次预留 0x80） */
     int sec_idx = obj_find_or_add_section(ctx->obj, "?ED?", SEC_EDATA, 1);
     Section *sec = obj_get_section(ctx->obj, sec_idx);
     if (sec->bytes_len == 0) {
         section_append_zeros(sec, C251_EDATA_BASE);
     }
     int offset = sec->bytes_len;
-    section_append_zeros(sec, 2);
+    section_append_zeros(sec, sz);
     char sym[64];
     snprintf(sym, sizeof(sym), "__spill_%d", ctx->next_spill_id);
     ctx->next_spill_id++;
-    obj_add_symbol(ctx->obj, sym, SYM_DATA, sec_idx, offset, 2, SYM_FLAG_LOCAL);
+    obj_add_symbol(ctx->obj, sym, SYM_DATA, sec_idx, offset, sz, SYM_FLAG_LOCAL);
     char *symdup = strdup(sym);
     dict_put(ctx->value_to_spill, key, symdup);
     return symdup;
+}
+
+char* c251_alloc_spill(C251GenContext* ctx, ValueName val) {
+    /* 按值类型推断槽宽: 32 位值 → 4 字节 (def 类型已记录时); 未知 → 2 字节 */
+    int sz = 2;
+    if (val >= 0 && ctx->value_type) {
+        char *k = c251_key(val);
+        Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
+        free(k);
+        if (t && t->size >= 4) sz = 4;
+    }
+    return c251_alloc_spill_sz(ctx, val, sz);
 }
 
 /* blob (小端, SSA 约定) → EDATA 大端内存：按类型元素边界递归反转。

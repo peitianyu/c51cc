@@ -156,7 +156,7 @@ static int getc_nonspace(void)
 static Token read_number(char first)
 {
     String s = make_string();
-    long ival = 0, fval = 0;
+    long long ival = 0, fval = 0;
     int  base = 10, dot = 0, fscale = 0;
 
     /* 0x... / 0b... 前缀 */
@@ -180,21 +180,26 @@ static Token read_number(char first)
         else { ungetc_with_pos(c); break; }
     }
 
-    /* 后缀 u/U/l/L 吞掉(无符号/长); f/F 表示浮点字面量 */
+    /* 后缀 u/U/l/L 保留 (parser 定型需要: 70000L ≠ 70000); f/F 表示浮点字面量 */
     int is_float_suf = 0;
+    char isuf[8]; int nisuf = 0;
     for (;;) {
         int suf = getc_with_pos();
-        if (suf == 'u' || suf == 'U' || suf == 'l' || suf == 'L')
-            continue;                    /* 整数后缀: 仅影响类型, 解析阶段忽略 */
+        if (suf == 'u' || suf == 'U' || suf == 'l' || suf == 'L') {
+            if (nisuf < 6) isuf[nisuf++] = (char)suf;
+            continue;
+        }
         if (suf == 'f' || suf == 'F') { is_float_suf = 1; continue; }
         ungetc_with_pos(suf);
         break;
     }
+    isuf[nisuf] = '\0';
 
     if (dot || is_float_suf)
-        string_appendf(&s, "%ld.%0*ld", ival, fscale, fval);
+        string_appendf(&s, "%lld.%0*ld", ival, fscale, (long)fval);
     else
-        string_appendf(&s, "%ld", ival);
+        string_appendf(&s, "%lld", ival);
+    string_appendf(&s, "%s", isuf);
 
     return make_number(get_cstring(s));
 }

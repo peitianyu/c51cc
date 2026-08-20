@@ -264,12 +264,12 @@ void mcs251_sub8_flags(MCS251 *c, uint32_t res, uint32_t a, uint32_t b,
                        uint32_t borrow, int up);
 void mcs251_logic8_flags(MCS251 *c, uint32_t res);
 void mcs251_shift8_flags(MCS251 *c, uint32_t res, uint32_t carryout);
-void mcs251_shiftw_flags(MCS251 *c, uint32_t res, uint32_t carryout);
+void mcs251_shiftw_flags(MCS251 *c, uint32_t res, uint32_t carryout, int size);
 void mcs251_muldiv8_flags(MCS251 *c, uint32_t ov);
 void mcs251_addw_flags(MCS251 *c, uint32_t res, uint32_t a, uint32_t b,
-                       uint32_t cin);
+                       uint32_t cin, int size);
 void mcs251_subw_flags(MCS251 *c, uint32_t res, uint32_t a, uint32_t b,
-                       uint32_t borrow);
+                       uint32_t borrow, int size);
 void mcs251_logicw_flags(MCS251 *c, uint32_t res, uint32_t size);
 void mcs251_set_parity(MCS251 *c, uint32_t v);
 

@@ -263,19 +263,38 @@ static int isel_alloc_wr_avoid(ISelContext* isel, ValueName val, const int *byte
 
 /* 查 ADDR 产物指向的全局符号名（无则 NULL） */
 static char* value_to_addr_lookup(C251GenContext* ctx, ValueName val);
+static int value_size_of_ctx(C251GenContext *ctx, ValueName v);
+static bool value_is_32(C251GenContext *ctx, ValueName v);
+static bool value_is_unsigned(ISelContext* isel, ValueName v);
+static bool has_imm_label(Instr* ins);
+static int isel_temp_dr_avoid(ISelContext* isel, const int *avoid, int nav);
+static void spill_partner_if_live(ISelContext* isel, int wr);
+static char* isel_new_label(ISelContext* isel, const char* prefix);
+static void isel_emit_label(ISelContext* isel, const char* name);
 
-/* 把值 v 加载到寄存器 w：v 已在 w 跳过；否则按 寄存器/常量/溢出槽 顺序 */
+/* 把值 v 加载到寄存器 w：v 已在 w 跳过；否则按 寄存器/常量/溢出槽 顺序。
+ * 32 位源取低字 (TRUNC 语义; 高字在 DR 路径单独处理)。 */
 static int load_value_to_wr(ISelContext* isel, ValueName v, int w) {
     C251GenContext *ctx = isel->ctx;
     char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
     int r = isel_value_reg(ctx, v);
     if (r == w) return 0;
-    if (r >= 0) { char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r); isel_emit(isel, "MOV", wbuf, rbuf); return 0; }
+    if (r >= 0) {
+        if (value_is_32(ctx, v)) {
+            /* 32 位值 → 低字 WR(w) = WR(r+2) */
+            char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r + 2);
+            isel_emit(isel, "MOV", wbuf, rbuf);
+        } else {
+            char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+            isel_emit(isel, "MOV", wbuf, rbuf);
+        }
+        return 0;
+    }
     char *k = c251_key(v);
     int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k);
     free(k);
     if (cv) {
-        char imm[32]; snprintf(imm, sizeof(imm), "#%lld", *cv & 0xFFFF);
+        char imm[32]; snprintf(imm, sizeof(imm), "#%lld", (value_is_32(ctx, v) ? (*cv & 0xFFFF) : (*cv & 0xFFFF)));
         isel_emit(isel, "MOV", wbuf, imm);
         return 0;
     }
@@ -287,9 +306,634 @@ static int load_value_to_wr(ISelContext* isel, ValueName v, int w) {
         return 0;
     }
     char *sp = c251_value_spill(ctx, v);
-    if (sp) { isel_emit(isel, "MOV", wbuf, sp); return 0; }
+    if (sp) {
+        if (value_is_32(ctx, v)) {
+            /* 32 位槽: 低字在 slot+2 (大端) */
+            char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+            isel_emit(isel, "MOV", wbuf, slo);
+        } else {
+            isel_emit(isel, "MOV", wbuf, sp);
+        }
+        return 0;
+    }
     fprintf(stderr, "c251 isel: 值 %d 无寄存器/常量/槽可加载\n", v);
     return -1;
+}
+
+/* ============================================================
+ * 32 位 (long) DRk 寄存器机制
+ * DRk = WRk:WR(k+2) 对 (k ∈ {0,4,8,12}); WRk = 高字, WR(k+2) = 低字
+ * 32 位值占 reg_val[k/2] 与 reg_val[(k+2)/2] 两槽 (同值), value_to_reg 存 k
+ * ============================================================ */
+
+/* WR w 槽可否被占用 (空闲 / 槽值已死): 死值若是 32 位对 (partner 同值) 一并清除 */
+static bool wr_take(ISelContext* isel, int w) {
+    int i = w / 2;
+    if (isel->reg_val[i] < 0) return true;
+    ValueName rv = isel->reg_val[i];
+    if (value_still_used(isel, rv, isel->block_instr_pos)) return false;
+    if (isel->reg_val[i ^ 1] == rv) isel->reg_val[i ^ 1] = -1;
+    isel->reg_val[i] = -1;
+    return true;
+}
+
+/* 选临时 DRk (k=0/4/8/12): 两槽都可用; 返回 k, 失败 -1 (临时不登记占用) */
+static int isel_temp_dr(ISelContext* isel, int avoid_wr) {
+    for (int k = 0; k <= 12; k += 4) {
+        if (k == avoid_wr || k + 2 == avoid_wr) continue;
+        if (isel->reg_val[k/2] < 0 && isel->reg_val[(k+2)/2] < 0) return k;
+    }
+    return -1;
+}
+
+/* 分配 DRk 给 32 位值 (两槽同值登记)。空闲 → 死值回收 → 强制溢出兜底。 */
+static int isel_alloc_dr(ISelContext* isel, ValueName val) {
+    C251GenContext *ctx = isel->ctx;
+    char *key = c251_key(val);
+    int *exist = (int*)dict_get(ctx->value_to_reg, key);
+    if (exist) { free(key); return *exist; }
+    int pos = isel->block_instr_pos;
+    /* 空闲对 */
+    for (int k = 0; k <= 12; k += 4) {
+        if (isel->reg_val[k/2] < 0 && isel->reg_val[(k+2)/2] < 0) {
+            isel->reg_val[k/2] = val; isel->reg_val[(k+2)/2] = val;
+            int *slot = malloc(sizeof(int)); *slot = k;
+            dict_put(ctx->value_to_reg, key, slot);
+            return k;
+        }
+    }
+    /* 死值回收: 两槽都死 (各自由 wr_take 语义) */
+    for (int k = 0; k <= 12; k += 4) {
+        int i1 = k/2, i2 = (k+2)/2;
+        ValueName a = isel->reg_val[i1], b = isel->reg_val[i2];
+        if (a < 0 || b < 0) continue;
+        bool ad = !value_still_used(isel, a, pos);
+        bool bd = !value_still_used(isel, b, pos);
+        if (ad && bd) {
+            isel->reg_val[i1] = val; isel->reg_val[i2] = val;
+            int *slot = malloc(sizeof(int)); *slot = k;
+            dict_put(ctx->value_to_reg, key, slot);
+            return k;
+        }
+    }
+    /* 强制溢出: 第一对中活值溢出 (32 位对整体溢出) */
+    for (int k = 0; k <= 12; k += 4) {
+        int i1 = k/2, i2 = (k+2)/2;
+        for (int c = 0; c < 2; c++) {
+            int i = (c == 0) ? i1 : i2;
+            ValueName rv = isel->reg_val[i];
+            if (rv < 0) continue;
+            char *sp = c251_alloc_spill(ctx, rv);
+            char wbuf[16]; wr_name(wbuf, sizeof(wbuf), i * 2);
+            isel_emit(isel, "MOV", sp, wbuf);
+            if (value_is_32(ctx, rv)) {
+                /* 32 位对: 低字也溢出 + 解除两槽绑定 */
+                int j = i ^ 1;
+                if (isel->reg_val[j] == rv) {
+                    char wbuf2[16]; wr_name(wbuf2, sizeof(wbuf2), j * 2);
+                    char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+                    isel_emit(isel, "MOV", slo, wbuf2);
+                    isel->reg_val[j] = -1;
+                }
+            }
+            char *kk = c251_key(rv);
+            dict_remove(ctx->value_to_reg, kk); free(kk);
+            isel->reg_val[i] = -1;
+        }
+        isel->reg_val[i1] = val; isel->reg_val[i2] = val;
+        int *slot = malloc(sizeof(int)); *slot = k;
+        dict_put(ctx->value_to_reg, key, slot);
+        return k;
+    }
+    return 0; /* 理论不可达 */
+}
+
+/* 把 32 位值 v 加载到 DRk (WRk=高字, WR(k+2)=低字)。源: DR/16 位 WR/常量/槽。 */
+static int load_value_to_dr(ISelContext* isel, ValueName v, int k) {
+    C251GenContext *ctx = isel->ctx;
+    char wlo[16], whi[16];
+    wr_name(wlo, sizeof(wlo), k + 2);
+    wr_name(whi, sizeof(whi), k);
+    int r = isel_value_reg(ctx, v);
+    if (r == k) return 0;
+    if (r >= 0) {
+        if (value_is_32(ctx, v)) {
+            char rlo[16], rhi[16];
+            wr_name(rlo, sizeof(rlo), r + 2);
+            wr_name(rhi, sizeof(rhi), r);
+            isel_emit(isel, "MOV", wlo, rlo);
+            isel_emit(isel, "MOV", whi, rhi);
+        } else {
+            /* 16 位源: 低字 = 源, 高字 = 0 (调用方保证语义 — SEXT 场景另行处理) */
+            char rlo[16]; wr_name(rlo, sizeof(rlo), r);
+            isel_emit(isel, "MOV", wlo, rlo);
+            isel_emit(isel, "MOV", whi, "#0");
+        }
+        return 0;
+    }
+    char *k2 = c251_key(v);
+    int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k2);
+    free(k2);
+    if (cv) {
+        unsigned long vv = (unsigned long)*cv;
+        char ilo[32]; snprintf(ilo, sizeof(ilo), "#0x%04lX", vv & 0xFFFF);
+        char ihi[32]; snprintf(ihi, sizeof(ihi), "#0x%04lX", (vv >> 16) & 0xFFFF);
+        isel_emit(isel, "MOV", wlo, ilo);
+        isel_emit(isel, "MOV", whi, ihi);
+        return 0;
+    }
+    char *sp = c251_value_spill(ctx, v);
+    if (sp) {
+        char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+        isel_emit(isel, "MOV", wlo, slo);
+        isel_emit(isel, "MOV", whi, sp);
+        return 0;
+    }
+    fprintf(stderr, "c251 isel: 32 位值 %d 无寄存器/常量/槽可加载\n", v);
+    isel_emit(isel, "MOV", wlo, "#0");
+    isel_emit(isel, "MOV", whi, "#0");
+    return -1;
+}
+
+/* 32 位常量物化到 DRk (imm_label 内联常量: s2=-1 但值在 ins->imm.ival) */
+static void materialize_imm32_to_dr(ISelContext* isel, long long imm, int k) {
+    unsigned long vv = (unsigned long)imm;
+    char wlo[16], whi[16];
+    wr_name(wlo, sizeof(wlo), k + 2);
+    wr_name(whi, sizeof(whi), k);
+    char ilo[32], ihi[32];
+    snprintf(ilo, sizeof(ilo), "#0x%04lX", vv & 0xFFFF);
+    snprintf(ihi, sizeof(ihi), "#0x%04lX", (vv >> 16) & 0xFFFF);
+    isel_emit(isel, "MOV", wlo, ilo);
+    isel_emit(isel, "MOV", whi, ihi);
+}
+
+/* 4 字节槽清零 (编码器无 MOV dir16,#imm — 经临时 WR) */
+static void zero32_spill(ISelContext* isel, const char *sp) {
+    int t = isel_temp_wr(isel, -1, -1);
+    char tbuf[16]; wr_name(tbuf, sizeof(tbuf), t);
+    char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+    isel_emit(isel, "MOV", tbuf, "#0");
+    isel_emit(isel, "MOV", sp, tbuf);
+    isel_emit(isel, "MOV", slo, tbuf);
+}
+
+/* 取一个 DR 对 (临时): 空闲 → 死值回收 → 强制溢出活值 (divmod 需要 4 个 DR) */
+static int isel_take_dr(ISelContext* isel, const int *avoid, int nav) {
+    int k = isel_temp_dr_avoid(isel, avoid, nav);
+    if (k >= 0) return k;
+    for (int kk = 0; kk <= 12; kk += 4) {
+        int hit = 0;
+        for (int i = 0; i < nav; i++) if (avoid[i] == kk) { hit = 1; break; }
+        if (hit) continue;
+        for (int c = 0; c < 2; c++) {
+            int w = (c == 0) ? kk : kk + 2;
+            ValueName rv = isel->reg_val[w/2];
+            if (rv >= 0) {
+                char *sp = c251_alloc_spill(isel->ctx, rv);
+                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
+                isel_emit(isel, "MOV", sp, wbuf);
+                if (value_is_32(isel->ctx, rv)) {
+                    int j = (w/2) ^ 1;
+                    if (isel->reg_val[j] == rv) {
+                        char wbuf2[16]; wr_name(wbuf2, sizeof(wbuf2), j * 2);
+                        char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+                        isel_emit(isel, "MOV", slo, wbuf2);
+                        isel->reg_val[j] = -1;
+                    }
+                }
+                char *kk2 = c251_key(rv);
+                dict_remove(isel->ctx->value_to_reg, kk2); free(kk2);
+                isel->reg_val[w/2] = -1;
+            }
+        }
+        return kk;
+    }
+    return -1;
+}
+
+/* 32 位值 → 4 字节槽 (槽权威: 大端 slot=高字, slot+2=低字) */
+static void spill_store32(ISelContext* isel, ValueName v, const char *sp) {
+    int r = isel_value_reg(isel->ctx, v);
+    char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+    if (r >= 0) {
+        char wlo[16], whi[16];
+        wr_name(wlo, sizeof(wlo), r + 2);
+        wr_name(whi, sizeof(whi), r);
+        isel_emit(isel, "MOV", slo, wlo);
+        isel_emit(isel, "MOV", sp, whi);
+    } else {
+        zero32_spill(isel, sp);
+    }
+}
+
+/* 32 位值从槽读出到临时 DR (槽权威路径) */
+static int load_spill_to_temp_dr(ISelContext* isel, ValueName v) {
+    int kt = isel_temp_dr(isel, -1);
+    if (kt < 0) return -1;
+    load_value_to_dr(isel, v, kt);
+    return kt;
+}
+
+/* 32 位值 v 若在 DR 中: 落槽并解除绑定 (释放 DR 对给后续计算用) */
+static void spill_and_free_dr(ISelContext* isel, ValueName v) {
+    C251GenContext *ctx = isel->ctx;
+    if (v < 0) return;
+    int r = isel_value_reg(ctx, v);
+    if (r >= 0 && value_is_32(ctx, v)) {
+        char *sp = c251_alloc_spill(ctx, v);
+        spill_store32(isel, v, sp);
+        char *k = c251_key(v);
+        dict_remove(ctx->value_to_reg, k); free(k);
+        isel->reg_val[r/2] = -1;
+        isel->reg_val[(r+2)/2] = -1;
+    }
+}
+
+/* 装载 v 的高 16 位到 WR w (32 位源: 高字; 16 位源: 0; 常量: >>16; 槽: slot) */
+static void load_hiword_to_wr(ISelContext* isel, ValueName v, int w) {
+    C251GenContext *ctx = isel->ctx;
+    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
+    int r = isel_value_reg(ctx, v);
+    if (r >= 0) {
+        if (value_is_32(ctx, v)) {
+            char rbuf[16]; wr_name(rbuf, sizeof(rbuf), r);
+            isel_emit(isel, "MOV", wbuf, rbuf);
+        } else {
+            isel_emit(isel, "MOV", wbuf, "#0");
+        }
+        return;
+    }
+    char *k = c251_key(v);
+    int64_t *cv = (int64_t*)dict_get(ctx->value_to_const, k);
+    free(k);
+    if (cv) {
+        char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ((unsigned long long)*cv >> 16) & 0xFFFF);
+        isel_emit(isel, "MOV", wbuf, imm);
+        return;
+    }
+    char *sp = c251_value_spill(ctx, v);
+    if (sp) { isel_emit(isel, "MOV", wbuf, sp); return; }
+    isel_emit(isel, "MOV", wbuf, "#0");
+}
+
+/* 32 位二元运算 (ADD/SUB/ANL/ORL/XRL): DRk,DRk 形态。s1→dest DR, s2→临时 DR。 */
+static void emit_dr_binop(ISelContext* isel, const char* opm, Instr* ins,
+                          ValueName s1, ValueName s2) {
+    C251GenContext *ctx = isel->ctx;
+    int k = isel_alloc_dr(isel, ins->dest);
+    if (k >= 0) {
+        char d1[16]; snprintf(d1, sizeof(d1), "DR%d", k);
+        if (load_value_to_dr(isel, s1, k) < 0) return;
+        int r2 = isel_value_reg(ctx, s2);
+        int k2 = (r2 >= 0 && value_is_32(ctx, s2)) ? r2 : -1;
+        if (k2 < 0) {
+            k2 = isel_temp_dr(isel, k);
+            if (k2 < 0) {
+                /* DR 耗尽: 先溢出 dest 结果再重试 (释放一对) */
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                spill_store32(isel, ins->dest, sp);
+                return;
+            }
+            if (s2 < 0 && has_imm_label(ins)) {
+                materialize_imm32_to_dr(isel, ins->imm.ival, k2);
+            } else if (load_value_to_dr(isel, s2, k2) < 0) {
+                return;
+            }
+        }
+        char d2[16]; snprintf(d2, sizeof(d2), "DR%d", k2);
+        isel_emit(isel, opm, d1, d2);
+    } else {
+        /* dest 溢出: 临时 DR 计算 → 4 字节槽 */
+        int kt = isel_temp_dr(isel, -1);
+        if (kt < 0) { fprintf(stderr, "c251 isel: DR 耗尽 (32 位 op)"); return; }
+        char d1[16]; snprintf(d1, sizeof(d1), "DR%d", kt);
+        if (load_value_to_dr(isel, s1, kt) < 0) return;
+        int r2 = isel_value_reg(ctx, s2);
+        int k2 = (r2 >= 0 && value_is_32(ctx, s2)) ? r2 : -1;
+        if (k2 < 0) {
+            k2 = isel_temp_dr(isel, kt);
+            if (k2 < 0) return;
+            if (s2 < 0 && has_imm_label(ins)) {
+                materialize_imm32_to_dr(isel, ins->imm.ival, k2);
+            } else {
+                load_value_to_dr(isel, s2, k2);
+            }
+        }
+        char d2[16]; snprintf(d2, sizeof(d2), "DR%d", k2);
+        isel_emit(isel, opm, d1, d2);
+        char *sp = c251_alloc_spill(ctx, ins->dest);
+        spill_store32(isel, ins->dest, sp);
+    }
+}
+
+/* 选空闲临时 DRk, 避开 avoid_drs (DR 索引 0/4/8/12 列表); 失败 -1 */
+static int isel_temp_dr_avoid(ISelContext* isel, const int *avoid, int nav) {
+    for (int k = 0; k <= 12; k += 4) {
+        int hit = 0;
+        for (int i = 0; i < nav; i++) if (avoid[i] == k) { hit = 1; break; }
+        if (hit) continue;
+        if (isel->reg_val[k/2] < 0 && isel->reg_val[(k+2)/2] < 0) return k;
+    }
+    return -1;
+}
+
+/* 32 位乘法: res = aL*bL + ((aL*bH + aH*bL) << 16), 低 32 位。
+ * 需要 4 个 DR (k1=aL*bL, k2=aL*bH, k3=aH*bL, kd=dest); a/b 先落槽释放 DR。 */
+static void emit_mul32(ISelContext* isel, Instr* ins, ValueName s1, ValueName s2) {
+    C251GenContext *ctx = isel->ctx;
+    /* 源落槽: a/b 若在 DR 中, 先存 4 字节槽并解绑 (MUL 需要 4 个 DR) */
+    spill_and_free_dr(isel, s1);
+    spill_and_free_dr(isel, s2);
+    int kd = isel_alloc_dr(isel, ins->dest);
+    int avoid[8]; int nav = 0;
+    if (kd >= 0) avoid[nav++] = kd;
+    int k1 = isel_temp_dr_avoid(isel, avoid, nav); if (k1 >= 0) avoid[nav++] = k1;
+    int k2 = isel_temp_dr_avoid(isel, avoid, nav); if (k2 >= 0) avoid[nav++] = k2;
+    int k3 = isel_temp_dr_avoid(isel, avoid, nav);
+    if (k1 < 0 || k2 < 0 || k3 < 0 || kd < 0) {
+        fprintf(stderr, "c251 isel: DR 耗尽 (32 位 MUL)");
+        if (kd >= 0) {
+            /* 释放 dest 绑定, 输出 0 */
+            char *kk = c251_key(ins->dest);
+            dict_remove(ctx->value_to_reg, kk); free(kk);
+            isel->reg_val[kd/2] = -1; isel->reg_val[(kd+2)/2] = -1;
+        }
+        char *sp = c251_alloc_spill(ctx, ins->dest);
+        zero32_spill(isel, sp);
+        return;
+    }
+    char w1l[16], w1h[16], w2l[16], w2h[16], w3l[16], w3h[16];
+    char wdl[16], wdh[16];
+    wr_name(w1l, sizeof(w1l), k1 + 2); wr_name(w1h, sizeof(w1h), k1);
+    wr_name(w2l, sizeof(w2l), k2 + 2); wr_name(w2h, sizeof(w2h), k2);
+    wr_name(w3l, sizeof(w3l), k3 + 2); wr_name(w3h, sizeof(w3h), k3);
+    wr_name(wdl, sizeof(wdl), kd + 2); wr_name(wdh, sizeof(wdh), kd);
+    /* k1.low = aL; kd.low = bL (暂存); k3.low = bH */
+    load_value_to_wr(isel, s1, k1 + 2);      /* aL */
+    load_value_to_wr(isel, s2, kd + 2);      /* bL 暂存 kd.low */
+    load_hiword_to_wr(isel, s2, k3 + 2);     /* bH */
+    /* k1 = aL*bL */
+    spill_partner_if_live(isel, k1 + 2);
+    isel_emit(isel, "MUL", w1l, wdl);
+    /* k2.low = aL (重载); k2 = aL*bH */
+    load_value_to_wr(isel, s1, k2 + 2);
+    spill_partner_if_live(isel, k2 + 2);
+    isel_emit(isel, "MUL", w2l, w3l);
+    /* k3.low = aH; k3 = aH*bL */
+    load_hiword_to_wr(isel, s1, k3 + 2);
+    spill_partner_if_live(isel, k3 + 2);
+    isel_emit(isel, "MUL", w3l, wdl);
+    /* res: 低字 = k1.low; 高字 = k1.high + k2.low + k3.low (16 位加法进位自然丢弃) */
+    isel_emit(isel, "MOV", wdl, w1l);
+    isel_emit(isel, "MOV", wdh, w1h);
+    isel_emit(isel, "ADD", wdh, w2l);
+    isel_emit(isel, "ADD", wdh, w3l);
+}
+
+/* 32 位无符号除法核心: a(DR ka) / b(DR kb) → 商/余数, 32 次移位-减法。
+ * 破坏 ka (被除数移位耗尽); 计数器 WRc。 */
+/* 32 位无符号除法核心: 移位-减法, 32 次迭代完全展开 (无计数器/无循环 —
+ * 避免计数器占 DR 对的问题)。破坏 ka; kb/kq/kr 保留。
+ * ka=被除数, kb=除数, kq=商, kr=余数。 */
+static void udivmod32_core(ISelContext* isel, int ka, int kb, int kq, int kr) {
+    char *da = malloc(16), *db = malloc(16), *dq = malloc(16), *dr = malloc(16);
+    snprintf(da, 16, "DR%d", ka); snprintf(db, 16, "DR%d", kb);
+    snprintf(dq, 16, "DR%d", kq); snprintf(dr, 16, "DR%d", kr);
+    /* q = 0, r = 0 */
+    char ql[16], qh[16], rl[16], rh[16];
+    wr_name(ql, sizeof(ql), kq + 2); wr_name(qh, sizeof(qh), kq);
+    wr_name(rl, sizeof(rl), kr + 2); wr_name(rh, sizeof(rh), kr);
+    isel_emit(isel, "MOV", ql, "#0");
+    isel_emit(isel, "MOV", qh, "#0");
+    isel_emit(isel, "MOV", rl, "#0");
+    isel_emit(isel, "MOV", rh, "#0");
+    /* 32 次展开 */
+    for (int i = 0; i < 32; i++) {
+        char l_noinc[32], l_nosub[32];
+        snprintf(l_noinc, sizeof(l_noinc), "?V%dA", i);
+        snprintf(l_nosub, sizeof(l_nosub), "?V%dB", i);
+        /* r = r<<1 | a31; a <<= 1 */
+        isel_emit(isel, "SLL", dr, NULL);
+        isel_emit(isel, "SLL", da, NULL);
+        isel_emit(isel, "JNC", l_noinc, NULL);
+        isel_emit(isel, "INC", dr, NULL);
+        isel_emit_label(isel, l_noinc);
+        /* q <<= 1; if (r >= b) { r -= b; q |= 1 } */
+        isel_emit(isel, "SLL", dq, NULL);
+        isel_emit(isel, "CMP", dr, db);
+        isel_emit(isel, "JC", l_nosub, NULL);
+        isel_emit(isel, "SUB", dr, db);
+        isel_emit(isel, "INC", dq, NULL);
+        isel_emit_label(isel, l_nosub);
+    }
+    free(da); free(db); free(dq); free(dr);
+}
+
+/* 32 位除法/取模 (含符号): C99 截断向零。
+ * |a|/|b| 无符号除 → 商符号 = fa^fb, 余数符号 = fa。
+ * R0=fa, R1=fb (展开核心不破坏); 结果写 dest。 */
+static void emit_divmod32(ISelContext* isel, Instr* ins, ValueName s1, ValueName s2, bool want_mod) {
+    C251GenContext *ctx = isel->ctx;
+    bool us = value_is_unsigned(isel, s1) || value_is_unsigned(isel, s2);
+    spill_and_free_dr(isel, s1);
+    spill_and_free_dr(isel, s2);
+    /* A(R11) 在 DR8 内 — 符号测试/fixup 的 MOV A 会破坏 DR8 中值。
+     * ka/kb/kt 必须避开 DR8; kq/kr 可占 DR8 (核心前清零/复制后死亡, 安全)。 */
+    int av1[4]; int n1 = 0;
+    av1[n1++] = 8;
+    int ka = isel_take_dr(isel, av1, n1); if (ka >= 0) av1[n1++] = ka;
+    int kb = isel_take_dr(isel, av1, n1);
+    int av2[4]; int n2 = 0;
+    if (ka >= 0) av2[n2++] = ka;
+    if (kb >= 0) av2[n2++] = kb;
+    int kq = isel_take_dr(isel, av2, n2); if (kq >= 0) av2[n2++] = kq;
+    int kr = isel_take_dr(isel, av2, n2);
+    if (getenv("C251_DBG_DIV")) fprintf(stderr, "[div] ka=%d kb=%d kq=%d kr=%d\n", ka, kb, kq, kr);
+    if (ka < 0 || kb < 0 || kq < 0 || kr < 0) {
+        fprintf(stderr, "c251 isel: DR 耗尽 (32 位 DIV/MOD)");
+        char *sp = c251_alloc_spill(ctx, ins->dest);
+        zero32_spill(isel, sp);
+        return;
+    }
+    load_value_to_dr(isel, s1, ka);
+    load_value_to_dr(isel, s2, kb);
+    char *l_pos1 = NULL, *l_pos2 = NULL, *l_skipq = NULL, *l_skipr = NULL, *l_skipq2 = NULL;
+    char *fa_sp = NULL, *fb_sp = NULL;
+    if (!us) {
+        /* 有符号: 符号位 = R(ka)/R(kb) 的 bit7 (a/b 的 MSB)。
+         * 注意: R0-R7 全在 ka/kb 的字节内, 不能用 R0/R1 存标志 — 存内存槽。
+         * A(R11) 在 kq/kr 内, 但 kq/kr 此时未初始化, 可作临时。 */
+        char *da = malloc(16), *db = malloc(16);
+        snprintf(da, 16, "DR%d", ka); snprintf(db, 16, "DR%d", kb);
+        char wlo_a[16], whi_a[16], wlo_b[16], whi_b[16];
+        wr_name(wlo_a, sizeof(wlo_a), ka + 2); wr_name(whi_a, sizeof(whi_a), ka);
+        wr_name(wlo_b, sizeof(wlo_b), kb + 2); wr_name(whi_b, sizeof(whi_b), kb);
+        l_pos1 = isel_new_label(isel, "?D"); l_pos2 = isel_new_label(isel, "?D");
+        l_skipq = isel_new_label(isel, "?D"); l_skipr = isel_new_label(isel, "?D");
+        l_skipq2 = isel_new_label(isel, "?D");
+        fa_sp = c251_alloc_spill_sz(ctx, -101, 2);   /* 2 字节槽存符号字节 (key 需不同) */
+        fb_sp = c251_alloc_spill_sz(ctx, -102, 2);
+        /* fa = a<0: A = a 高字节; 存 __fa; 负数 → 取绝对值 */
+        char ra[8]; snprintf(ra, sizeof(ra), "R%d", ka);
+        isel_emit(isel, "MOV", "A", ra);
+        isel_emit(isel, "MOV", fa_sp, "A");
+        isel_emit(isel, "JNB", "0xE7", l_pos1);   /* ACC.7 = 0 → 正 */
+        isel_emit(isel, "XRL", whi_a, "#FFFF");
+        isel_emit(isel, "XRL", wlo_a, "#FFFF");
+        isel_emit(isel, "INC", da, NULL);
+        isel_emit_label(isel, l_pos1);
+        /* fb = b<0 */
+        char rb[8]; snprintf(rb, sizeof(rb), "R%d", kb);
+        isel_emit(isel, "MOV", "A", rb);
+        isel_emit(isel, "MOV", fb_sp, "A");
+        isel_emit(isel, "JNB", "0xE7", l_pos2);
+        isel_emit(isel, "XRL", whi_b, "#FFFF");
+        isel_emit(isel, "XRL", wlo_b, "#FFFF");
+        isel_emit(isel, "INC", db, NULL);
+        isel_emit_label(isel, l_pos2);
+        free(da); free(db);
+    }
+    /* 无符号核心 (展开) */
+    udivmod32_core(isel, ka, kb, kq, kr);
+    /* 结果 → 临时 DR kt (ka/kb 已死可复用): 符号修正不能直接做在 kq/kr 上,
+     * 因为 A(R11) ∈ DR8 = kq (商) 的低字节 — MOV A,... 会破坏商。 */
+    int src = want_mod ? kr : kq;
+    int kt = -1;
+    if (!us) {
+        /* kt 承载符号修正 (用 A) — 必须避开 DR8 (A=R11) 与 kq/kr (源) */
+        int av3[3] = { want_mod ? kq : kr, 8, -1 };
+        kt = isel_temp_dr_avoid(isel, av3, 2);
+        if (kt < 0) kt = isel_temp_dr_avoid(isel, NULL, 0);
+    }
+    char srl[16], srh[16];
+    wr_name(srl, sizeof(srl), src + 2); wr_name(srh, sizeof(srh), src);
+    if (kt >= 0) {
+        char tll[16], tlh[16];
+        wr_name(tll, sizeof(tll), kt + 2); wr_name(tlh, sizeof(tlh), kt);
+        isel_emit(isel, "MOV", tll, srl);
+        isel_emit(isel, "MOV", tlh, srh);
+        if (!us) {
+            /* 符号修正 (在 kt 上): 只使用 A(R11, 不在 kt 内) + 分支, 不用 R0/R1 */
+            char wqlo[16], wqhi[16];
+            wr_name(wqlo, sizeof(wqlo), kt + 2); wr_name(wqhi, sizeof(wqhi), kt);
+            char dqk[16]; snprintf(dqk, sizeof(dqk), "DR%d", kt);
+            if (want_mod) {
+                /* 余数符号 = fa (A bit7) */
+                isel_emit(isel, "MOV", "A", fa_sp);
+                isel_emit(isel, "JNB", "0xE7", l_skipr);
+                isel_emit(isel, "XRL", wqhi, "#FFFF");
+                isel_emit(isel, "XRL", wqlo, "#FFFF");
+                isel_emit(isel, "INC", dqk, NULL);
+                isel_emit_label(isel, l_skipr);
+            } else {
+                /* 商符号 = fa^fb: 异号才取反 (fa 正/fb 负 或 fa 负/fb 正) */
+                char *l_fapos = isel_new_label(isel, "?D");
+                isel_emit(isel, "MOV", "A", fa_sp);
+                isel_emit(isel, "JNB", "0xE7", l_fapos);   /* fa 正 */
+                /* fa 负: fb 负 → 同号 → 跳过; fb 正 → 异号 → 取反 */
+                isel_emit(isel, "MOV", "A", fb_sp);
+                isel_emit(isel, "JB", "0xE7", l_skipq);    /* fb 负 → 跳过 */
+                isel_emit(isel, "XRL", wqhi, "#FFFF");
+                isel_emit(isel, "XRL", wqlo, "#FFFF");
+                isel_emit(isel, "INC", dqk, NULL);
+                isel_emit_label(isel, l_skipq);
+                isel_emit_label(isel, l_fapos);
+                /* fa 正: fb 负 → 异号 → 取反 */
+                isel_emit(isel, "MOV", "A", fb_sp);
+                isel_emit(isel, "JNB", "0xE7", l_skipq2);
+                isel_emit(isel, "XRL", wqhi, "#FFFF");
+                isel_emit(isel, "XRL", wqlo, "#FFFF");
+                isel_emit(isel, "INC", dqk, NULL);
+                isel_emit_label(isel, l_skipq2);
+                free(l_fapos);
+            }
+        }
+        /* 结果 → dest */
+        int kd = isel_alloc_dr(isel, ins->dest);
+        if (kd >= 0) {
+            char ddl[16], ddh[16];
+            wr_name(ddl, sizeof(ddl), kd + 2); wr_name(ddh, sizeof(ddh), kd);
+            isel_emit(isel, "MOV", ddl, tll);
+            isel_emit(isel, "MOV", ddh, tlh);
+        } else {
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+            isel_emit(isel, "MOV", slo, tll);
+            isel_emit(isel, "MOV", sp, tlh);
+        }
+    } else {
+        /* 无符号直接 → dest (或兜底) */
+        int kd = isel_alloc_dr(isel, ins->dest);
+        if (kd >= 0) {
+            char ddl[16], ddh[16];
+            wr_name(ddl, sizeof(ddl), kd + 2); wr_name(ddh, sizeof(ddh), kd);
+            isel_emit(isel, "MOV", ddl, srl);
+            isel_emit(isel, "MOV", ddh, srh);
+        } else {
+            char *sp = c251_alloc_spill(ctx, ins->dest);
+            char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+            isel_emit(isel, "MOV", slo, srl);
+            isel_emit(isel, "MOV", sp, srh);
+        }
+    }
+    free(l_pos1); free(l_pos2); free(l_skipq); free(l_skipr);
+}
+
+/* 32 位 NEG: XRL 两字 #FFFF + INC DRk (补码)。v 在 DR 或先物化到临时 DR。 */
+static void emit_neg32(ISelContext* isel, Instr* ins, ValueName s1) {
+    C251GenContext *ctx = isel->ctx;
+    int k = isel_alloc_dr(isel, ins->dest);
+    int kt = -1;
+    if (k < 0) {
+        kt = isel_temp_dr(isel, -1);
+        k = kt;
+    }
+    if (k < 0) {
+        fprintf(stderr, "c251 isel: DR 耗尽 (NEG)");
+        char *sp = c251_alloc_spill(ctx, ins->dest);
+        zero32_spill(isel, sp);
+        return;
+    }
+    load_value_to_dr(isel, s1, k);
+    char wlo[16], whi[16];
+    wr_name(wlo, sizeof(wlo), k + 2);
+    wr_name(whi, sizeof(whi), k);
+    isel_emit(isel, "XRL", whi, "#FFFF");
+    isel_emit(isel, "XRL", wlo, "#FFFF");
+    char dk[16]; snprintf(dk, sizeof(dk), "DR%d", k);
+    isel_emit(isel, "INC", dk, NULL);
+    if (kt >= 0) {
+        char *sp = c251_alloc_spill(ctx, ins->dest);
+        spill_store32(isel, ins->dest, sp);
+    }
+}
+
+/* 32 位 NOT: XRL 两字 #FFFF */
+static void emit_not32(ISelContext* isel, Instr* ins, ValueName s1) {
+    C251GenContext *ctx = isel->ctx;
+    int k = isel_alloc_dr(isel, ins->dest);
+    int kt = -1;
+    if (k < 0) {
+        kt = isel_temp_dr(isel, -1);
+        k = kt;
+    }
+    if (k < 0) {
+        fprintf(stderr, "c251 isel: DR 耗尽 (NOT)");
+        char *sp = c251_alloc_spill(ctx, ins->dest);
+        zero32_spill(isel, sp);
+        return;
+    }
+    load_value_to_dr(isel, s1, k);
+    char wlo[16], whi[16];
+    wr_name(wlo, sizeof(wlo), k + 2);
+    wr_name(whi, sizeof(whi), k);
+    isel_emit(isel, "XRL", whi, "#FFFF");
+    isel_emit(isel, "XRL", wlo, "#FFFF");
+    if (kt >= 0) {
+        char *sp = c251_alloc_spill(ctx, ins->dest);
+        spill_store32(isel, ins->dest, sp);
+    }
 }
 
 /* 查 ADDR 产物指向的全局符号名（无则 NULL） */
@@ -404,16 +1048,38 @@ static const char* reg_name(int r) {
     return buf;
 }
 
-/* 值宽度：1 字节 / 2 字（M2 只支持这两个；未知默认 2） */
+/* 值宽度：1 字节 / 2 字 / 4 双字 (long)；未知默认 2 */
 static int value_size_of(ISelContext* isel, ValueName v) {
     C251GenContext *ctx = isel->ctx;
     if (v >= 0) {
         char *k = c251_key(v);
         Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
         free(k);
-        if (t) return t->size > 1 ? 2 : 1;
+        if (t) {
+            int sz = t->size;
+            return sz <= 1 ? 1 : (sz >= 4 ? 4 : 2);
+        }
     }
     return 2;
+}
+
+/* 值宽度: 1/2/4 (C251GenContext* 签名, LOAD/STORE 用) */
+static int value_size_of_ctx(C251GenContext *ctx, ValueName v) {
+    if (v >= 0) {
+        char *k = c251_key(v);
+        Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
+        free(k);
+        if (t) {
+            int sz = t->size;
+            return sz <= 1 ? 1 : (sz >= 4 ? 4 : 2);
+        }
+    }
+    return 2;
+}
+
+/* 值是否 32 位 (long/unsigned long) */
+static bool value_is_32(C251GenContext *ctx, ValueName v) {
+    return value_size_of_ctx(ctx, v) >= 4;
 }
 
 /* 把值 v 的低字节装载到字节寄存器 r（Keil ABI u8 参数装载）：
@@ -617,21 +1283,7 @@ static bool value_is_unsigned(ISelContext* isel, ValueName v) {
     return false;
 }
 
-/* 值宽度: 1=字节, 2=字（未知默认 2；LOAD 目标/比较等用）。
- * 注：334 行已有 value_size_of(ISelContext*,...)，本版本为 C251GenContext* 签名，
- * 仅 LOAD/STORE 用（此处入参是 ctx）。 */
-static int value_size_of_ctx(C251GenContext *ctx, ValueName v) {
-    if (v >= 0) {
-        char *k = c251_key(v);
-        Ctype *t = (Ctype*)dict_get(ctx->value_type, k);
-        free(k);
-        if (t) {
-            int sz = t->size;
-            return sz <= 1 ? 1 : (sz > 2 ? sz : 2);  /* 保留 long (4) 尺寸 */
-        }
-    }
-    return 2;
-}
+/* 值宽度: 1/2/4 见 value_size_of (上) 与 value_size_of_ctx; 未知默认 2 */
 
 /* 按声明判定无符号（char 加载扩展用；与比较的提升规则不同——
  * unsigned char 加载必须零扩展为 0-255，signed char 符号扩展） */
@@ -737,14 +1389,40 @@ static int load_far_addr(ISelContext* isel, ValueName ptr, int avoid_wr) {
 static int sym_size_of(C251GenContext *ctx, const char *sym) {
     if (sym && ctx->sym_size) {
         int *s = (int*)dict_get(ctx->sym_size, (char*)sym);
-        if (s) return *s <= 1 ? 1 : 2;
+        if (s) return *s <= 1 ? 1 : (*s >= 4 ? 4 : 2);
     }
     return 2;
 }
 
-/* CMP lhs,rhs：lhs 必须物化在寄存器（比较方向不可交换）；rhs 可为寄存器/常量/槽/imm-label */
+/* CMP lhs,rhs：lhs 必须物化在寄存器（比较方向不可交换）；rhs 可为寄存器/常量/槽/imm-label
+ * 32 位: lhs/rhs → DR, CMP DRk,DRk (BF)。 */
 static void emit_cmp(ISelContext* isel, Instr* ins, ValueName s1, ValueName s2, int avoid_wr) {
     C251GenContext *ctx = isel->ctx;
+    bool is32 = value_is_32(ctx, s1) || value_is_32(ctx, s2);
+    if (is32) {
+        int k1 = isel_value_reg(ctx, s1);
+        if (!(k1 >= 0 && value_is_32(ctx, s1))) {
+            k1 = isel_temp_dr(isel, -1);
+            if (k1 < 0) { fprintf(stderr, "c251 isel: DR 耗尽 (CMP32)"); return; }
+            if (load_value_to_dr(isel, s1, k1) < 0) return;
+        }
+        int k2 = isel_value_reg(ctx, s2);
+        if (!(k2 >= 0 && value_is_32(ctx, s2))) {
+            k2 = isel_temp_dr(isel, k1);
+            if (k2 < 0) { fprintf(stderr, "c251 isel: DR 耗尽 (CMP32 rhs)"); return; }
+            if (s2 < 0 && has_imm_label(ins)) {
+                /* 常量被内联: 值在 ins->imm.ival */
+                materialize_imm32_to_dr(isel, ins->imm.ival, k2);
+            } else if (load_value_to_dr(isel, s2, k2) < 0) {
+                return;
+            }
+        }
+        char d1[16], d2[16];
+        snprintf(d1, sizeof(d1), "DR%d", k1);
+        snprintf(d2, sizeof(d2), "DR%d", k2);
+        isel_emit(isel, "CMP", d1, d2);
+        return;
+    }
     int r1 = isel_value_reg(ctx, s1);
     if (r1 < 0) {
         int t = isel_temp_wr(isel, avoid_wr, -1);
@@ -1069,6 +1747,39 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         int64_t *cv = malloc(sizeof(int64_t)); *cv = ins->imm.ival;
         dict_put(ctx->value_to_const, c251_key(ins->dest), cv);
 
+        bool is32 = ins->type && ins->type->size >= 4;
+        if (is32) {
+            /* 32 位常量: 高字 WRk, 低字 WR(k+2) */
+            unsigned long vv = (unsigned long)ins->imm.ival;
+            char ilo[32], ihi[32];
+            snprintf(ilo, sizeof(ilo), "#0x%04lX", vv & 0xFFFF);
+            snprintf(ihi, sizeof(ihi), "#0x%04lX", (vv >> 16) & 0xFFFF);
+            int k = isel_alloc_dr(isel, ins->dest);
+            if (k >= 0) {
+                char wlo[16], whi[16];
+                wr_name(wlo, sizeof(wlo), k + 2);
+                wr_name(whi, sizeof(whi), k);
+                isel_emit(isel, "MOV", wlo, ilo);
+                isel_emit(isel, "MOV", whi, ihi);
+            } else {
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                int kt = isel_temp_dr(isel, -1);
+                if (kt >= 0) {
+                    char wlo[16], whi[16];
+                    wr_name(wlo, sizeof(wlo), kt + 2);
+                    wr_name(whi, sizeof(whi), kt);
+                    isel_emit(isel, "MOV", wlo, ilo);
+                    isel_emit(isel, "MOV", whi, ihi);
+                    char slo[80]; snprintf(slo, sizeof(slo), "(%s + 2)", sp);
+                    isel_emit(isel, "MOV", slo, wlo);
+                    isel_emit(isel, "MOV", sp, whi);
+                } else {
+                    zero32_spill(isel, sp);
+                }
+            }
+            break;
+        }
+
         int wr = isel_alloc_wr(isel, ins->dest);
         char imm[32];
         int is_byte = ins->type && ins->type->size <= 1;
@@ -1154,6 +1865,13 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         const char *opm = (ins->op == IROP_ADD) ? "ADD" : (ins->op == IROP_SUB) ? "SUB" : "MUL";
         ValueName s1 = src1_of(ins), s2 = src2_of(ins);
         bool il = has_imm_label(ins);
+        bool is32 = ins->type && ins->type->size >= 4;
+        if (is32) {
+            /* 32 位: DRk 路径 */
+            if (ins->op == IROP_MUL) { emit_mul32(isel, ins, s1, s2); break; }
+            emit_dr_binop(isel, opm, ins, s1, s2);
+            break;
+        }
         int wr = isel_alloc_wr(isel, ins->dest);
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
@@ -1176,10 +1894,15 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     case IROP_OR:
     case IROP_XOR: {
         /* ANL/ORL/XRL WRj,WRk 或 #imm16 (5D/4D/6D 与 5E/4E/6E 形态)
-         * 复用 ADD 模式：dest 物化 s1 + emit_binop_src2（寄存器/常量/槽/imm-label） */
+         * 复用 ADD 模式：dest 物化 s1 + emit_binop_src2（寄存器/常量/槽/imm-label）
+         * 32 位: DRk,DRk 形态 */
         const char *opm = (ins->op == IROP_AND) ? "ANL" : (ins->op == IROP_OR) ? "ORL" : "XRL";
         ValueName s1 = src1_of(ins), s2 = src2_of(ins);
         bool il = has_imm_label(ins);
+        if (ins->type && ins->type->size >= 4) {
+            emit_dr_binop(isel, opm, ins, s1, s2);
+            break;
+        }
         int wr = isel_alloc_wr(isel, ins->dest);
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
@@ -1196,8 +1919,13 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_NOT: {
-        /* ~x: XRL WRj,#FFFF（16 位取反；低 8 位结果对 8 位值同样正确） */
+        /* ~x: XRL WRj,#FFFF（16 位取反；低 8 位结果对 8 位值同样正确）
+         * 32 位: XRL 两字 #FFFF */
         ValueName s1 = src1_of(ins);
+        if (ins->type && ins->type->size >= 4) {
+            emit_not32(isel, ins, s1);
+            break;
+        }
         int wr = isel_alloc_wr(isel, ins->dest);
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
@@ -1214,8 +1942,13 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_NEG: {
-        /* -x: XRL WRj,#FFFF + INC WRj（补码；251 无 NEG 指令） */
+        /* -x: XRL WRj,#FFFF + INC WRj（补码；251 无 NEG 指令）
+         * 32 位: XRL 两字 #FFFF + INC DRk */
         ValueName s1 = src1_of(ins);
+        if (ins->type && ins->type->size >= 4) {
+            emit_neg32(isel, ins, s1);
+            break;
+        }
         int wr = isel_alloc_wr(isel, ins->dest);
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
@@ -1234,10 +1967,38 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         break;
     }
     case IROP_LNOT: {
-        /* !x: x==0 → 1, 否则 0。CMP x,#0; 物化 */
+        /* !x: x==0 → 1, 否则 0。CMP x,#0; 物化 (32 位: ORL DR,DR 置 Z) */
         ValueName s1 = src1_of(ins);
+        bool is32 = value_is_32(ctx, s1);
         int wr = isel_alloc_wr(isel, ins->dest);
         char *l1 = isel_new_label(isel, "?L");
+        if (is32) {
+            int kt = isel_temp_dr(isel, -1);
+            if (kt < 0) kt = isel_alloc_dr(isel, -1);
+            if (kt >= 0) {
+                char dk[16]; snprintf(dk, sizeof(dk), "DR%d", kt);
+                load_value_to_dr(isel, s1, kt);
+                isel_emit(isel, "ORL", dk, dk);   /* Z = (x == 0) */
+                isel_emit(isel, "MOV", "WR0", "#0");
+                isel_emit(isel, "JNE", l1, NULL);
+                isel_emit(isel, "MOV", "WR0", "#1");
+                /* 结果 0/1 在 WR0 → dest */
+                if (wr >= 0) {
+                    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
+                    isel_emit(isel, "MOV", wbuf, "WR0");
+                } else {
+                    char *sp = c251_alloc_spill(ctx, ins->dest);
+                    isel_emit(isel, "MOV", sp, "WR0");
+                }
+            } else {
+                isel_emit(isel, "MOV", "WR0", "#0");
+                if (wr >= 0) { char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr); isel_emit(isel, "MOV", wbuf, "WR0"); }
+                else { char *sp = c251_alloc_spill(ctx, ins->dest); isel_emit(isel, "MOV", sp, "WR0"); }
+            }
+            isel_emit_label(isel, l1);
+            free(l1);
+            break;
+        }
         if (wr >= 0) {
             char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
             load_value_to_wr(isel, s1, wr);
@@ -1263,7 +2024,8 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     case IROP_SHL:
     case IROP_SHR: {
         /* 移位：251 SLL/SRL/SRA 为移位 1 位指令（regop2_shift, 第二字段忽略）。
-         * M2：常量移位量展开 N 次；有符号右移用 SRA；变量移位量 M2.5。 */
+         * M2：常量移位量展开 N 次；有符号右移用 SRA；变量移位量 M2.5。
+         * 32 位: SLL/SRL/SRA DRk 展开。 */
         ValueName s1 = src1_of(ins), s2 = src2_of(ins);
         long long amt = 0; bool have_amt = false;
         if (has_imm_label(ins)) { amt = ins->imm.ival; have_amt = true; }
@@ -1275,6 +2037,51 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
         }
         bool is_shr = ins->op == IROP_SHR;
         bool is_signed_shr = is_shr && !value_is_unsigned(isel, s1);
+        bool is32 = value_is_32(ctx, s1);
+        if (is32) {
+            /* 32 位移位: 目标 DR */
+            int k = isel_alloc_dr(isel, ins->dest);
+            int kt = -1;
+            if (getenv("C251_DBG_LOAD32")) fprintf(stderr, "[load32] k=%d\n", k);
+            if (k < 0) { kt = isel_temp_dr(isel, -1); k = kt; }
+            if (k < 0) {
+                fprintf(stderr, "c251 isel: DR 耗尽 (32 位移位)");
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                zero32_spill(isel, sp);
+                break;
+            }
+            load_value_to_dr(isel, s1, k);
+            char dk[16]; snprintf(dk, sizeof(dk), "DR%d", k);
+            char zlo[16], zhi[16];
+            wr_name(zlo, sizeof(zlo), k + 2);
+            wr_name(zhi, sizeof(zhi), k);
+            if (!have_amt) {
+                fprintf(stderr, "c251 isel: 变量移位量 M2.5 支持 (v%d)，发射 0 兜底\n", ins->dest);
+                isel_emit(isel, "MOV", zlo, "#0");
+                isel_emit(isel, "MOV", zhi, "#0");
+            } else {
+                long long n = amt & 0xFFFF;
+                const char *opm = is_shr ? (is_signed_shr ? "SRA" : "SRL") : "SLL";
+                if (n == 0) {
+                    /* 无操作 */
+                } else if (n >= 32) {
+                    if (is_signed_shr) {
+                        /* 算术右移 ≥32: 符号饱和 (32 次 SRA 后全 0 或全 1) */
+                        for (int i = 0; i < 32; i++) isel_emit(isel, "SRA", dk, NULL);
+                    } else {
+                        isel_emit(isel, "MOV", zlo, "#0");
+                        isel_emit(isel, "MOV", zhi, "#0");
+                    }
+                } else {
+                    for (long long i = 0; i < n; i++) isel_emit(isel, opm, dk, NULL);
+                }
+            }
+            if (kt >= 0) {
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                spill_store32(isel, ins->dest, sp);
+            }
+            break;
+        }
         int wr = isel_alloc_wr(isel, ins->dest);
         int w = wr >= 0 ? wr : isel_temp_wr(isel, -1, -1);
         char wbuf[16]; wr_name(wbuf, sizeof(wbuf), w);
@@ -1307,22 +2114,14 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
     case IROP_MOD: {
         /* 16 位：硬件 DIV WRj,WRk (8D)——商→目标 WRj, 余数→DR 对另一侧。
          * 无符号：直接 DIV。有符号（C99 截断向零）：符号算法。
-         * 32 位：需运行时库（M3），先报错 + 0 兜底。 */
+         * 32 位：内联移位-减法循环 (emit_divmod32)。 */
         ValueName s1 = src1_of(ins), s2 = src2_of(ins);
         bool want_mod = ins->op == IROP_MOD;
         /* C 常用算术转换：任一操作数无符号即按无符号除法（与同文件比较路径 || 用法一致） */
         bool us = value_is_unsigned(isel, s1) || value_is_unsigned(isel, s2);
         int size = ins->type ? ins->type->size : 2;
         if (size > 2) {
-            fprintf(stderr, "c251 isel: 32 位 DIV/MOD 需运行时库 (M3)\n");
-            int wr = isel_alloc_wr(isel, ins->dest);
-            if (wr >= 0) {
-                char wbuf[16]; wr_name(wbuf, sizeof(wbuf), wr);
-                isel_emit(isel, "MOV", wbuf, "#0");
-            } else {
-                char *sp = c251_alloc_spill(ctx, ins->dest);
-                isel_emit(isel, "MOV", sp, "#0");
-            }
+            emit_divmod32(isel, ins, s1, s2, want_mod);
             break;
         }
         if (us) {
@@ -1751,8 +2550,7 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 /* 读取 SFR 到 A, 再转 Rm (u8) */
                 isel_emit(isel, "MOV", "A", dirdesc);
                 isel_emit(isel, "MOV", rbuf, "A");
-                if (sbit >= 0) {
-                    /* 值全部由位直接模式 (CPL/JNB/JB) 消费 → 抑制物化, 由位操作重读 */
+                if (sbit >= 0) {                    /* 值全部由位直接模式 (CPL/JNB/JB) 消费 → 抑制物化, 由位操作重读 */
                     if (sbit_load_suppressible(isel, ins, ins->dest, saddr, sbit)) {
                         if (isel->sbit_sup_n < 32) isel->sbit_sup[isel->sbit_sup_n++] = ins->dest;
                         break;
@@ -1774,6 +2572,64 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 }
                 break;
             }
+        }
+        /* 32 位 LOAD (long): 高字 → WRk (sym 或 @addr), 低字 → WR(k+2) */
+        if (getenv("C251_DBG_LOAD32")) fprintf(stderr, "[load32] dsz=%d sym=%s arr=%d\n", dsz, sym ? sym : "?", array_decay);
+        if (dsz >= 4 && !array_decay && !(sym && ctx->sfr_addr && dict_get(ctx->sfr_addr, sym))) {
+            /* 顶部的 isel_alloc_wr 已给 dest 分配 16 位 WR — 32 位值必须解除 (换 DR 对) */
+            if (wr >= 0) {
+                char *kk = c251_key(ins->dest);
+                dict_remove(ctx->value_to_reg, kk); free(kk);
+                isel->reg_val[wr/2] = -1;
+            }
+            int k = isel_alloc_dr(isel, ins->dest);
+            int kt = -1;
+            if (getenv("C251_DBG_LOAD32")) fprintf(stderr, "[load32] k=%d\n", k);
+            if (k < 0) { kt = isel_temp_dr(isel, -1); k = kt; }
+            if (k < 0) {
+                fprintf(stderr, "c251 isel: DR 耗尽 (32 位 LOAD)");
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                zero32_spill(isel, sp);
+                break;
+            }
+            char whi[16], wlo[16];
+            wr_name(whi, sizeof(whi), k);
+            wr_name(wlo, sizeof(wlo), k + 2);
+            if (sym) {
+                char symlo[80]; snprintf(symlo, sizeof(symlo), "(%s + 2)", sym);
+                isel_emit(isel, "MOV", whi, sym);      /* 高字 (大端: sym 起) */
+                isel_emit(isel, "MOV", wlo, symlo);    /* 低字 */
+            } else {
+                /* 指针间接: @WRj (高字) / @WRj+2 (低字) */
+                const char *fold_sym = NULL; int fold_off = 0;
+                bool folded = offset_fold_lookup(ctx, ptr, &fold_sym, &fold_off);
+                int addr_wr = isel_temp_wr(isel, -1, -1);
+                if (folded) {
+                    char saddr[64]; snprintf(saddr, sizeof(saddr), "#%s", fold_sym);
+                    char ab[16]; wr_name(ab, sizeof(ab), addr_wr);
+                    isel_emit(isel, "MOV", ab, saddr);
+                    char hi_ind[64], lo_ind[64];
+                    snprintf(hi_ind, sizeof(hi_ind), "@%s+%d", ab, fold_off);
+                    snprintf(lo_ind, sizeof(lo_ind), "@%s+%d", ab, fold_off + 2);
+                    isel_emit(isel, "MOV", whi, hi_ind);
+                    isel_emit(isel, "MOV", wlo, lo_ind);
+                } else if (load_value_to_wr(isel, ptr, addr_wr) == 0) {
+                    char ab[16]; wr_name(ab, sizeof(ab), addr_wr);
+                    char hi_ind[64], lo_ind[64];
+                    snprintf(hi_ind, sizeof(hi_ind), "@%s", ab);
+                    snprintf(lo_ind, sizeof(lo_ind), "@%s+2", ab);
+                    isel_emit(isel, "MOV", whi, hi_ind);
+                    isel_emit(isel, "MOV", wlo, lo_ind);
+                } else {
+                    isel_emit(isel, "MOV", whi, "#0");
+                    isel_emit(isel, "MOV", wlo, "#0");
+                }
+            }
+            if (kt >= 0) {
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                spill_store32(isel, ins->dest, sp);
+            }
+            break;
         }
         if (sym) {
             if (array_decay) {
@@ -1936,7 +2792,20 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 int ssz = sym_size_of(ctx, sym);
                 int tmp = isel_temp_wr(isel, -1, -1);
                 char tbuf[16]; wr_name(tbuf, sizeof(tbuf), tmp);
-                if (ssz <= 1) {
+                if (ssz >= 4) {
+                    /* long 常量写: 高字 → sym, 低字 → (sym+2) */
+                    unsigned long vv = (unsigned long)ins->imm.ival;
+                    char ihi[32], ilo[32];
+                    snprintf(ihi, sizeof(ihi), "#0x%04lX", (vv >> 16) & 0xFFFF);
+                    snprintf(ilo, sizeof(ilo), "#0x%04lX", vv & 0xFFFF);
+                    char symlo[80]; snprintf(symlo, sizeof(symlo), "(%s + 2)", sym);
+                    int tmp2 = isel_temp_wr(isel, tmp, -1);
+                    char tbuf2[16]; wr_name(tbuf2, sizeof(tbuf2), tmp2);
+                    isel_emit(isel, "MOV", tbuf, ihi);
+                    isel_emit(isel, "MOV", sym, tbuf);
+                    isel_emit(isel, "MOV", tbuf2, ilo);
+                    isel_emit(isel, "MOV", symlo, tbuf2);
+                } else if (ssz <= 1) {
                     char rbuf[16]; snprintf(rbuf, sizeof(rbuf), "R%d", tmp + 1);
                     char imm[32]; snprintf(imm, sizeof(imm), "#%lld", ins->imm.ival & 0xFF);
                     isel_emit(isel, "MOV", rbuf, imm);
@@ -2322,6 +3191,49 @@ void isel_instr(ISelContext* isel, Instr* ins, Instr* next) {
                 int64_t *nv = malloc(sizeof(int64_t)); *nv = *cv;
                 dict_put(ctx->value_to_const, c251_key(ins->dest), nv);
             }
+        }
+        int dsz = ins->type ? (ins->type->size >= 4 ? 4 : (ins->type->size <= 1 ? 1 : 2)) : 2;
+        int ssz = value_size_of_ctx(ctx, s);
+        if (dsz >= 4) {
+            /* 目标 32 位 (SEXT/ZEXT u16→long, 或 long→long 拷贝) */
+            int k = isel_alloc_dr(isel, ins->dest);
+            int kt = -1;
+            if (k < 0) { kt = isel_temp_dr(isel, -1); k = kt; }
+            if (k < 0) {
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                zero32_spill(isel, sp);
+                break;
+            }
+            char wlo[16], whi[16];
+            wr_name(wlo, sizeof(wlo), k + 2);
+            wr_name(whi, sizeof(whi), k);
+            if (ssz >= 4) {
+                /* long→long (拷贝/无操作): 完整复制 */
+                load_value_to_dr(isel, s, k);
+            } else {
+                /* 窄 → long: 低字 = 源, 高字 = 符号/零扩展 */
+                load_value_to_wr(isel, s, k + 2);
+                if (ins->op == IROP_SEXT && !value_decl_unsigned(ctx, s)) {
+                    /* 符号扩展: CMP 源,#0; JSGE; MOV #FFFF */
+                    char *l_sk = isel_new_label(isel, "?SX");
+                    int r = isel_value_reg(ctx, s);
+                    int tw = (r >= 0) ? r : k + 2;
+                    char twb[16]; wr_name(twb, sizeof(twb), tw);
+                    isel_emit(isel, "CMP", twb, "#0");
+                    isel_emit(isel, "MOV", whi, "#0");
+                    isel_emit(isel, "JSGE", l_sk, NULL);
+                    isel_emit(isel, "MOV", whi, "#FFFF");
+                    isel_emit_label(isel, l_sk);
+                    free(l_sk);
+                } else {
+                    isel_emit(isel, "MOV", whi, "#0");
+                }
+            }
+            if (kt >= 0) {
+                char *sp = c251_alloc_spill(ctx, ins->dest);
+                spill_store32(isel, ins->dest, sp);
+            }
+            break;
         }
         int wr = isel_alloc_wr(isel, ins->dest);
         if (wr >= 0) {
@@ -2726,8 +3638,12 @@ void isel_block(ISelContext* isel, Block* block) {
             if (r >= 0) {
                 char *sp = c251_alloc_spill(isel->ctx, dins->dest);
                 if (sp) {
-                    char wbuf[16]; wr_name(wbuf, sizeof(wbuf), r);
-                    isel_emit(isel, "MOV", sp, wbuf);
+                    if (value_is_32(isel->ctx, dins->dest)) {
+                        spill_store32(isel, dins->dest, sp);
+                    } else {
+                        char wbuf[16]; wr_name(wbuf, sizeof(wbuf), r);
+                        isel_emit(isel, "MOV", sp, wbuf);
+                    }
                 }
             }
         }

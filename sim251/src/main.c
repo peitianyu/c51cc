@@ -193,6 +193,10 @@ static int load_hex(MCS251 *c, FILE *f)
             break;
         }
     }
+    if (getenv("MCS251_DBG_HEX")) {
+        for (int i = 0x50; i < 0x70; i++) fprintf(stderr, "%02X ", c->code[i]);
+        fprintf(stderr, "\\n");
+    }
     return nrec > 0 ? 0 : -1;
 }
 

@@ -968,21 +968,33 @@ static Ast *read_ident_or_func(char *name)
     return v;
 }
 
-static bool is_long_token(char *p)
-{
-    for (; *p; p++) {
-        if (!isdigit(*p))
-            return (*p == 'L' || *p == 'l') && p[1] == '\0';
+/* 剥离尾部整数字面量后缀 (u/U/l/L 任意组合), 返回剩余纯数字部分长度;
+ * 含 l/L → has_l=true */
+static bool strip_int_suffix(char *p, int *digits_len) {
+    if (!p) return false;
+    int n = (int)strlen(p);
+    bool has_l = false;
+    while (n > 0) {
+        char c = p[n - 1];
+        if (c == 'u' || c == 'U') { n--; continue; }
+        if (c == 'l' || c == 'L') { has_l = true; n--; continue; }
+        break;
     }
-    return false;
+    if (n == 0) return false;
+    for (int i = 0; i < n; i++)
+        if (!isdigit((unsigned char)p[i])) return false;
+    if (digits_len) *digits_len = n;
+    return true;
 }
 
-static bool is_int_token(char *p)
-{
-    for (; *p; p++)
-        if (!isdigit(*p))
-            return false;
-    return true;
+static bool is_long_token(char *p) {
+    int n = 0;
+    return strip_int_suffix(p, &n) && (p[n] == 'l' || p[n] == 'L' || n < (int)strlen(p));
+}
+
+static bool is_int_token(char *p) {
+    int n = 0;
+    return strip_int_suffix(p, &n);
 }
 
 static bool is_float_token(char *p)
@@ -1011,26 +1023,57 @@ static Ast *read_prim(void)
     }
     case TTYPE_NUMBER: {
         char *number = get_number(tok);
-        if (is_long_token(number))
-            return ast_inttype(ctype_long, atol(number));
+        if (is_long_token(number)) {
+            /* 显式 L 后缀 → long (32 位); 值超出有符号 32 位 → unsigned long */
+            long long v = atoll(number);
+            if (v > 0x7FFFFFFFLL) {
+                Ctype *ul = malloc(sizeof(Ctype));
+                memcpy(ul, ctype_long, sizeof(Ctype));
+                union { CtypeAttr a; int i; } un = {0};
+                un.i = ul->attr;
+                un.a.ctype_unsigned = 1;
+                ul->attr = un.i;
+                list_push(ctypes, ul);
+                return ast_inttype(ul, v);
+            }
+            return ast_inttype(ctype_long, v);
+        }
         if (is_int_token(number)) {
-            long val = atol(number);
-            if (val & ~(long) UINT_MAX)
-                return ast_inttype(ctype_long, val);
+            long long val = atoll(number);
+            /* 无后缀: C 字面量定型 (16 位 int 目标):
+             * 0x8000-0xFFFF → unsigned int (16 位); 0x10000-0x7FFFFFFF → long;
+             * 0x80000000-0xFFFFFFFF → unsigned long; >32 位 → long 截断 */
+            if (val > 0x7FFFFFFFLL) {
+                if (val > 0xFFFFFFFFLL)
+                    return ast_inttype(ctype_long, (long)val);
+                Ctype *ul = malloc(sizeof(Ctype));
+                memcpy(ul, ctype_long, sizeof(Ctype));
+                union { CtypeAttr a; int i; } un = {0};
+                un.i = ul->attr;
+                un.a.ctype_unsigned = 1;
+                ul->attr = un.i;
+                list_push(ctypes, ul);
+                return ast_inttype(ul, val);
+            }
             /* 16 位 int 后端 (ctype_int->size=2): 值超出 int 范围 (≥32768)
-             * 按 C 规则字面量为 unsigned（0xFFFF → 65535 而非 -1）
+             * 按 C 规则字面量为 unsigned (0xFFFF → 65535 而非 -1)
              * (0106-bnot: ~0 = -1, 0xFFFF unsigned 则比较正确) */
             if (ctype_int->size <= 2 && val > 0) {
                 long lo = 1L << (ctype_int->size * 8 - 1);  /* 16 位: 32768 */
                 if (val >= lo) {
-                    Ctype *uc = malloc(sizeof(Ctype));
-                    memcpy(uc, ctype_int, sizeof(Ctype));
-                    union { CtypeAttr a; int i; } un = {0};
-                    un.i = uc->attr;
-                    un.a.ctype_unsigned = 1;
-                    uc->attr = un.i;
-                    list_push(ctypes, uc);
-                    return ast_inttype(uc, val);
+                    if (val <= 0xFFFFL) {
+                        /* 0x8000-0xFFFF: unsigned int (16 位) */
+                        Ctype *uc = malloc(sizeof(Ctype));
+                        memcpy(uc, ctype_int, sizeof(Ctype));
+                        union { CtypeAttr a; int i; } un = {0};
+                        un.i = uc->attr;
+                        un.a.ctype_unsigned = 1;
+                        uc->attr = un.i;
+                        list_push(ctypes, uc);
+                        return ast_inttype(uc, val);
+                    }
+                    /* 0x10000-0x7FFFFFFF: long (32 位) */
+                    return ast_inttype(ctype_long, val);
                 }
             }
             return ast_inttype(ctype_int, val);

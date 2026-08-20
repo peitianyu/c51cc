@@ -64,11 +64,11 @@ void mcs251_shift8_flags(MCS251 *c, uint32_t res, uint32_t carryout)
     c->psw1 = (c->psw1 & ~(PSW1_N | PSW1_Z)) | (n << 5) | (z << 1);
 }
 
-/* 16-bit shift flags: N = bit15, Z = 16-bit zero. */
-void mcs251_shiftw_flags(MCS251 *c, uint32_t res, uint32_t carryout)
+/* 16/32-bit shift flags: N = bit15/bit31, Z = full-width zero. */
+void mcs251_shiftw_flags(MCS251 *c, uint32_t res, uint32_t carryout, int size)
 {
-    uint32_t n = (res >> 15) & 1;
-    uint32_t z = ((res & 0xFFFF) == 0);
+    uint32_t n = (size == 4) ? ((res >> 31) & 1) : ((res >> 15) & 1);
+    uint32_t z = (size == 4) ? (res == 0) : ((res & 0xFFFF) == 0);
     c->psw  = (c->psw & ~PSW_CY) | ((carryout & 1) << 7);
     c->psw1 = (c->psw1 & ~(PSW1_N | PSW1_Z)) | (n << 5) | (z << 1);
 }
@@ -79,35 +79,36 @@ void mcs251_muldiv8_flags(MCS251 *c, uint32_t ov)
     c->psw = (c->psw & ~(PSW_CY | PSW_OV)) | ((ov & 1) << 2);
 }
 
-/* 16-bit add: res = a + b + cin; CY=bit16, OV=signed overflow, N=bit15. */
+/* 16/32-bit add: res = a + b + cin; CY=carry, OV=signed overflow, N=bit15/31. */
 void mcs251_addw_flags(MCS251 *c, uint32_t res, uint32_t a, uint32_t b,
-                       uint32_t cin)
+                       uint32_t cin, int size)
 {
-    uint32_t cy = (res >> 16) & 1;
-    uint32_t ov = (~(a ^ b) & (a ^ res)) >> 15 & 1;
-    uint32_t n  = (res >> 15) & 1;
-    uint32_t z  = ((res & 0xFFFF) == 0);
+    uint32_t cy = (size == 4) ? ((((uint64_t)a + b + cin) >> 32) & 1)
+                              : ((res >> 16) & 1);
+    uint32_t ov = (~(a ^ b) & (a ^ res)) >> ((size == 4) ? 31 : 15) & 1;
+    uint32_t n  = (size == 4) ? ((res >> 31) & 1) : ((res >> 15) & 1);
+    uint32_t z  = (size == 4) ? (res == 0) : ((res & 0xFFFF) == 0);
     c->psw  = (c->psw & ~(PSW_CY | PSW_OV)) | (cy << 7) | (ov << 2);
     c->psw1 = (c->psw1 & ~(PSW1_N | PSW1_Z)) | (n << 5) | (z << 1);
 }
 
 void mcs251_subw_flags(MCS251 *c, uint32_t res, uint32_t a, uint32_t b,
-                       uint32_t borrow)
+                       uint32_t borrow, int size)
 {
-    uint32_t cy = (res >> 16) & 1;
-    uint32_t ov = ((a ^ b) & (a ^ res)) >> 15 & 1;
-    uint32_t n  = (res >> 15) & 1;
-    uint32_t z  = ((res & 0xFFFF) == 0);
+    uint32_t cy = (size == 4) ? ((uint64_t)a < ((uint64_t)b + borrow))
+                              : ((res >> 16) & 1);
+    uint32_t ov = ((a ^ b) & (a ^ res)) >> ((size == 4) ? 31 : 15) & 1;
+    uint32_t n  = (size == 4) ? ((res >> 31) & 1) : ((res >> 15) & 1);
+    uint32_t z  = (size == 4) ? (res == 0) : ((res & 0xFFFF) == 0);
     c->psw  = (c->psw & ~(PSW_CY | PSW_OV)) | (cy << 7) | (ov << 2);
     c->psw1 = (c->psw1 & ~(PSW1_N | PSW1_Z)) | (n << 5) | (z << 1);
 }
 
-/* 16/32-bit logical: N=bit15, Z=low 16 zero. */
+/* 16/32-bit logical: N=bit15/31, Z=full-width zero. */
 void mcs251_logicw_flags(MCS251 *c, uint32_t res, uint32_t size)
 {
-    (void)size;
-    uint32_t n = (res >> 15) & 1;
-    uint32_t z = ((res & 0xFFFF) == 0);
+    uint32_t n = (size == 4) ? ((res >> 31) & 1) : ((res >> 15) & 1);
+    uint32_t z = (size == 4) ? (res == 0) : ((res & 0xFFFF) == 0);
     c->psw1 = (c->psw1 & ~(PSW1_N | PSW1_Z)) | (n << 5) | (z << 1);
 }
 

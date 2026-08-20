@@ -133,17 +133,17 @@ static void regop2_word(MCS251 *c, int op, int rd, int rs)
     switch (op) {
     case OP_ADD: {
         uint32_t r = a + b;
-        mcs251_addw_flags(c, r, a, b, 0);
+        mcs251_addw_flags(c, r, a, b, 0, 2);
         mcs251_st_wrj16(c, rd, r & 0xFFFF);
         break; }
     case OP_SUB: {
         uint32_t r = a - b;
-        mcs251_subw_flags(c, r, a, b, 0);
+        mcs251_subw_flags(c, r, a, b, 0, 2);
         mcs251_st_wrj16(c, rd, r & 0xFFFF);
         break; }
     case OP_CMP: {
         uint32_t r = a - b;
-        mcs251_subw_flags(c, r, a, b, 0);
+        mcs251_subw_flags(c, r, a, b, 0, 2);
         break; }
     case OP_ORL: {
         uint32_t r = a | b; mcs251_logicw_flags(c, r, 2);
@@ -156,11 +156,11 @@ static void regop2_word(MCS251 *c, int op, int rd, int rs)
         mcs251_st_wrj16(c, rd, r & 0xFFFF); break; }
     case OP_SLL: {
         uint32_t r = (a << 1) & 0xFFFF;
-        mcs251_shiftw_flags(c, r, (a >> 15) & 1);
+        mcs251_shiftw_flags(c, r, (a >> 15) & 1, 2);
         mcs251_st_wrj16(c, rd, r); break; }
     case OP_SRL: {
         uint32_t r = a >> 1;
-        mcs251_shiftw_flags(c, r, a & 1);
+        mcs251_shiftw_flags(c, r, a & 1, 2);
         mcs251_st_wrj16(c, rd, r); break; }
     case OP_MUL: {
         uint32_t res = (uint32_t)a * b;
@@ -204,17 +204,17 @@ static void regop2_dword(MCS251 *c, int op, int rd, int rs)
     switch (op) {
     case OP_ADD: {
         uint32_t r = a + b;
-        mcs251_addw_flags(c, r, a, b, 0);
+        mcs251_addw_flags(c, r, a, b, 0, 4);
         mcs251_st_drk32(c, rd, r);
         break; }
     case OP_SUB: {
         uint32_t r = a - b;
-        mcs251_subw_flags(c, r, a, b, 0);
+        mcs251_subw_flags(c, r, a, b, 0, 4);
         mcs251_st_drk32(c, rd, r);
         break; }
     case OP_CMP: {
         uint32_t r = a - b;
-        mcs251_subw_flags(c, r, a, b, 0);
+        mcs251_subw_flags(c, r, a, b, 0, 4);
         break; }
     case OP_ORL: {
         uint32_t r = a | b; mcs251_logicw_flags(c, r, 4);
@@ -227,11 +227,11 @@ static void regop2_dword(MCS251 *c, int op, int rd, int rs)
         mcs251_st_drk32(c, rd, r); break; }
     case OP_SLL: {
         uint32_t r = (a << 1) & 0xFFFFFFFFu;
-        mcs251_shiftw_flags(c, r, (a >> 31) & 1);
+        mcs251_shiftw_flags(c, r, (a >> 31) & 1, 4);
         mcs251_st_drk32(c, rd, r); break; }
     case OP_SRL: {
         uint32_t r = a >> 1;
-        mcs251_shiftw_flags(c, r, a & 1);
+        mcs251_shiftw_flags(c, r, a & 1, 4);
         mcs251_st_drk32(c, rd, r); break; }
     default:
         break;
@@ -272,11 +272,11 @@ static void regop2_ind(MCS251 *c, int op, int rd, int size, uint32_t addr, int f
         uint16_t b = ld16(c, addr);
         uint32_t r;
         switch (op) {
-        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0);
+        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0, 2);
                      mcs251_st_wrj16(c,rd,r&0xFFFF); break;
-        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0);
+        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0, 2);
                      mcs251_st_wrj16(c,rd,r&0xFFFF); break;
-        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0); break;
+        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0, 2); break;
         case OP_ORL: r=a|b; mcs251_logicw_flags(c,r,2);
                      mcs251_st_wrj16(c,rd,r&0xFFFF); break;
         case OP_ANL: r=a&b; mcs251_logicw_flags(c,r,2);
@@ -290,11 +290,11 @@ static void regop2_ind(MCS251 *c, int op, int rd, int size, uint32_t addr, int f
         uint32_t b = ld32(c, addr);
         uint32_t r;
         switch (op) {
-        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0);
+        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0, 2);
                      mcs251_st_drk32(c,rd,r); break;
-        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0);
+        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0, 2);
                      mcs251_st_drk32(c,rd,r); break;
-        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0); break;
+        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0, 2); break;
         case OP_ORL: r=a|b; mcs251_logicw_flags(c,r,4);
                      mcs251_st_drk32(c,rd,r); break;
         case OP_ANL: r=a&b; mcs251_logicw_flags(c,r,4);
@@ -340,11 +340,11 @@ static void regop2_generic(MCS251 *c, int op, uint8_t b1)
         uint16_t a = mcs251_ld_wrj16(c, j);
         uint32_t r;
         switch (op) {
-        case OP_ADD: r=a+data; mcs251_addw_flags(c,r,a,data,0);
+        case OP_ADD: r=a+data; mcs251_addw_flags(c,r,a,data,0, 2);
                      mcs251_st_wrj16(c,j,r&0xFFFF); break;
-        case OP_SUB: r=a-data; mcs251_subw_flags(c,r,a,data,0);
+        case OP_SUB: r=a-data; mcs251_subw_flags(c,r,a,data,0, 2);
                      mcs251_st_wrj16(c,j,r&0xFFFF); break;
-        case OP_CMP: r=a-data; mcs251_subw_flags(c,r,a,data,0); break;
+        case OP_CMP: r=a-data; mcs251_subw_flags(c,r,a,data,0, 2); break;
         case OP_ORL: r=a|data; mcs251_logicw_flags(c,r,2);
                      mcs251_st_wrj16(c,j,r&0xFFFF); break;
         case OP_ANL: r=a&data; mcs251_logicw_flags(c,r,2);
@@ -361,7 +361,7 @@ static void regop2_generic(MCS251 *c, int op, uint8_t b1)
         if (op == OP_CMP) {
             uint32_t a = mcs251_ld_drk32(c, k);
             uint32_t r = a - data;
-            mcs251_subw_flags(c, r, a, data, 0);
+            mcs251_subw_flags(c, r, a, data, 0, 4);
         }
         break; }
     case 0x1: { /* Rm,dir8 */
@@ -390,11 +390,11 @@ static void regop2_generic(MCS251 *c, int op, uint8_t b1)
         uint16_t a = mcs251_ld_wrj16(c, j);
         uint32_t r;
         switch (op) {
-        case OP_ADD: r=a+data; mcs251_addw_flags(c,r,a,data,0);
+        case OP_ADD: r=a+data; mcs251_addw_flags(c,r,a,data,0, 2);
                      mcs251_st_wrj16(c,j,r&0xFFFF); break;
-        case OP_SUB: r=a-data; mcs251_subw_flags(c,r,a,data,0);
+        case OP_SUB: r=a-data; mcs251_subw_flags(c,r,a,data,0, 2);
                      mcs251_st_wrj16(c,j,r&0xFFFF); break;
-        case OP_CMP: r=a-data; mcs251_subw_flags(c,r,a,data,0); break;
+        case OP_CMP: r=a-data; mcs251_subw_flags(c,r,a,data,0, 2); break;
         case OP_ORL: r=a|data; mcs251_logicw_flags(c,r,2);
                      mcs251_st_wrj16(c,j,r&0xFFFF); break;
         case OP_ANL: r=a&data; mcs251_logicw_flags(c,r,2);
@@ -470,11 +470,11 @@ static void regop2_generic(MCS251 *c, int op, uint8_t b1)
         uint16_t a = mcs251_ld_wrj16(c, j);
         uint32_t r;
         switch (op) {
-        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0);
+        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0, 2);
                      mcs251_st_wrj16(c,j,r&0xFFFF); break;
-        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0);
+        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0, 2);
                      mcs251_st_wrj16(c,j,r&0xFFFF); break;
-        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0); break;
+        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0, 2); break;
         default: break;
         }
         break; }
@@ -486,11 +486,11 @@ static void regop2_generic(MCS251 *c, int op, uint8_t b1)
         uint32_t a = mcs251_ld_drk32(c, k);
         uint32_t r;
         switch (op) {
-        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0);
+        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0, 4);
                      mcs251_st_drk32(c,k,r); break;
-        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0);
+        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0, 4);
                      mcs251_st_drk32(c,k,r); break;
-        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0); break;
+        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0, 4); break;
         default: break;
         }
         break; }
@@ -502,11 +502,11 @@ static void regop2_generic(MCS251 *c, int op, uint8_t b1)
         uint32_t a = mcs251_ld_drk32(c, k);
         uint32_t r;
         switch (op) {
-        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0);
+        case OP_ADD: r=a+b; mcs251_addw_flags(c,r,a,b,0, 4);
                      mcs251_st_drk32(c,k,r); break;
-        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0);
+        case OP_SUB: r=a-b; mcs251_subw_flags(c,r,a,b,0, 4);
                      mcs251_st_drk32(c,k,r); break;
-        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0); break;
+        case OP_CMP: r=a-b; mcs251_subw_flags(c,r,a,b,0, 4); break;
         case OP_ORL: r=a|b; mcs251_logicw_flags(c,r,4);
                      mcs251_st_drk32(c,k,r); break;
         case OP_ANL: r=a&b; mcs251_logicw_flags(c,r,4);
@@ -599,7 +599,7 @@ static void inc_dec_short(MCS251 *c, int dec)
         uint32_t t = mcs251_ld_drk32(c, idx * 4);
         uint32_t res = dec ? (t - shortv) : (t + shortv);
         mcs251_st_drk32(c, idx * 4, res);
-        mcs251_logicw_flags(c, res, 4);
+        mcs251_logicw_flags(c, res, 2);
     }
 }
 
@@ -618,7 +618,7 @@ static void shift_single(MCS251 *c, int which)
         else if (which == 1) { res = a >> 1; co = a & 1; }
         else { res = (uint16_t)((int16_t)a >> 1) & 0xFFFF; co = a & 1; }
         mcs251_st_wrj16(c, j, res & 0xFFFF);
-        mcs251_shiftw_flags(c, res, co);
+        mcs251_shiftw_flags(c, res, co, 2);
     } else if (lo == 0) {
         uint8_t a = mcs251_ld_reg8(c, idx);
         uint32_t res, co;
@@ -635,7 +635,7 @@ static void shift_single(MCS251 *c, int which)
         else if (which == 1) { res = a >> 1; co = a & 1; }
         else { res = (uint32_t)((int32_t)a >> 1); co = a & 1; }
         mcs251_st_drk32(c, k, res);
-        mcs251_shiftw_flags(c, res, co);
+        mcs251_shiftw_flags(c, res, co, 4);
     }
 }
 
@@ -661,7 +661,7 @@ static void regop2_shift(MCS251 *c, uint8_t op0, int which)
         else if (which == 1) { r = a >> 1; co = a & 1; }
         else { r = (uint16_t)((int16_t)a >> 1) & 0xFFFF; co = a & 1; }
         mcs251_st_wrj16(c, j, r);
-        mcs251_shiftw_flags(c, r, co);
+        mcs251_shiftw_flags(c, r, co, 2);
     } else {                    /* 0xF: DRk */
         int k = (b1 >> 4) * 4;
         uint32_t a = mcs251_ld_drk32(c, k);
@@ -670,7 +670,7 @@ static void regop2_shift(MCS251 *c, uint8_t op0, int which)
         else if (which == 1) { r = a >> 1; co = a & 1; }
         else { r = (uint32_t)((int32_t)a >> 1); co = a & 1; }
         mcs251_st_drk32(c, k, r);
-        mcs251_shiftw_flags(c, r, co);
+        mcs251_shiftw_flags(c, r, co, 2);
     }
 }
 
